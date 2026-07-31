@@ -114,7 +114,7 @@ export function AddressBook({ addresses }: { addresses: SavedAddress[] }) {
       </div>
 
       {addresses.length === 0 && !showForm && (
-        <div className="mt-4 rounded-2xl border border-dashed border-border p-10 text-center">
+        <div className="mt-4 rounded-lg border border-dashed border-border p-10 text-center">
           <MapPin className="mx-auto h-8 w-8 text-muted-foreground" />
           <p className="mt-3 text-sm text-muted-foreground">
             No saved addresses yet. Add one to speed up checkout.
@@ -127,7 +127,7 @@ export function AddressBook({ addresses }: { addresses: SavedAddress[] }) {
           {addresses.map((a) => (
             <li
               key={a.id}
-              className="rounded-2xl border border-border bg-card p-4 text-sm"
+              className="rounded-lg border border-border bg-card p-4 text-sm"
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-center gap-2">
@@ -176,7 +176,7 @@ export function AddressBook({ addresses }: { addresses: SavedAddress[] }) {
       {showForm && (
         <form
           onSubmit={onSubmit}
-          className="mt-4 grid gap-4 rounded-2xl border border-border bg-card p-5 sm:grid-cols-2"
+          className="mt-4 grid gap-4 rounded-lg border border-border bg-card p-5 sm:grid-cols-2"
         >
           <label className="block">
             <span className="mb-1.5 block text-sm text-muted-foreground">

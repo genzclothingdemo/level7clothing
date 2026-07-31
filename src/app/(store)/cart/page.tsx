@@ -40,7 +40,7 @@ export default function CartPage() {
             <li key={item.lineId} className="flex gap-4 py-5">
               <Link
                 href={`/product/${item.slug}`}
-                className="relative h-28 w-28 shrink-0 overflow-hidden rounded-2xl bg-muted"
+                className="relative h-28 w-28 shrink-0 overflow-hidden rounded-lg bg-muted"
               >
                 {item.image && (
                   <Image
@@ -105,7 +105,7 @@ export default function CartPage() {
           ))}
         </ul>
 
-        <aside className="h-fit rounded-2xl border border-border bg-card p-6 lg:sticky lg:top-24">
+        <aside className="h-fit rounded-lg border border-border bg-card p-6 lg:sticky lg:top-24">
           <h2 className="font-serif text-xl">Order summary</h2>
           <div className="mt-4 space-y-2 text-sm">
             <div className="flex justify-between">

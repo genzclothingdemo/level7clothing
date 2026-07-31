@@ -45,7 +45,7 @@ export function MiniSignupModal() {
           />
           <div className="fixed inset-0 z-50 grid place-items-center p-4">
             <motion.div
-              className="relative w-full max-w-sm rounded-3xl border border-border bg-card p-7 shadow-2xl"
+              className="relative w-full max-w-sm rounded-lg border border-border bg-card p-7 shadow-2xl"
               initial={{ opacity: 0, scale: 0.94, y: 12 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.96, y: 8 }}
@@ -75,7 +75,7 @@ export function MiniSignupModal() {
               </div>
 
               {error && (
-                <p className="mt-5 rounded-xl bg-danger/10 px-4 py-2.5 text-sm text-danger">
+                <p className="mt-5 rounded-lg bg-danger/10 px-4 py-2.5 text-sm text-danger">
                   {error}
                 </p>
               )}

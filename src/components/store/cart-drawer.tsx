@@ -61,7 +61,7 @@ export function CartDrawer() {
                         <Link
                           href={`/product/${item.slug}`}
                           onClick={() => setOpen(false)}
-                          className="relative h-20 w-20 shrink-0 overflow-hidden rounded-xl bg-muted"
+                          className="relative h-20 w-20 shrink-0 overflow-hidden rounded-lg bg-muted"
                         >
                           {item.image && (
                             <Image

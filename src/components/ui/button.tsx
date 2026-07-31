@@ -7,24 +7,27 @@ type Size = "sm" | "md" | "lg" | "icon";
 
 const variants: Record<Variant, string> = {
   primary:
-    "bg-primary text-primary-foreground hover:opacity-90 border border-transparent",
+    "bg-primary text-primary-foreground border border-primary hover:bg-primary/85",
   outline:
-    "bg-transparent text-foreground border border-border hover:bg-muted",
+    "bg-transparent text-foreground border border-border hover:border-foreground",
   ghost: "bg-transparent text-foreground hover:bg-muted border border-transparent",
-  gold: "bg-accent text-accent-foreground hover:opacity-90 border border-transparent",
+  // `gold` is the legacy name for the brand-accent fill.
+  gold: "bg-accent text-accent-foreground border border-accent hover:bg-accent/85",
   danger:
     "bg-transparent text-danger border border-danger/40 hover:bg-danger/10",
 };
 
 const sizes: Record<Size, string> = {
-  sm: "h-9 px-3.5 text-sm",
-  md: "h-11 px-5 text-sm",
-  lg: "h-13 px-7 text-base",
+  sm: "h-9 px-4 text-[13px]",
+  md: "h-11 px-6 text-sm",
+  lg: "h-[52px] px-8 text-sm",
   icon: "h-10 w-10",
 };
 
+// Squared-off, wide-tracked and uppercase — the retail button language of
+// editorial fashion. No lift, no shine: state change only via colour.
 const base =
-  "btn-shine inline-flex items-center justify-center gap-2 rounded-full font-medium tracking-wide transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer";
+  "inline-flex items-center justify-center gap-2 rounded-lg font-medium uppercase tracking-[0.08em] transition-colors duration-200 disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer";
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: Variant;

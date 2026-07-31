@@ -265,7 +265,7 @@ export default async function ProductPage({
             <ProductPurchase product={product} />
           </div>
 
-          <div className="mt-8 grid gap-4 rounded-2xl border border-border p-5 sm:grid-cols-3">
+          <div className="mt-8 grid gap-4 rounded-lg border border-border p-5 sm:grid-cols-3">
             <Feature icon={<Shirt className="h-5 w-5" />} label="Premium quality fabric" />
             <Feature icon={<Truck className="h-5 w-5" />} label="Ships across India" />
             <Feature icon={<ShieldCheck className="h-5 w-5" />} label="Cash on delivery" />

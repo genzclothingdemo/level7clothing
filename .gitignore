@@ -46,3 +46,5 @@ PROJECT-CONTEXT.md
 
 .vercel
 .env*
+# ...but the placeholder template must travel with the repo (no real secrets in it).
+!.env.example

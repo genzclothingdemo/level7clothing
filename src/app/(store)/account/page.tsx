@@ -89,7 +89,7 @@ export default async function AccountPage() {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="font-serif text-3xl md:text-4xl">
-            Hello, {user.name.split(" ")[0]} 👋
+            Hello, {user.name.split(" ")[0]}
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Manage your profile and view your orders

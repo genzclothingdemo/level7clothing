@@ -112,7 +112,7 @@ export default async function ShopPage({
           ))}
         </div>
       ) : (
-        <div className="mt-16 rounded-2xl border border-dashed border-border p-12 text-center">
+        <div className="mt-16 rounded-lg border border-dashed border-border p-12 text-center">
           <p className="font-serif text-xl">No styles found</p>
           <p className="mt-2 text-sm text-muted-foreground">
             Try a different category or search term.

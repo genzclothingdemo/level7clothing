@@ -4,7 +4,7 @@ import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { signup } from "@/app/actions/account";
 
@@ -36,11 +36,11 @@ function SignupForm() {
   return (
     <form
       onSubmit={onSubmit}
-      className="w-full max-w-sm rounded-3xl border border-border bg-card p-8"
+      className="w-full max-w-sm rounded-lg border border-border bg-card p-8"
     >
       <div className="mb-6 text-center">
         <span className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-muted gold-text">
-          <Sparkles className="h-5 w-5" />
+          <UserPlus className="h-5 w-5" />
         </span>
         <h1 className="mt-4 font-serif text-2xl">Create your account</h1>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -49,7 +49,7 @@ function SignupForm() {
       </div>
 
       {error && (
-        <p className="mb-4 rounded-xl bg-danger/10 px-4 py-2.5 text-sm text-danger">
+        <p className="mb-4 rounded-lg bg-danger/10 px-4 py-2.5 text-sm text-danger">
           {error}
         </p>
       )}

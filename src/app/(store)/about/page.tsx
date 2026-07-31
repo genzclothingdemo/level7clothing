@@ -40,7 +40,7 @@ export default async function AboutPage() {
       </Reveal>
 
       <Reveal delay={0.1}>
-        <div className="relative mt-12 aspect-[16/9] overflow-hidden rounded-3xl bg-muted">
+        <div className="relative mt-12 aspect-[16/9] overflow-hidden rounded-lg bg-muted">
           <Image
             src={ABOUT_HERO_IMAGE}
             alt={s.brandName}
@@ -70,7 +70,7 @@ export default async function AboutPage() {
             {ABOUT_GRID_IMAGES.map((src) => (
               <div
                 key={src}
-                className="relative aspect-square overflow-hidden rounded-2xl bg-muted"
+                className="relative aspect-square overflow-hidden rounded-lg bg-muted"
               >
                 <Image
                   src={src}
@@ -92,7 +92,7 @@ export default async function AboutPage() {
           { t: "Loved across India", d: "Carefully packed and shipped nationwide." },
         ].map((v, i) => (
           <Reveal key={v.t} delay={i * 0.06}>
-            <div className="rounded-2xl border border-border bg-card p-6 text-center">
+            <div className="rounded-lg border border-border bg-card p-6 text-center">
               <h3 className="font-serif text-xl gold-text">{v.t}</h3>
               <p className="mt-2 text-sm text-muted-foreground">{v.d}</p>
             </div>

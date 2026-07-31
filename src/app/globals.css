@@ -202,26 +202,16 @@ select.input {
   animation: fadeUp 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-/* ---------------- Premium motion & visual FX ---------------- */
+/* ---------------- Motion ----------------
+   Restraint is the point: editorial retail moves slowly and only on intent.
+   Ambient looping motion (bobbing tiles, drifting glows, text shimmer) reads
+   as template decoration, so those are deliberately absent. */
 
-/* Gentle floating for hero imagery */
-@keyframes floatY {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-12px);
-  }
-}
-.animate-float {
-  animation: floatY 6s ease-in-out infinite;
-}
-.animate-float-slow {
-  animation: floatY 8s ease-in-out infinite;
-}
+/* Legacy float hooks kept as no-ops so any stray markup stays calm. */
+.animate-float,
+.animate-float-slow,
 .animate-float-delay {
-  animation: floatY 7s ease-in-out 1.2s infinite;
+  animation: none;
 }
 
 /* Infinite marquee band */
@@ -256,83 +246,61 @@ select.input {
   animation: pulseSoft 2.2s ease-in-out infinite;
 }
 
-/* Slow aurora drift for CTA backgrounds */
-@keyframes aurora {
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-  33% {
-    transform: translate(60px, -40px) scale(1.15);
-  }
-  66% {
-    transform: translate(-50px, 30px) scale(0.95);
-  }
-}
-.animate-aurora {
-  animation: aurora 14s ease-in-out infinite;
-}
+/* Aurora / shimmer / shine hooks retired — kept inert for legacy markup. */
+.animate-aurora,
 .animate-aurora-2 {
-  animation: aurora 18s ease-in-out 2s infinite reverse;
+  animation: none;
 }
 
-/* Slow shimmer sweep across gold text */
-@keyframes shimmer {
-  0% {
-    background-position: -200% center;
-  }
-  100% {
-    background-position: 200% center;
-  }
-}
+/* Was an animated gradient sweep; now simply the brand accent. */
 .text-gold-shimmer {
-  background: linear-gradient(
-    100deg,
-    var(--accent) 40%,
-    color-mix(in srgb, var(--accent) 35%, var(--foreground)) 50%,
-    var(--accent) 60%
-  );
-  background-size: 200% auto;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: shimmer 5s linear infinite;
+  color: var(--accent);
 }
 
-/* Button shine sweep on hover */
 .btn-shine {
   position: relative;
-  overflow: hidden;
-}
-.btn-shine::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: -80%;
-  height: 100%;
-  width: 50%;
-  transform: skewX(-20deg);
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.35),
-    transparent
-  );
-  transition: left 0.6s ease;
-  pointer-events: none;
-}
-.btn-shine:hover::after {
-  left: 130%;
 }
 
-/* Card hover lift */
+/* Product tiles settle rather than jump: a whisper of shadow, no translate.
+   The image's own scale on hover carries the interaction. */
 .card-lift {
-  transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: box-shadow 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .card-lift:hover {
-  transform: translateY(-6px);
-  box-shadow: 0 24px 48px -20px color-mix(in srgb, var(--foreground) 22%, transparent);
+  box-shadow: 0 18px 40px -28px color-mix(in srgb, var(--foreground) 30%, transparent);
+}
+
+/* Modal / sheet entrances */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ---------------- Editorial type utilities ---------------- */
+
+/* Small wide-tracked label that sits above section headings. */
+.eyebrow {
+  font-size: 0.6875rem;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--muted-foreground);
+}
+
+/* Large display sizes need tighter tracking to stay optically even. */
+.display-tight {
+  letter-spacing: -0.035em;
+}
+
+/* Hairline divider used between editorial sections. */
+.rule {
+  height: 1px;
+  width: 100%;
+  background: var(--border);
 }
 
 /* Elegant underline grow for nav links */
@@ -359,14 +327,16 @@ select.input {
 
 /* Respect users who prefer reduced motion */
 @media (prefers-reduced-motion: reduce) {
-  .animate-float,
-  .animate-float-slow,
-  .animate-float-delay,
   .animate-marquee,
-  .animate-aurora,
-  .animate-aurora-2,
-  .text-gold-shimmer,
-  .animate-pulse-soft {
+  .animate-pulse-soft,
+  .animate-fade-up {
     animation: none;
+  }
+  .card-lift {
+    transition: none;
+  }
+  /* Dialogs still need to appear — just without the travel. */
+  [role="dialog"] * {
+    animation-duration: 0.01ms !important;
   }
 }

@@ -90,7 +90,7 @@ export default async function OrderPage({
         </p>
       </div>
 
-      <div className="mt-10 rounded-2xl border border-border bg-card p-6">
+      <div className="mt-10 rounded-lg border border-border bg-card p-6">
         <div className="flex items-center justify-between">
           <h2 className="font-serif text-xl">Order summary</h2>
           <span className="rounded-full bg-muted px-3 py-1 text-xs capitalize text-muted-foreground">
@@ -135,7 +135,7 @@ export default async function OrderPage({
           )}
         </div>
 
-        <div className="mt-6 rounded-xl bg-muted p-4 text-sm">
+        <div className="mt-6 rounded-lg bg-muted p-4 text-sm">
           <p className="font-medium">{order.customerName}</p>
           <p className="mt-1 text-muted-foreground">
             {order.address}, {order.city}, {order.state} - {order.pincode}
@@ -144,7 +144,7 @@ export default async function OrderPage({
         </div>
       </div>
 
-      <div className="mt-6 rounded-2xl border border-border bg-card p-6">
+      <div className="mt-6 rounded-lg border border-border bg-card p-6">
         <h2 className="font-serif text-xl">Order status</h2>
         <div className="mt-5">
           <OrderTimeline
@@ -168,7 +168,7 @@ export default async function OrderPage({
           href={waHref}
           target="_blank"
           rel="noreferrer"
-          className="mt-6 flex items-center justify-center gap-2 rounded-2xl bg-[#25D366] px-5 py-3.5 text-sm font-medium text-white transition-opacity hover:opacity-90"
+          className="mt-6 flex items-center justify-center gap-2 rounded-lg bg-[#25D366] px-5 py-3.5 text-sm font-medium text-white transition-opacity hover:opacity-90"
         >
           <MessageCircle className="h-5 w-5" />
           Send order details to us on WhatsApp

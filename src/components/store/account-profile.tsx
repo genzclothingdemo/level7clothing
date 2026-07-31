@@ -57,7 +57,7 @@ export function AccountProfile({
   const addressLine = [address, city, state, pincode].filter(Boolean).join(", ");
 
   return (
-    <div className="rounded-2xl border border-border bg-card p-6">
+    <div className="rounded-lg border border-border bg-card p-6">
       <div className="flex items-center justify-between">
         <h2 className="font-serif text-xl">Profile</h2>
         {!editing && (

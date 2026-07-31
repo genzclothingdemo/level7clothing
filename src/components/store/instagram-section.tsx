@@ -58,7 +58,7 @@ export function InstagramSection() {
             href={s.instagram || "https://instagram.com"}
             target="_blank"
             rel="noreferrer"
-            className="group relative block aspect-square overflow-hidden rounded-xl bg-muted"
+            className="group relative block aspect-square overflow-hidden rounded-lg bg-muted"
             aria-label={`View post ${i + 1} on Instagram`}
           >
             <Image

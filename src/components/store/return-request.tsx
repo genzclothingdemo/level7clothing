@@ -45,7 +45,7 @@ export function ReturnRequest({
 
   if (existing) {
     return (
-      <div className="mt-4 rounded-xl border border-border p-4 text-sm">
+      <div className="mt-4 rounded-lg border border-border p-4 text-sm">
         <p className="font-medium capitalize">
           {existing.kind} request · {existing.status}
         </p>
@@ -94,7 +94,7 @@ export function ReturnRequest({
       ) : (
         <form
           onSubmit={onSubmit}
-          className="space-y-3 rounded-xl border border-border p-4"
+          className="space-y-3 rounded-lg border border-border p-4"
         >
           <div className="flex gap-2">
             {(["return", "exchange"] as const).map((k) => (

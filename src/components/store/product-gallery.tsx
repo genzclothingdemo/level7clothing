@@ -103,7 +103,7 @@ export function ProductGallery({
     <>
       <div className="relative">
         {/* ── MAIN PHOTO — true 1:1 at every width, never cropped ── */}
-        <div className="group relative aspect-square w-full overflow-hidden rounded-2xl bg-muted ring-1 ring-border/70">
+        <div className="group relative aspect-[4/5] w-full overflow-hidden rounded-lg bg-muted ring-1 ring-border/70">
           <AnimatePresence initial={false} mode="popLayout">
             <motion.div
               key={activeUrl || "empty"}
@@ -239,7 +239,7 @@ export function ProductGallery({
                     aria-label={`View photo ${i + 1}`}
                     aria-pressed={isActive}
                     className={cn(
-                      "relative aspect-square h-14 w-14 shrink-0 overflow-hidden rounded-xl md:h-16 md:w-16",
+                      "relative aspect-[4/5] h-16 w-[52px] shrink-0 overflow-hidden rounded-md md:h-20 md:w-16",
                       "cursor-pointer transition-all duration-200",
                       isActive
                         ? "ring-2 ring-accent ring-offset-1 ring-offset-background"

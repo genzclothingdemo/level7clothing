@@ -45,7 +45,9 @@ model Product {
   lengthCm          Int?
   breadthCm         Int?
   heightCm          Int?
-  shippingType      String   @default("nimbus") // "free", "fixed", "nimbus"
+  // Free shipping is the house default; switch a product to "fixed" or
+  // "nimbus" (live courier rate) only when it needs to be charged for.
+  shippingType      String   @default("free") // "free", "fixed", "nimbus"
   shippingFee       Int      @default(0)
   shippingMarkup    Int      @default(0)
   isFeatured        Boolean  @default(false)

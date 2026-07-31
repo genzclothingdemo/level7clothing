@@ -122,16 +122,19 @@ export async function getFeatured(limit = 4): Promise<ProductDTO[]> {
   }
 }
 
+/**
+ * Look up a single product.
+ *
+ * Deliberately does NOT swallow database errors: callers turn `null` into a
+ * 404, so returning null on a transient connection failure would tell search
+ * engines a live product had been deleted. A thrown error surfaces as a 500
+ * instead, which is both accurate and retried rather than deindexed.
+ */
 export async function getProductBySlug(
   slug: string
 ): Promise<ProductDTO | null> {
-  try {
-    const product = await prisma.product.findUnique({ where: { slug } });
-    return product ? toDTO(product) : null;
-  } catch (err) {
-    console.error("[products] getProductBySlug failed:", err);
-    return null;
-  }
+  const product = await prisma.product.findUnique({ where: { slug } });
+  return product ? toDTO(product) : null;
 }
 
 /** Fetch active products for a set of slugs, preserving the given slug order. */

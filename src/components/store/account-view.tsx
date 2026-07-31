@@ -37,7 +37,7 @@ export function AccountView({
           type="button"
           onClick={() => setActiveTab("profile")}
           className={cn(
-            "flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap cursor-pointer",
+            "flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap cursor-pointer",
             activeTab === "profile"
               ? "bg-accent/15 text-accent shadow-sm"
               : "text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -52,7 +52,7 @@ export function AccountView({
           type="button"
           onClick={() => setActiveTab("orders")}
           className={cn(
-            "flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap cursor-pointer",
+            "flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap cursor-pointer",
             activeTab === "orders"
               ? "bg-accent/15 text-accent shadow-sm"
               : "text-muted-foreground hover:bg-muted hover:text-foreground"

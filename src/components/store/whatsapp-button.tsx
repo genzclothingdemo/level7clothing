@@ -26,12 +26,11 @@ export function WhatsAppButton() {
       target="_blank"
       rel="noreferrer"
       aria-label="Chat on WhatsApp"
-      className="group fixed bottom-5 right-5 z-30 grid h-14 w-14 place-items-center rounded-full bg-[#25D366] text-white shadow-lg shadow-black/20 transition-transform hover:scale-110"
+      className="group fixed bottom-5 right-5 z-30 grid h-13 w-13 place-items-center rounded-full bg-[#25D366] text-white shadow-lg shadow-black/15 transition-colors hover:bg-[#1FB855]"
     >
-      {/* Attention ping ring */}
-      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#25D366] opacity-20 [animation-duration:2.5s]" />
-      <WhatsAppIcon className="relative h-7 w-7" />
-      <span className="pointer-events-none absolute right-16 whitespace-nowrap rounded-full bg-card px-3 py-1.5 text-xs font-medium text-foreground opacity-0 shadow-lg transition-all duration-300 group-hover:right-[4.25rem] group-hover:opacity-100">
+      {/* No perpetual ping ring — the label on hover is enough of an invitation. */}
+      <WhatsAppIcon className="relative h-6 w-6" />
+      <span className="pointer-events-none absolute right-15 whitespace-nowrap rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground opacity-0 shadow-lg transition-opacity duration-300 group-hover:opacity-100">
         Chat with us
       </span>
     </a>

@@ -101,7 +101,7 @@ export function ProductReviews({
       {showForm && (
         <form
           onSubmit={onSubmit}
-          className="mt-6 grid gap-4 rounded-2xl border border-border bg-card p-5 sm:grid-cols-2"
+          className="mt-6 grid gap-4 rounded-lg border border-border bg-card p-5 sm:grid-cols-2"
         >
           <label className="block">
             <span className="mb-1.5 block text-sm text-muted-foreground">Your name *</span>
@@ -188,7 +188,7 @@ export function ProductReviews({
           {reviews.map((r) => (
             <li
               key={r.id}
-              className="rounded-2xl border border-border bg-card p-5"
+              className="rounded-lg border border-border bg-card p-5"
             >
               <div className="flex items-center justify-between gap-3">
                 <Stars rating={r.rating} />

@@ -34,6 +34,34 @@ type SeedProduct = {
   }[];
 };
 
+/**
+ * Parcel spec per garment type, for a folded item in a poly mailer.
+ *
+ * Indian couriers bill on max(dead weight, volumetric weight), where
+ * volumetric kg = (L × B × H) / 5000. These numbers are chosen so the billable
+ * weight lands just inside a standard courier slab:
+ *
+ *   Tee    — dead 300 g, volumetric (30×24×3)/5000 = 432 g  → ~0.5 kg slab
+ *   Hoodie — dead 750 g, volumetric (33×26×6)/5000 = 1030 g → ~1.0 kg slab
+ *
+ * Shipping is free to the customer, but these still matter: they're what gets
+ * sent to the courier when generating an AWB, and they drive the merchant's
+ * own cost visibility.
+ */
+type Parcel = {
+  weightGrams: number;
+  lengthCm: number;
+  breadthCm: number;
+  heightCm: number;
+};
+
+const TEE_PARCEL: Parcel = { weightGrams: 300, lengthCm: 30, breadthCm: 24, heightCm: 3 };
+const HOODIE_PARCEL: Parcel = { weightGrams: 750, lengthCm: 33, breadthCm: 26, heightCm: 6 };
+
+function parcelFor(category: string): Parcel {
+  return /hoodie/i.test(category) ? HOODIE_PARCEL : TEE_PARCEL;
+}
+
 const products: SeedProduct[] = [
   {
     name: "LEVEL7 Field Unisex Oversized T-Shirt",
@@ -612,6 +640,11 @@ async function main() {
         stock: p.stock,
         isFeatured: p.isFeatured ?? false,
         isActive: p.isActive ?? true,
+        // Free shipping on everything; parcel dims derived from garment type.
+        shippingType: "free",
+        shippingFee: 0,
+        shippingMarkup: 0,
+        ...parcelFor(p.category),
       },
     });
   }

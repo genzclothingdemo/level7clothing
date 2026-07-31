@@ -39,7 +39,7 @@ function ResetForm() {
   return (
     <form
       onSubmit={onSubmit}
-      className="w-full max-w-sm rounded-3xl border border-border bg-card p-8"
+      className="w-full max-w-sm rounded-lg border border-border bg-card p-8"
     >
       <div className="mb-6 text-center">
         <span className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-muted gold-text">
@@ -52,7 +52,7 @@ function ResetForm() {
       </div>
 
       {!token && (
-        <p className="mb-4 rounded-xl bg-danger/10 px-4 py-2.5 text-sm text-danger">
+        <p className="mb-4 rounded-lg bg-danger/10 px-4 py-2.5 text-sm text-danger">
           This reset link is missing its token. Please use the link from your
           email, or{" "}
           <Link href="/account/forgot" className="underline">
@@ -62,7 +62,7 @@ function ResetForm() {
         </p>
       )}
       {error && (
-        <p className="mb-4 rounded-xl bg-danger/10 px-4 py-2.5 text-sm text-danger">
+        <p className="mb-4 rounded-lg bg-danger/10 px-4 py-2.5 text-sm text-danger">
           {error}
         </p>
       )}

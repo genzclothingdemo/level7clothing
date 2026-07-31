@@ -456,7 +456,7 @@ export function CheckoutClient({
                           pincode: a.pincode,
                         }))
                       }
-                      className={`rounded-2xl border p-4 text-left text-sm transition-colors ${
+                      className={`rounded-lg border p-4 text-left text-sm transition-colors ${
                         selected
                           ? "border-accent bg-accent/10"
                           : "border-border hover:border-foreground/40"
@@ -568,7 +568,7 @@ export function CheckoutClient({
           <section>
             <h2 className="font-serif text-xl">Payment</h2>
             {!ctx ? (
-              <div className="mt-4 flex items-center gap-2 rounded-2xl border border-border p-4 text-sm text-muted-foreground">
+              <div className="mt-4 flex items-center gap-2 rounded-lg border border-border p-4 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" /> Loading payment
                 options…
               </div>
@@ -579,7 +579,7 @@ export function CheckoutClient({
                   return (
                     <label
                       key={m}
-                      className={`flex items-center gap-3 rounded-2xl border p-4 cursor-pointer transition-colors ${
+                      className={`flex items-center gap-3 rounded-lg border p-4 cursor-pointer transition-colors ${
                         method === m
                           ? "border-foreground bg-muted/40"
                           : "border-border"
@@ -607,14 +607,14 @@ export function CheckoutClient({
           </section>
         </div>
 
-        <aside className="h-fit rounded-2xl border border-border bg-card p-6 lg:sticky lg:top-24">
+        <aside className="h-fit rounded-lg border border-border bg-card p-6 lg:sticky lg:top-24">
           <h2 className="font-serif text-xl">Your order</h2>
           <ul className="mt-4 space-y-3">
             {items.map((i) => (
               // Key on lineId, not productId — the same style in two sizes is
               // two distinct lines and productId would collide.
               <li key={i.lineId} className="flex gap-3">
-                <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-xl bg-muted">
+                <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-lg bg-muted">
                   {i.image && (
                     <Image
                       src={i.image}
@@ -710,7 +710,7 @@ export function CheckoutClient({
 
             {/* Payment split — shown for partial (advance) and any COD balance. */}
             {method === "partial" && (
-              <div className="mt-1 space-y-1 rounded-xl bg-muted/50 p-3 text-xs">
+              <div className="mt-1 space-y-1 rounded-lg bg-muted/50 p-3 text-xs">
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Pay now (advance)</span>
                   <span className="font-medium">{formatINR(advance)}</span>

@@ -90,7 +90,7 @@ export function WhatsAppProductButton({
       type="button"
       onClick={open}
       className={cn(
-        "btn-shine inline-flex h-13 w-full cursor-pointer items-center justify-center gap-2 rounded-full bg-[#25D366] px-7 text-base font-medium text-white transition-all duration-200 hover:-translate-y-0.5 hover:opacity-95",
+        "inline-flex h-[52px] w-full cursor-pointer items-center justify-center gap-2 rounded-lg bg-[#25D366] px-8 text-sm font-medium uppercase tracking-[0.08em] text-white transition-colors duration-200 hover:bg-[#1FB855]",
         className
       )}
     >

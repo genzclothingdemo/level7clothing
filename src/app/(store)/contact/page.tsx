@@ -75,7 +75,7 @@ export default function ContactPage() {
         </div>
 
         {/* Form */}
-        <div className="rounded-3xl border border-border bg-card p-6 md:p-8">
+        <div className="rounded-lg border border-border bg-card p-6 md:p-8">
           {done ? (
             <div className="flex flex-col items-center py-12 text-center">
               <CheckCircle2 className="h-12 w-12 text-success" />
@@ -182,7 +182,7 @@ function InfoCard({
   href?: string;
 }) {
   const inner = (
-    <div className="flex items-start gap-4 rounded-2xl border border-border bg-card p-5 transition-colors hover:border-accent">
+    <div className="flex items-start gap-4 rounded-lg border border-border bg-card p-5 transition-colors hover:border-accent">
       <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-muted gold-text">
         {icon}
       </span>

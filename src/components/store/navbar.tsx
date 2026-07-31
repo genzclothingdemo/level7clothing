@@ -107,7 +107,7 @@ function NavDropdown({
       {open && (
         <div
           className={cn(
-            "absolute top-full z-50 mt-3 min-w-[240px] rounded-2xl border border-border bg-card p-2 shadow-xl",
+            "absolute top-full z-50 mt-3 min-w-[240px] rounded-lg border border-border bg-card p-2 shadow-xl",
             align === "right" ? "right-0" : "left-0"
           )}
         >
@@ -116,7 +116,7 @@ function NavDropdown({
               key={item.href}
               href={item.href}
               onClick={() => setOpen(false)}
-              className="block rounded-xl px-3 py-2.5 text-sm text-foreground/90 hover:bg-muted hover:text-accent"
+              className="block rounded-lg px-3 py-2.5 text-sm text-foreground/90 hover:bg-muted hover:text-accent"
             >
               {item.label}
             </Link>
@@ -490,7 +490,7 @@ function MobileNavLink({
   return (
     <Link
       href={href}
-      className="rounded-xl px-3 py-2.5 text-sm text-foreground/90 hover:bg-muted hover:text-accent"
+      className="rounded-lg px-3 py-2.5 text-sm text-foreground/90 hover:bg-muted hover:text-accent"
     >
       {children}
     </Link>

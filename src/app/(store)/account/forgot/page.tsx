@@ -27,7 +27,7 @@ export default function ForgotPasswordPage() {
 
   return (
     <div className="container-px mx-auto flex min-h-[70vh] items-center justify-center py-16">
-      <div className="w-full max-w-sm rounded-3xl border border-border bg-card p-8">
+      <div className="w-full max-w-sm rounded-lg border border-border bg-card p-8">
         {done ? (
           <div className="text-center">
             <span className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-success/10 text-success">
@@ -55,7 +55,7 @@ export default function ForgotPasswordPage() {
             </div>
 
             {message && (
-              <p className="mb-4 rounded-xl bg-danger/10 px-4 py-2.5 text-sm text-danger">
+              <p className="mb-4 rounded-lg bg-danger/10 px-4 py-2.5 text-sm text-danger">
                 {message}
               </p>
             )}

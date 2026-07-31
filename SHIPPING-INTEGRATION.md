@@ -1,4 +1,4 @@
-# Shipping & Payments Integration Guide (Artvelle)
+# Shipping & Payments Integration Guide (Level7 Clothing)
 
 This guide explains how **online payments (Razorpay)** and **delivery (NimbusPost)**
 work in the store, and the exact steps to switch them on — locally and on the live
@@ -153,7 +153,7 @@ live badge on the order's "Shipped" step (in the customer's account and on the o
 1. Make sure `NIMBUSPOST_WEBHOOK_SECRET` is set (already in your env).
 2. In the NimbusPost dashboard → **Settings → Webhook**, set the URL to:
    ```
-   https://YOUR-DOMAIN/api/webhooks/nimbuspost?secret=artvelle-nimbus-wh-secret-2024
+   https://YOUR-DOMAIN/api/webhooks/nimbuspost?secret=level7clothing-nimbus-wh-secret-2024
    ```
    (Replace the domain with your live site. The `?secret=` must match
    `NIMBUSPOST_WEBHOOK_SECRET`.)

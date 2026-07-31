@@ -337,7 +337,7 @@ export function ProductForm({ product, categories }: Props) {
               value={form.name}
               onChange={(e) => set("name", e.target.value)}
               className="input"
-              placeholder="Ocean Wave Resin Coaster Set"
+              placeholder="LEVEL7 Core Unisex Oversized Hoodie"
             />
           </label>
           <label className="block">

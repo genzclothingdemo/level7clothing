@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ChevronDown, Package, ExternalLink } from "lucide-react";
 import { formatINR } from "@/lib/utils";
 import { OrderTimeline, type StatusEntry } from "./order-timeline";
+import { ReturnRequest, type ExistingRequest } from "./return-request";
 
 export type AccountOrder = {
   id: string;
@@ -28,6 +29,7 @@ export type AccountOrder = {
     options?: { name: string; value: string }[];
   }[];
   statusHistory: StatusEntry[];
+  returnRequest?: ExistingRequest | null;
   address: string;
   city: string;
   state: string;
@@ -206,6 +208,12 @@ export function AccountOrders({ orders }: { orders: AccountOrder[] }) {
                         {o.paymentStatus === "paid" ? " · Paid" : ""}
                       </p>
                     </div>
+
+                    <ReturnRequest
+                      orderId={o.id}
+                      orderStatus={o.status}
+                      existing={o.returnRequest}
+                    />
                   </div>
                 </div>
               </div>

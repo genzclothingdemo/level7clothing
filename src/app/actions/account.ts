@@ -18,7 +18,7 @@ import {
 // Mirror the shopper's name/phone into a readable cookie so the add-to-cart
 // mini sign-up never prompts a logged-in customer. Not httpOnly on purpose —
 // it's convenience data, not a credential.
-const LEAD_COOKIE = "artvelle_lead";
+const LEAD_COOKIE = "level7_lead";
 async function setLeadCookie(name: string, phone: string) {
   const store = await cookies();
   store.set(LEAD_COOKIE, JSON.stringify({ name, phone }), {

@@ -17,17 +17,39 @@ export default async function CheckoutPage() {
 
   if (!user) redirect("/account/login?next=/checkout");
 
+  const addresses = await prisma.address
+    .findMany({
+      where: { userId: user.id },
+      orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+    })
+    .catch(() => []);
+
+  const defaultAddress = addresses.find((a) => a.isDefault) ?? addresses[0];
+
   return (
     <CheckoutClient
       user={{
-        name: user.name,
+        // Prefill from the default saved address when there is one, otherwise
+        // fall back to the legacy single address on the user record.
+        name: defaultAddress?.fullName ?? user.name,
         email: user.email,
-        phone: user.phone,
-        address: user.address,
-        city: user.city,
-        state: user.state,
-        pincode: user.pincode,
+        phone: defaultAddress?.phone ?? user.phone,
+        address: defaultAddress?.address ?? user.address,
+        city: defaultAddress?.city ?? user.city,
+        state: defaultAddress?.state ?? user.state,
+        pincode: defaultAddress?.pincode ?? user.pincode,
       }}
+      savedAddresses={addresses.map((a) => ({
+        id: a.id,
+        label: a.label,
+        fullName: a.fullName,
+        phone: a.phone,
+        address: a.address,
+        city: a.city,
+        state: a.state,
+        pincode: a.pincode,
+        isDefault: a.isDefault,
+      }))}
     />
   );
 }

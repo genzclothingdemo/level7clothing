@@ -39,7 +39,7 @@ export function OrderTimeline({
         {note && (
           <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs">
             <p className="font-medium text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-              <MessageSquare className="h-3.5 w-3.5" /> Note from Artvelle:
+              <MessageSquare className="h-3.5 w-3.5" /> Note from Level7 Clothing:
             </p>
             <p className="mt-1 text-foreground/80">{note}</p>
           </div>
@@ -68,7 +68,7 @@ export function OrderTimeline({
         {note && (
           <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs">
             <p className="font-medium text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-              <MessageSquare className="h-3.5 w-3.5" /> Note from Artvelle:
+              <MessageSquare className="h-3.5 w-3.5" /> Note from Level7 Clothing:
             </p>
             <p className="mt-1 text-foreground/80">{note}</p>
           </div>
@@ -151,7 +151,7 @@ export function OrderTimeline({
       {note && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs">
           <p className="font-medium text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-            <MessageSquare className="h-3.5 w-3.5" /> Note from Artvelle:
+            <MessageSquare className="h-3.5 w-3.5" /> Note from Level7 Clothing:
           </p>
           <p className="mt-1 text-foreground/90 leading-relaxed">{note}</p>
         </div>

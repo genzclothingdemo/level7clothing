@@ -7,6 +7,8 @@ import { useCart } from "@/context/cart";
 import { useProductView } from "@/context/product-view";
 import { Button } from "@/components/ui/button";
 import { WhatsAppProductButton } from "@/components/store/product-actions";
+import { SizeGuideModal } from "@/components/store/size-guide-modal";
+import { WishlistButton } from "@/components/store/wishlist-button";
 import { formatINR } from "@/lib/utils";
 import {
   normalizeVariants,
@@ -97,12 +99,17 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
       {/* Options — checkbox-style boxes */}
       {product.options.map((group) => (
         <div key={group.name}>
-          <p className="mb-2 text-sm font-medium">
-            {group.name}
-            <span className="ml-2 font-normal text-muted-foreground">
-              {selection[group.name] ?? "Any"}
-            </span>
-          </p>
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-sm font-medium">
+              {group.name}
+              <span className="ml-2 font-normal text-muted-foreground">
+                {selection[group.name] ?? "Any"}
+              </span>
+            </p>
+            {/^size$/i.test(group.name) && (
+              <SizeGuideModal category={product.category} />
+            )}
+          </div>
           <div className="flex flex-wrap gap-2">
             {group.choices.map((choice) => {
               const isActive = selection[group.name] === choice.label;
@@ -239,6 +246,12 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
               )}
               Buy now · {formatINR(unitPrice * qty)}
             </Button>
+            <WishlistButton
+              slug={product.slug}
+              name={product.name}
+              variant="inline"
+              className="shrink-0"
+            />
             <WhatsAppProductButton
               product={product}
               variant="compact"

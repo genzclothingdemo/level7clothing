@@ -119,7 +119,7 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
               </label>
               <input
                 type="text"
-                placeholder="e.g. Luxury Coasters"
+                placeholder="e.g. Premium Hoodies"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 className="input h-10"
@@ -132,7 +132,7 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
               </label>
               <input
                 type="text"
-                placeholder="/products/gallery/..."
+                placeholder="/products/level7/..."
                 value={newImageUrl}
                 onChange={(e) => setNewImageUrl(e.target.value)}
                 className="input h-10"
@@ -275,7 +275,7 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
               value={editImageUrl}
               onChange={(e) => setEditImageUrl(e.target.value)}
               className="input h-10"
-              placeholder="/products/gallery/..."
+              placeholder="/products/level7/..."
             />
           </div>
           <div className="flex justify-end">

@@ -17,7 +17,7 @@ export function WhatsAppButton() {
   if (!number) return null;
 
   const message = encodeURIComponent(
-    `Hi ${s.brandName}, I'd love to know more about your resin art pieces.`
+    `Hi ${s.brandName}, I'd love to know more about your tees and hoodies.`
   );
 
   return (

@@ -35,7 +35,7 @@ export function WhatsAppProductButton({
     const link = `${window.location.origin}/product/${product.slug}`;
     const optLines = (options ?? []).map((o) => `${o.name}: ${o.value}`);
     const msg = [
-      `Hi ${settings.brandName}! I'm interested in this piece:`,
+      `Hi ${settings.brandName}! I'm interested in this:`,
       ``,
       `✨ *${product.name}*`,
       ...optLines,
@@ -95,7 +95,7 @@ export function WhatsAppProductButton({
       )}
     >
       <WhatsAppIcon className="h-5 w-5" />
-      Ask about this piece on WhatsApp
+      Ask about this on WhatsApp
     </button>
   );
 }

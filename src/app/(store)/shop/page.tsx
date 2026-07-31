@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import type { Metadata } from "next";
 import { getProducts, type ShopQuery } from "@/lib/products";
 import { ProductCard } from "@/components/store/product-card";
 import { Reveal } from "@/components/store/reveal";
@@ -7,9 +8,67 @@ import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
-export const metadata = { title: "Shop" };
-
 type SP = Promise<{ category?: string; q?: string; sort?: string }>;
+
+/**
+ * Category-aware metadata so each collection URL gets its own title, description
+ * and canonical instead of every filter sharing one generic "Shop" page.
+ * Search result pages are left noindex — they're thin/duplicate by nature.
+ */
+export async function generateMetadata({
+  searchParams,
+}: {
+  searchParams: SP;
+}): Promise<Metadata> {
+  const sp = await searchParams;
+  const category = sp.category?.trim();
+  const q = sp.q?.trim();
+
+  if (q) {
+    return {
+      title: `Search: ${q}`,
+      description: `Search results for “${q}” at Level7 Clothing.`,
+      robots: { index: false, follow: true },
+    };
+  }
+
+  if (category) {
+    return {
+      title: category,
+      description: `Shop ${category.toLowerCase()} at Level7 Clothing — premium heavyweight cotton, unisex sizing S–2XL, cash on delivery and fast shipping across India.`,
+      keywords: [
+        category,
+        `buy ${category.toLowerCase()} online India`,
+        "unisex oversized fit",
+        "premium cotton streetwear",
+        "Level7 Clothing",
+      ],
+      alternates: {
+        canonical: `/shop?category=${encodeURIComponent(category)}`,
+      },
+      openGraph: {
+        title: `${category} · Level7 Clothing`,
+        description: `Shop ${category.toLowerCase()} — premium heavyweight cotton, unisex oversized fits.`,
+        type: "website",
+      },
+    };
+  }
+
+  return {
+    title: "Shop all",
+    description:
+      "Shop premium oversized t-shirts and drop-shoulder hoodies from Level7 Clothing. Unisex sizing S–2XL, heavyweight cotton, cash on delivery across India.",
+    keywords: [
+      "oversized t-shirts India",
+      "graphic tees online",
+      "drop-shoulder hoodies",
+      "unisex streetwear",
+      "premium cotton t-shirts",
+      "Level7 Clothing",
+    ],
+    alternates: { canonical: "/shop" },
+  };
+}
 
 export default async function ShopPage({
   searchParams,
@@ -54,7 +113,7 @@ export default async function ShopPage({
         </div>
       ) : (
         <div className="mt-16 rounded-2xl border border-dashed border-border p-12 text-center">
-          <p className="font-serif text-xl">No pieces found</p>
+          <p className="font-serif text-xl">No styles found</p>
           <p className="mt-2 text-sm text-muted-foreground">
             Try a different category or search term.
           </p>

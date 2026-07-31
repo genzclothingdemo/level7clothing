@@ -4,12 +4,12 @@ import bcrypt from "bcryptjs";
 import { cookies } from "next/headers";
 import { prisma } from "./prisma";
 
-export const ADMIN_COOKIE = "artvelle_admin";
+export const ADMIN_COOKIE = "level7_admin";
 
 const SECRET =
   process.env.AUTH_SECRET ||
   process.env.JWT_SECRET ||
-  "artvelle-dev-secret-change-me";
+  "level7-dev-secret-change-me";
 
 export type AdminSession = { id: string; email: string; name?: string };
 

@@ -4,40 +4,44 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ---------------- Design tokens ---------------- */
+/* Streetwear palette: crisp monochrome base so product photography carries the
+   colour, plus one electric violet accent (reads GenZ / "Level 7" without the
+   artisan-gold connotation). Accent is mid-dark on purpose so it passes AA both
+   as text on light surfaces and as a fill behind white text. */
 :root {
-  --background: #faf9f6; /* warm cream */
-  --foreground: #1a1a18; /* near black */
+  --background: #fafafa; /* clean off-white */
+  --foreground: #0a0a0a; /* ink */
   --card: #ffffff;
-  --card-foreground: #1a1a18;
-  --muted: #f1efea;
-  --muted-foreground: #6b6862;
-  --border: #e7e4dd;
-  --input: #e7e4dd;
-  --ring: #b08d4c;
-  --primary: #1a1a18; /* near-black buttons */
-  --primary-foreground: #faf9f6;
-  --accent: #b08d4c; /* refined gold */
+  --card-foreground: #0a0a0a;
+  --muted: #f4f4f5;
+  --muted-foreground: #71717a;
+  --border: #e4e4e7;
+  --input: #e4e4e7;
+  --ring: #7c3aed;
+  --primary: #0a0a0a; /* ink buttons */
+  --primary-foreground: #ffffff;
+  --accent: #7c3aed; /* electric violet */
   --accent-foreground: #ffffff;
-  --success: #2f7d5b;
-  --danger: #b4442f;
+  --success: #15803d;
+  --danger: #dc2626;
 }
 
 .dark {
-  --background: #100f0d;
-  --foreground: #f2f0eb;
-  --card: #1a1815;
-  --card-foreground: #f2f0eb;
-  --muted: #201e1a;
-  --muted-foreground: #a6a29a;
-  --border: #2c2924;
-  --input: #2c2924;
-  --ring: #c6a15b;
-  --primary: #f2f0eb; /* light buttons on dark */
-  --primary-foreground: #16140f;
-  --accent: #c6a15b; /* brighter gold on dark */
-  --accent-foreground: #16140f;
-  --success: #4caf82;
-  --danger: #e06a54;
+  --background: #09090b;
+  --foreground: #fafafa;
+  --card: #131316;
+  --card-foreground: #fafafa;
+  --muted: #1c1c20;
+  --muted-foreground: #a1a1aa;
+  --border: #27272b;
+  --input: #27272b;
+  --ring: #a78bfa;
+  --primary: #fafafa; /* light buttons on dark */
+  --primary-foreground: #09090b;
+  --accent: #a78bfa; /* lifted violet for contrast on dark */
+  --accent-foreground: #1a1030;
+  --success: #4ade80;
+  --danger: #f87171;
 }
 
 /* Map tokens to Tailwind color utilities (bg-background, text-muted-foreground, …) */
@@ -59,9 +63,12 @@
   --color-danger: var(--danger);
 
   --font-sans: var(--font-inter), system-ui, sans-serif;
-  --font-serif: var(--font-playfair), Georgia, serif;
+  /* `--font-serif` is kept as the token name so existing `font-serif` markup
+     keeps working — it now resolves to the grotesk display face, not a serif. */
+  --font-serif: var(--font-grotesk), system-ui, sans-serif;
+  --font-display: var(--font-grotesk), system-ui, sans-serif;
 
-  --radius: 0.75rem;
+  --radius: 0.625rem;
 }
 
 /* ---------------- Base ---------------- */
@@ -100,8 +107,13 @@ body {
 }
 
 /* ---------------- Reusable classes ---------------- */
-.font-serif {
-  font-family: var(--font-serif);
+/* Display type: semibold grotesk with tightened tracking — the streetwear
+   headline look. `.font-serif` is retained as an alias for existing markup. */
+.font-serif,
+.font-display {
+  font-family: var(--font-grotesk), system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.025em;
 }
 
 .container-px {
@@ -144,7 +156,7 @@ body {
 .input {
   width: 100%;
   height: 2.75rem;
-  border-radius: 0.75rem;
+  border-radius: 0.625rem;
   border: 1px solid var(--input);
   background: var(--card);
   padding: 0 0.875rem;
@@ -277,7 +289,7 @@ select.input {
   background: linear-gradient(
     100deg,
     var(--accent) 40%,
-    #f4e3bf 50%,
+    color-mix(in srgb, var(--accent) 35%, var(--foreground)) 50%,
     var(--accent) 60%
   );
   background-size: 200% auto;

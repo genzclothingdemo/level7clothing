@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Mail, Phone, MapPin } from "lucide-react";
 import { useSettings } from "@/context/settings";
+import { NewsletterForm } from "@/components/store/newsletter-form";
 
 function Instagram({ className }: { className?: string }) {
   return (
@@ -28,8 +29,21 @@ export function Footer() {
 
   return (
     <footer className="mt-24 border-t border-border bg-card">
+      {/* Newsletter band */}
+      <div className="border-b border-border">
+        <div className="container-px mx-auto flex max-w-7xl flex-col gap-5 py-10 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h3 className="font-serif text-2xl">Join the club</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Exclusive deals and early access to new products.
+            </p>
+          </div>
+          <NewsletterForm className="w-full md:max-w-md" />
+        </div>
+      </div>
+
       <div className="container-px mx-auto max-w-7xl py-14">
-        <div className="grid gap-10 md:grid-cols-4">
+        <div className="grid gap-10 md:grid-cols-5">
           <div className="md:col-span-2">
             <span className="font-serif text-2xl">{s.brandName}</span>
             <p className="mt-3 max-w-sm text-sm leading-relaxed text-muted-foreground">
@@ -86,6 +100,44 @@ export function Footer() {
                   My account &amp; orders
                 </Link>
               </li>
+              <li>
+                <Link href="/wishlist" className="hover:text-accent">
+                  My wishlist
+                </Link>
+              </li>
+              <li>
+                <Link href="/track-order" className="hover:text-accent">
+                  Track order
+                </Link>
+              </li>
+            </ul>
+          </div>
+
+          <div>
+            <h4 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
+              Help
+            </h4>
+            <ul className="mt-4 space-y-2 text-sm">
+              <li>
+                <Link href="/faq" className="hover:text-accent">
+                  FAQ
+                </Link>
+              </li>
+              <li>
+                <Link href="/shipping-returns" className="hover:text-accent">
+                  Shipping &amp; returns
+                </Link>
+              </li>
+              <li>
+                <Link href="/privacy-policy" className="hover:text-accent">
+                  Privacy policy
+                </Link>
+              </li>
+              <li>
+                <Link href="/terms" className="hover:text-accent">
+                  Terms &amp; conditions
+                </Link>
+              </li>
             </ul>
           </div>
 
@@ -123,7 +175,7 @@ export function Footer() {
           <p>
             © {year} {s.brandName}. All rights reserved.
           </p>
-          <p>Handmade with care · COD available</p>
+          <p>Premium quality · COD available</p>
         </div>
       </div>
     </footer>

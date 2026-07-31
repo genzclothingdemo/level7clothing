@@ -45,7 +45,7 @@ export default function ContactPage() {
         </p>
         <h1 className="mt-3 font-serif text-5xl">Get in touch</h1>
         <p className="mx-auto mt-4 max-w-xl text-muted-foreground">
-          Questions, custom commissions or bulk orders — we&apos;d love to hear
+          Questions, custom orders or bulk orders — we&apos;d love to hear
           from you.
         </p>
       </div>
@@ -68,7 +68,7 @@ export default function ContactPage() {
           {s.address && (
             <InfoCard
               icon={<MapPin className="h-5 w-5" />}
-              label="Studio"
+              label="Address"
               value={s.address}
             />
           )}

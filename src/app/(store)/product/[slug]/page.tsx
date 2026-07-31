@@ -1,16 +1,28 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import type { Metadata } from "next";
-import { Truck, ShieldCheck, HandHeart, ChevronRight } from "lucide-react";
+import { Truck, ShieldCheck, Shirt, ChevronRight } from "lucide-react";
 import { getProductBySlug, getRelated } from "@/lib/products";
+import { prisma } from "@/lib/prisma";
 import { formatINR } from "@/lib/utils";
 import { ProductGallery } from "@/components/store/product-gallery";
 import { ProductPurchase } from "@/components/store/product-purchase";
 import { ProductCard } from "@/components/store/product-card";
+import {
+  ProductReviews,
+  type PublicReview,
+} from "@/components/store/product-reviews";
 import { ProductViewProvider } from "@/context/product-view";
 import { normalizeVariants, priceRange } from "@/lib/variants";
 
 export const dynamic = "force-dynamic";
+
+function siteUrl() {
+  const fromEnv = process.env.NEXT_PUBLIC_SITE_URL;
+  if (fromEnv) return fromEnv.replace(/\/$/, "");
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  return "http://localhost:3000";
+}
 
 export async function generateMetadata({
   params,
@@ -20,9 +32,45 @@ export async function generateMetadata({
   const { slug } = await params;
   const product = await getProductBySlug(slug);
   if (!product) return { title: "Product" };
+
+  // Lead the description with intent-matching terms (price, sizes, COD) rather
+  // than only the brand-voice copy — better click-through from search results.
+  const sizes = (product.options.find((o) => /^size$/i.test(o.name))?.choices ?? [])
+    .map((c) => c.label)
+    .join(", ");
+  const description = [
+    `${product.name} — ₹${product.price}.`,
+    sizes ? `Sizes ${sizes}.` : "",
+    "Premium heavyweight cotton, unisex oversized fit.",
+    "Free shipping on prepaid orders, COD available across India.",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 158);
+
   return {
     title: product.name,
-    description: product.description.slice(0, 150),
+    description,
+    keywords: [
+      product.name,
+      product.category,
+      ...product.tags,
+      "buy online India",
+      "Level7 Clothing",
+    ],
+    alternates: { canonical: `/product/${product.slug}` },
+    openGraph: {
+      title: product.name,
+      description,
+      type: "website",
+      images: product.images[0] ? [{ url: product.images[0] }] : undefined,
+    },
+    twitter: {
+      card: "summary_large_image",
+      title: product.name,
+      description,
+      images: product.images[0] ? [product.images[0]] : undefined,
+    },
   };
 }
 
@@ -41,6 +89,23 @@ export default async function ProductPage({
     4,
     product.secondaryCategory
   );
+
+  const rawReviews = await prisma.review
+    .findMany({
+      where: { productId: product.id, approved: true },
+      orderBy: [{ featured: "desc" }, { createdAt: "desc" }],
+      take: 50,
+    })
+    .catch(() => []);
+
+  const reviews: PublicReview[] = rawReviews.map((r) => ({
+    id: r.id,
+    name: r.name,
+    rating: r.rating,
+    title: r.title,
+    body: r.body,
+    createdAt: r.createdAt.toISOString(),
+  }));
   const discount =
     product.compareAtPrice && product.compareAtPrice > product.price
       ? Math.round(
@@ -55,8 +120,77 @@ export default async function ProductPage({
   const range = priceRange(product);
   const hasRange = range.min !== range.max;
 
+  // Product structured data so Google can show price / availability / rating.
+  const ratingCount = reviews.length;
+  const ratingValue =
+    ratingCount > 0
+      ? Math.round(
+          (reviews.reduce((n, r) => n + r.rating, 0) / ratingCount) * 10
+        ) / 10
+      : null;
+
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: product.name,
+    description: product.description,
+    // Structured data needs absolute image URLs.
+    image: product.images.map((src) =>
+      src.startsWith("http") ? src : `${siteUrl()}${src}`
+    ),
+    category: product.category,
+    brand: { "@type": "Brand", name: "Level7 Clothing" },
+    offers: {
+      "@type": "AggregateOffer",
+      priceCurrency: "INR",
+      lowPrice: range.min,
+      highPrice: range.max,
+      availability:
+        product.stock > 0
+          ? "https://schema.org/InStock"
+          : "https://schema.org/OutOfStock",
+    },
+    ...(ratingValue !== null && {
+      aggregateRating: {
+        "@type": "AggregateRating",
+        ratingValue,
+        reviewCount: ratingCount,
+      },
+    }),
+  };
+
+  const base = siteUrl();
+  const breadcrumbJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: base },
+      { "@type": "ListItem", position: 2, name: "Shop", item: `${base}/shop` },
+      {
+        "@type": "ListItem",
+        position: 3,
+        name: product.category,
+        item: `${base}/shop?category=${encodeURIComponent(product.category)}`,
+      },
+      {
+        "@type": "ListItem",
+        position: 4,
+        name: product.name,
+        item: `${base}/product/${product.slug}`,
+      },
+    ],
+  };
+
   return (
     <div className="container-px mx-auto max-w-7xl py-4 md:py-12">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}
+      />
       {/* Breadcrumb */}
       <nav className="mb-2 md:mb-6 flex items-center gap-1 text-sm text-muted-foreground">
         <Link href="/" className="hover:text-accent">
@@ -132,13 +266,19 @@ export default async function ProductPage({
           </div>
 
           <div className="mt-8 grid gap-4 rounded-2xl border border-border p-5 sm:grid-cols-3">
-            <Feature icon={<HandHeart className="h-5 w-5" />} label="Handmade to order" />
+            <Feature icon={<Shirt className="h-5 w-5" />} label="Premium quality fabric" />
             <Feature icon={<Truck className="h-5 w-5" />} label="Ships across India" />
             <Feature icon={<ShieldCheck className="h-5 w-5" />} label="Cash on delivery" />
           </div>
         </div>
       </div>
       </ProductViewProvider>
+
+      <ProductReviews
+        productId={product.id}
+        productSlug={product.slug}
+        reviews={reviews}
+      />
 
       {related.length > 0 && (
         <section className="mt-24">

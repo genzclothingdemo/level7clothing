@@ -134,6 +134,25 @@ export async function getProductBySlug(
   }
 }
 
+/** Fetch active products for a set of slugs, preserving the given slug order. */
+export async function getProductsBySlugs(
+  slugs: string[]
+): Promise<ProductDTO[]> {
+  if (slugs.length === 0) return [];
+  try {
+    const products = await prisma.product.findMany({
+      where: { slug: { in: slugs }, isActive: true },
+    });
+    const bySlug = new Map(products.map((p) => [p.slug, toDTO(p)]));
+    return slugs
+      .map((s) => bySlug.get(s))
+      .filter((p): p is ProductDTO => Boolean(p));
+  } catch (err) {
+    console.error("[products] getProductsBySlugs failed:", err);
+    return [];
+  }
+}
+
 export async function getRelated(
   category: string,
   excludeId: string,

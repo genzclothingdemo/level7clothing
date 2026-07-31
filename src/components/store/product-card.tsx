@@ -6,6 +6,7 @@ import type { ProductDTO } from "@/lib/types";
 import { ButtonLink } from "@/components/ui/button";
 import { AddToCartButton } from "./add-to-cart";
 import { BuyNowButton, WhatsAppProductButton } from "./product-actions";
+import { WishlistButton } from "./wishlist-button";
 
 export function ProductCard({ product }: { product: ProductDTO }) {
   const discount =
@@ -18,6 +19,11 @@ export function ProductCard({ product }: { product: ProductDTO }) {
 
   return (
     <div className="group flex flex-col">
+      <div className="relative">
+      {/* Wishlist sits outside the Link so saving never navigates. */}
+      <div className="absolute right-2 top-2 z-10 sm:right-3 sm:top-3">
+        <WishlistButton slug={product.slug} name={product.name} />
+      </div>
       <Link
         href={`/product/${product.slug}`}
         className="card-lift relative block aspect-square overflow-hidden rounded-2xl bg-muted"
@@ -56,21 +62,22 @@ export function ProductCard({ product }: { product: ProductDTO }) {
           </span>
         )}
         {product.stock <= 0 && (
-          <span className="absolute right-2 top-2 rounded-full bg-foreground/85 px-2 py-0.5 text-[10px] font-medium text-background backdrop-blur sm:right-3 sm:top-3 sm:px-2.5 sm:py-1 sm:text-xs">
+          <span className="absolute left-2 bottom-2 rounded-full bg-foreground/85 px-2 py-0.5 text-[10px] font-medium text-background backdrop-blur sm:left-3 sm:bottom-3 sm:px-2.5 sm:py-1 sm:text-xs">
             Sold out
           </span>
         )}
         {product.stock > 0 && product.stock <= 5 && (
-          <span className="absolute right-2 top-2 rounded-full bg-card/90 px-2 py-0.5 text-[10px] font-medium text-danger shadow-sm backdrop-blur sm:right-3 sm:top-3 sm:px-2.5 sm:py-1 sm:text-[11px]">
+          <span className="absolute left-2 bottom-2 rounded-full bg-card/90 px-2 py-0.5 text-[10px] font-medium text-danger shadow-sm backdrop-blur sm:left-3 sm:bottom-3 sm:px-2.5 sm:py-1 sm:text-[11px]">
             Only {product.stock} left
           </span>
         )}
 
         {/* Quick view pill slides up on hover (pointer devices only) */}
         <span className="absolute inset-x-3 bottom-3 hidden translate-y-3 items-center justify-center gap-1.5 rounded-full bg-card/90 py-2 text-xs font-medium opacity-0 shadow-lg backdrop-blur transition-all duration-500 group-hover:translate-y-0 group-hover:opacity-100 sm:flex">
-          <Eye className="h-3.5 w-3.5" /> View piece
+          <Eye className="h-3.5 w-3.5" /> Quick view
         </span>
       </Link>
+      </div>
 
       <div className="mt-2.5 flex flex-1 flex-col sm:mt-4">
         <p className="truncate text-[10px] uppercase tracking-widest gold-text sm:text-[11px]">

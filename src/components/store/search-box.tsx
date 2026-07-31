@@ -17,11 +17,11 @@ type Suggestion = {
 };
 
 const POPULAR = [
-  "Pooja Thali",
-  "Photo Frame",
-  "Rakhi Hamper",
-  "Name Plate",
-  "Shubh-Labh",
+  "Oversized T-Shirt",
+  "Drop-Shoulder Hoodie",
+  "Premium Tees",
+  "Minimalistic Tees",
+  "Oversized Hoodie",
 ];
 
 export function SearchBox({
@@ -157,7 +157,7 @@ export function SearchBox({
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={onKeyDown}
           onFocus={() => setOpen(true)}
-          placeholder="Search resin art…"
+          placeholder="Search tees, hoodies…"
           className="h-11 w-full rounded-full border border-input bg-card pl-10 pr-10 text-sm outline-none transition-shadow focus:ring-2 focus:ring-ring"
           aria-label="Search products"
         />

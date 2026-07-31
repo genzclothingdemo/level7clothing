@@ -135,6 +135,17 @@ export function SettingsForm({ initial }: { initial: SettingsDTO }) {
               />
             </label>
           </div>
+          <input
+            type="text"
+            value={f.logoUrl}
+            onChange={(e) => set("logoUrl", e.target.value)}
+            placeholder="…or paste an image URL / local path (e.g. /level7-logo.png)"
+            className="input mt-2"
+          />
+          <p className="mt-1 text-xs text-muted-foreground">
+            Uploading needs a Vercel Blob store configured — pasting a URL or a
+            path to a file in <code>/public</code> always works.
+          </p>
         </div>
 
         <Text

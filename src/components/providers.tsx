@@ -4,6 +4,7 @@ import { ThemeProvider } from "next-themes";
 import { Toaster } from "sonner";
 import { CartProvider } from "@/context/cart";
 import { SettingsProvider } from "@/context/settings";
+import { WishlistProvider } from "@/context/wishlist";
 import type { SettingsDTO } from "@/lib/types";
 
 export function Providers({
@@ -24,17 +25,19 @@ export function Providers({
     >
       <SettingsProvider value={settings}>
         <CartProvider initialLead={initialLead}>
-          {children}
-          <Toaster
-            position="bottom-right"
-            toastOptions={{
-              style: {
-                background: "var(--card)",
-                color: "var(--foreground)",
-                border: "1px solid var(--border)",
-              },
-            }}
-          />
+          <WishlistProvider>
+            {children}
+            <Toaster
+              position="bottom-right"
+              toastOptions={{
+                style: {
+                  background: "var(--card)",
+                  color: "var(--foreground)",
+                  border: "1px solid var(--border)",
+                },
+              }}
+            />
+          </WishlistProvider>
         </CartProvider>
       </SettingsProvider>
     </ThemeProvider>

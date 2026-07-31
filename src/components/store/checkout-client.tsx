@@ -75,7 +75,25 @@ export type CheckoutUser = {
   pincode?: string | null;
 };
 
-export function CheckoutClient({ user }: { user: CheckoutUser }) {
+export type CheckoutSavedAddress = {
+  id: string;
+  label: string;
+  fullName: string;
+  phone: string;
+  address: string;
+  city: string;
+  state: string;
+  pincode: string;
+  isDefault: boolean;
+};
+
+export function CheckoutClient({
+  user,
+  savedAddresses = [],
+}: {
+  user: CheckoutUser;
+  savedAddresses?: CheckoutSavedAddress[];
+}) {
   const { items, subtotal, clear } = useCart();
   const s = useSettings();
   const router = useRouter();
@@ -269,7 +287,7 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
 
     const visitorId =
       typeof window !== "undefined"
-        ? localStorage.getItem("artvelle_vid") ?? undefined
+        ? localStorage.getItem("level7_vid") ?? undefined
         : undefined;
 
     const online = method === "prepaid" || method === "partial";
@@ -414,6 +432,60 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
         className="mt-10 grid gap-10 lg:grid-cols-[1fr_380px]"
       >
         <div className="space-y-8">
+          {savedAddresses.length > 0 && (
+            <section>
+              <h2 className="font-serif text-xl">Deliver to</h2>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                {savedAddresses.map((a) => {
+                  const selected =
+                    form.address === a.address &&
+                    form.pincode === a.pincode &&
+                    form.customerName === a.fullName;
+                  return (
+                    <button
+                      key={a.id}
+                      type="button"
+                      onClick={() =>
+                        setForm((f) => ({
+                          ...f,
+                          customerName: a.fullName,
+                          phone: a.phone,
+                          address: a.address,
+                          city: a.city,
+                          state: a.state,
+                          pincode: a.pincode,
+                        }))
+                      }
+                      className={`rounded-2xl border p-4 text-left text-sm transition-colors ${
+                        selected
+                          ? "border-accent bg-accent/10"
+                          : "border-border hover:border-foreground/40"
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <span className="font-medium">{a.label}</span>
+                        {a.isDefault && (
+                          <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] text-accent">
+                            Default
+                          </span>
+                        )}
+                      </span>
+                      <span className="mt-1.5 block font-medium">{a.fullName}</span>
+                      <span className="block text-muted-foreground">{a.phone}</span>
+                      <span className="mt-0.5 block text-muted-foreground">
+                        {a.address}, {a.city}, {a.state} – {a.pincode}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-3 text-xs text-muted-foreground">
+                Pick a saved address to fill the form below, or edit the fields
+                manually for a one-off delivery.
+              </p>
+            </section>
+          )}
+
           <section>
             <h2 className="font-serif text-xl">Contact details</h2>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -539,7 +611,9 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
           <h2 className="font-serif text-xl">Your order</h2>
           <ul className="mt-4 space-y-3">
             {items.map((i) => (
-              <li key={i.productId} className="flex gap-3">
+              // Key on lineId, not productId — the same style in two sizes is
+              // two distinct lines and productId would collide.
+              <li key={i.lineId} className="flex gap-3">
                 <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-xl bg-muted">
                   {i.image && (
                     <Image

@@ -1,4 +1,4 @@
-# 🎨 Artvelle — Resin Art E‑commerce
+# 🎨 Level7 Clothing — Resin Art E‑commerce
 
 > 🟢 **New here? Start with [SETUP-GUIDE.md](./SETUP-GUIDE.md)** — a step-by-step guide in simple language covering everything: running locally, email setup, and going live on Vercel.
 
@@ -29,7 +29,7 @@ Everything — brand name, logo, tagline, hero text, contact details, shipping, 
 
 ## 🚀 Part 1 — Run it on your computer
 
-You already have Node.js installed. Open a terminal **in this `artvelle` folder**.
+You already have Node.js installed. Open a terminal **in this `level7clothing` folder**.
 
 ### Step 1 — Create a free database (2 minutes)
 
@@ -49,7 +49,7 @@ Open the file named **`.env`** in this folder and paste your database URLs:
 DATABASE_URL="your-pooled-neon-url"
 DIRECT_URL="your-direct-neon-url"
 AUTH_SECRET="type-any-long-random-text-here"
-ADMIN_EMAIL="admin@artvelle.com"
+ADMIN_EMAIL="admin@level7clothing.com"
 ADMIN_PASSWORD="choose-a-password"
 ```
 
@@ -75,7 +75,7 @@ Open **http://localhost:3000** — that's your store. 🎉
 
 - **Admin panel:** http://localhost:3000/admin
 - **Login:** the `ADMIN_EMAIL` / `ADMIN_PASSWORD` you set in `.env`
-  (default: `admin@artvelle.com` / `artvelle123`)
+  (default: `admin@level7clothing.com` / `level7admin123`)
 
 ---
 
@@ -88,7 +88,7 @@ Without this, the site works fine — emails are just skipped.
 3. In `.env`, set:
    ```env
    RESEND_API_KEY="re_your_key"
-   EMAIL_FROM="Artvelle <onboarding@resend.dev>"
+   EMAIL_FROM="Level7 Clothing <onboarding@resend.dev>"
    ```
 4. Restart `npm run dev`.
 
@@ -109,20 +109,20 @@ To upload image files directly, add a **Vercel Blob** store (see deploy section)
 
 ### Step 1 — Put the code on GitHub
 
-1. Create a new repository on **https://github.com** (e.g. `artvelle`).
+1. Create a new repository on **https://github.com** (e.g. `level7clothing`).
 2. In this folder:
    ```bash
    git add .
-   git commit -m "Artvelle store"
+   git commit -m "Level7 Clothing store"
    git branch -M main
-   git remote add origin https://github.com/YOUR_USERNAME/artvelle.git
+   git remote add origin https://github.com/YOUR_USERNAME/level7clothing.git
    git push -u origin main
    ```
 
 ### Step 2 — Import to Vercel
 
 1. Go to **https://vercel.com**, sign in with GitHub.
-2. **Add New → Project →** pick your `artvelle` repo → **Import**.
+2. **Add New → Project →** pick your `level7clothing` repo → **Import**.
 3. Don't deploy yet — first add storage (next step).
 
 ### Step 3 — Add the database + image storage (inside Vercel)
@@ -141,7 +141,7 @@ In **Settings → Environment Variables**, add:
 | `ADMIN_EMAIL` | your admin email |
 | `ADMIN_PASSWORD` | your admin password |
 | `RESEND_API_KEY` | your Resend key (if using email) |
-| `EMAIL_FROM` | e.g. `Artvelle <onboarding@resend.dev>` |
+| `EMAIL_FROM` | e.g. `Level7 Clothing <onboarding@resend.dev>` |
 
 ### Step 5 — Deploy, then load the tables + sample data
 
@@ -179,7 +179,7 @@ Online payments aren't enabled yet — checkout uses **Cash on Delivery**, and o
 ## 📁 Project structure
 
 ```
-artvelle/
+level7clothing/
 ├── prisma/
 │   ├── schema.prisma        # database models
 │   └── seed.ts              # sample products + admin

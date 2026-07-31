@@ -12,10 +12,9 @@ function slugify(text: string) {
 }
 
 // -------------------------------------------------------------------------
-// Artvelle real product catalogue.
-// Prices/options are taken from the studio price notebook; edit any of them
-// anytime from Admin → Products.
-// category = primary section, secondaryCategory = also shows under this section.
+// Level7 Clothing real product catalogue (mirrored from level7clothing.com).
+// Prices/options can be edited anytime from Admin → Products.
+// category matches the real site's collections (Minimalistic/Premium tees, Hoodies).
 // -------------------------------------------------------------------------
 type SeedProduct = {
   name: string;
@@ -28,451 +27,529 @@ type SeedProduct = {
   stock: number;
   isFeatured?: boolean;
   isActive?: boolean; // false = hidden from the storefront
-  images?: string[]; // real photos in /public/products/gallery
+  images?: string[];
   options?: {
     name: string;
     choices: { label: string; priceDelta: number }[];
   }[];
 };
 
-// Real photos live in /public/products/gallery/<Category>/<Product>/.
-// encodeURI turns the spaces in the folder names into %20 so the URLs work.
-const g = (path: string) => encodeURI(`/products/gallery/${path}`);
-// Build [dir/base-1.jpg … dir/base-n.jpg]
-const many = (dir: string, base: string, n: number) =>
-  Array.from({ length: n }, (_, i) => g(`${dir}/${base}-${i + 1}.jpg`));
-
 const products: SeedProduct[] = [
-  // ------------------------- POOJA ESSENTIALS -------------------------
   {
-    name: "Handcrafted Resin Pooja Thali",
-    category: "Pooja Essentials",
-    secondaryCategory: "Festive Decor",
-    price: 599,
-    compareAtPrice: 799,
-    description:
-      "A handcrafted resin pooja thali (aarti thali) with intricate detailing and a glossy mirror finish — perfect for daily aarti, festivals and gifting. Choose your design and size; each thali is poured and finished by hand.",
-    tags: ["pooja thali", "aarti thali", "resin thali", "diwali", "festival", "gift", "handmade"],
-    stock: 25,
-    isFeatured: true,
-    images: many("Pooja Essentials/Resin Pooja Thali", "pooja-thali", 19),
-    options: [
-      {
-        name: "Design",
-        choices: [
-          { label: "Unique / White Marble", priceDelta: 0 },
-          { label: "Ram–Hanuman Photo", priceDelta: 50 },
-          { label: "Diya (Diveliya)", priceDelta: 150 },
-          { label: "Pink 3-Vatki", priceDelta: 150 },
-          { label: "Pichwai Art", priceDelta: 250 },
-        ],
-      },
-      {
-        name: "Size",
-        choices: [
-          { label: "6 inch", priceDelta: -150 },
-          { label: "8 inch", priceDelta: 0 },
-          { label: "10 inch", priceDelta: 150 },
-          { label: "12 inch", priceDelta: 650 },
-        ],
-      },
-    ],
-  },
-  {
-    name: "Panchmashi Resin Spiritual Wall Art",
-    category: "Pooja Essentials",
-    secondaryCategory: "Home Decor",
-    price: 199,
-    compareAtPrice: 299,
-    description:
-      "A sacred resin Panchmashi piece for your home temple, blending traditional motifs with a modern glossy finish. A meaningful spiritual accent and a thoughtful gift.",
-    tags: ["panchmashi", "pooja", "temple", "spiritual", "wall art", "gift"],
-    stock: 20,
-    images: many("Pooja Essentials/Panchmashi Wall Art", "panchmashi", 2),
-    options: [
-      {
-        name: "Size",
-        choices: [
-          { label: "Standard", priceDelta: 0 },
-          { label: "Large", priceDelta: 250 },
-        ],
-      },
-    ],
-  },
-  {
-    name: "Resin Mandir Backdrop",
-    category: "Pooja Essentials",
-    secondaryCategory: "Home Decor",
-    price: 450,
-    compareAtPrice: 599,
-    description:
-      "An elegant 3×2 ft resin mandir backdrop that catches the light beautifully behind your idols. Handmade to bring warmth and devotion to your sacred space.",
-    tags: ["mandir", "temple", "mandir backdrop", "pooja", "home", "spiritual"],
-    stock: 10,
-    images: [g("Pooja Essentials/Mandir Backdrop/mandir-1.jpg")],
-  },
-  {
-    name: "Resin Krishna Jhula for Laddu Gopal",
-    category: "Pooja Essentials",
-    secondaryCategory: "Home Decor",
-    price: 1800,
-    compareAtPrice: 2199,
-    description:
-      "A beautifully detailed resin Krishna Jhula (Kanha jhula) to cradle your Laddu Gopal, finished with gold accents. A heartfelt devotional piece for Janmashtami and everyday worship.",
-    tags: ["krishna jhula", "kanha jhula", "laddu gopal", "janmashtami", "mandir", "spiritual"],
-    stock: 8,
-    isFeatured: true,
-    images: many("Pooja Essentials/Krishna Jhula", "krishna-jhula", 2),
-    options: [
-      {
-        name: "Size",
-        choices: [
-          { label: "8 inch plate", priceDelta: 0 },
-          { label: "10 inch plate", priceDelta: 400 },
-        ],
-      },
-    ],
-  },
-  {
-    name: "Divine Resin God Photo Frame",
-    category: "Pooja Essentials",
-    secondaryCategory: "Home Decor",
-    price: 1500,
-    compareAtPrice: 1899,
-    description:
-      "A divine resin-finished frame for your favourite deity photograph, with a luminous glossy coat. Perfect for your pooja room or as a spiritual gift. Available up to a large 2×3 ft premium fibre panel.",
-    tags: ["god frame", "god photo frame", "deity", "spiritual", "pooja", "gift"],
-    stock: 12,
-    isFeatured: true,
-    images: many("Pooja Essentials/God Photo Frame", "god-frame", 3),
-    options: [
-      {
-        name: "Size",
-        choices: [
-          { label: "9 × 11 inch", priceDelta: 0 },
-          { label: "2 × 3 feet (Premium Fibre)", priceDelta: 10500 },
-        ],
-      },
-    ],
-  },
-
-  // ------------------------- FESTIVE DECOR -------------------------
-  {
-    name: "Resin Shubh Labh Door Hanging",
-    category: "Festive Decor",
-    secondaryCategory: "Pooja Essentials",
-    price: 299,
-    compareAtPrice: 449,
-    description:
-      "Invite prosperity home with a handcrafted resin Shubh-Labh door hanging, gleaming with gold detail. A must-have for Diwali, housewarmings and your main door.",
-    tags: ["shubh labh", "diwali", "festival", "door hanging", "housewarming"],
-    stock: 30,
-    images: many("Festive Decor/Shubh Labh Door Hanging", "shubh-labh", 4),
-    options: [
-      {
-        name: "Type",
-        choices: [
-          { label: "Standard", priceDelta: 0 },
-          { label: "Deluxe", priceDelta: 100 },
-          { label: "Premium", priceDelta: 200 },
-          { label: "MDF Base", priceDelta: 300 },
-        ],
-      },
-    ],
-  },
-  {
-    name: "Handcrafted Resin Toran Door Hanging",
-    category: "Festive Decor",
-    secondaryCategory: "Home Decor",
-    price: 11999,
-    compareAtPrice: 13999,
-    description:
-      "A statement 3 ft handcrafted resin toran (patta + jhumcha) for your doorway, rich with traditional motifs and gold detailing. A premium festive centrepiece for Diwali and celebrations.",
-    tags: ["toran", "door hanging", "bandhanwar", "diwali", "festival", "premium"],
-    stock: 4,
-    images: [g("Festive Decor/Resin Toran/toran-1.jpg")],
-  },
-
-  // ------------------------- HOME DECOR -------------------------
-  {
-    name: "Custom Resin Name Plate",
-    category: "Home Decor",
-    secondaryCategory: "Personalised Gifts",
-    price: 1999,
-    compareAtPrice: 2499,
-    description:
-      "Announce your home in style with a custom resin name plate, hand-poured in your choice of colours with your family name in elegant lettering. Weather-resistant and made to order in MDF and premium finishes.",
-    tags: ["name plate", "nameplate", "personalised", "door", "custom", "housewarming"],
-    stock: 15,
-    isFeatured: true,
-    images: many("Home Decor/Resin Name Plate", "name-plate", 4),
-    options: [
-      {
-        name: "Size",
-        choices: [
-          { label: "9 × 11 inch", priceDelta: 0 },
-          { label: "12 inch", priceDelta: 500 },
-          { label: "12 × 18 inch (MDF)", priceDelta: 1500 },
-          { label: "18 inch", priceDelta: 3500 },
-        ],
-      },
-    ],
-  },
-
-  // ------------------------- PERSONALISED GIFTS -------------------------
-  {
-    name: "Custom Resin Photo Frame",
-    category: "Personalised Gifts",
-    secondaryCategory: "Home Decor",
-    price: 499,
-    compareAtPrice: 699,
-    description:
-      "Turn a favourite photo into a glossy resin-coated keepsake frame. A treasured gift for weddings, anniversaries and family memories — choose your size and a wooden or metal stand.",
-    tags: ["photo frame", "personalised", "memories", "anniversary", "custom", "gift"],
-    stock: 30,
-    isFeatured: true,
-    images: many("Personalised Gifts/Resin Photo Frame", "photo-frame", 8),
-    options: [
-      {
-        name: "Size",
-        choices: [
-          { label: "6 inch", priceDelta: 0 },
-          { label: "8 inch", priceDelta: 200 },
-          { label: "10 inch", priceDelta: 400 },
-          { label: "12 inch", priceDelta: 600 },
-        ],
-      },
-      {
-        name: "Stand",
-        choices: [
-          { label: "Wooden Stand", priceDelta: 0 },
-          { label: "Metal Stand", priceDelta: 100 },
-        ],
-      },
-    ],
-  },
-  {
-    name: "Personalised Baby Footprint & Newborn Frame",
-    category: "Personalised Gifts",
-    secondaryCategory: "Home Decor",
-    price: 1200,
-    compareAtPrice: 1499,
-    description:
-      "Capture your little one's first footprints or a newborn keepsake in a beautiful 9×11 inch resin frame (Pagli) — a heart-melting memory and a cherished gift for new parents.",
-    tags: ["baby footprint", "pagli", "newborn", "keepsake", "personalised", "gift"],
-    stock: 10,
-    images: many("Personalised Gifts/Baby Footprint Frame", "baby-footprint", 2),
-    options: [
-      {
-        name: "Type",
-        choices: [
-          { label: "Baby Footprint (Pagli)", priceDelta: 0 },
-          { label: "Newborn Baby", priceDelta: 0 },
-        ],
-      },
-    ],
-  },
-  {
-    name: "Personalised Flower Photo Frame",
-    category: "Personalised Gifts",
-    secondaryCategory: "Wedding Preservation",
-    price: 1200,
-    compareAtPrice: 1499,
-    description:
-      "A personalised resin frame set with three preserved flowers around your photo, finished on a metal stand. A romantic keepsake for anniversaries and special days.",
-    tags: ["flower frame", "personalised", "preserved flowers", "anniversary", "gift"],
-    stock: 10,
-    images: [g("Personalised Gifts/Flower Photo Frame/flower-frame-1.jpg")],
-    options: [
-      {
-        name: "Size",
-        choices: [
-          { label: "10 inch", priceDelta: 0 },
-          { label: "12 inch", priceDelta: 300 },
-        ],
-      },
-    ],
-  },
-  {
-    name: "Custom Resin Name Keychain",
-    category: "Personalised Gifts",
-    secondaryCategory: "Fashion Accessories",
-    price: 199,
-    compareAtPrice: 349,
-    description:
-      "A custom resin keychain with your name, initials or dried flowers set in crystal-clear resin. A charming little keepsake or return gift — personalise it your way.",
-    tags: ["keychain", "name keychain", "personalised", "return gift", "accessory"],
+    name: "LEVEL7 Field Unisex Oversized T-Shirt",
+    category: "Minimalistic Oversized T-shirts",
+    price: 977,
+    compareAtPrice: 1577,
+    description: "Bottle green represents stability, balance, and grounding. A muted shade drawn from nature, chosen for its calm presence and versatility. The oversized, drop-shoulder silhouette keeps the design relaxed while maintaining a clean, considered form. Simple by design. Intentional in use.",
+    tags: ["unisex","t-shirt","oversized","minimalistic","t-shirts"],
     stock: 60,
-    images: [
-      g("Personalised Gifts/Name Keychain/keychain-1.jpg"),
-      g("Personalised Gifts/Name Keychain/keychain-2.jpg"),
-      g("Personalised Gifts/Name Keychain/keychain-car-1.jpg"),
-    ],
-    options: [
-      {
-        name: "Type",
-        choices: [
-          { label: "Standard", priceDelta: 0 },
-          { label: "Premium", priceDelta: 100 },
-        ],
-      },
-    ],
-  },
-  {
-    name: "Custom Resin QR Code Frame",
-    category: "Personalised Gifts",
-    secondaryCategory: "Home Decor",
-    price: 1200,
-    compareAtPrice: 1499,
-    description:
-      "A modern personalised resin frame featuring a custom QR code with a light stand — link a wedding invite, a Spotify song or a video message. A unique, memorable keepsake gift.",
-    tags: ["qr code", "qr frame", "personalised", "wedding", "spotify", "gift"],
-    stock: 15,
-    images: [g("Personalised Gifts/QR Code Frame/qr-frame-1.jpg")],
-  },
-
-  // ------------------------- FASHION ACCESSORIES -------------------------
-  {
-    name: "Personalised Resin Brooch",
-    category: "Fashion Accessories",
-    secondaryCategory: "Personalised Gifts",
-    price: 199,
-    compareAtPrice: 349,
-    description:
-      "A dainty handcrafted resin brooch that adds a refined touch to sarees, blazers and dupattas. Available as a single piece, a cute pet design, or a 'Mom & Dad To Be' set of two.",
-    tags: ["brooch", "saree brooch", "accessory", "mom to be", "gift"],
-    stock: 40,
-    images: many("Fashion Accessories/Resin Brooch", "brooch", 2),
-    options: [
-      {
-        name: "Type",
-        choices: [
-          { label: "Single", priceDelta: 0 },
-          { label: "Pet / Dog Design", priceDelta: 0 },
-          { label: "Mom & Dad To Be (Set of 2)", priceDelta: 200 },
-        ],
-      },
-    ],
-  },
-
-  // ------------------------- WEDDING PRESERVATION -------------------------
-  {
-    name: "Wedding Varmala & Flower Preservation Frame",
-    category: "Wedding Preservation",
-    secondaryCategory: "Personalised Gifts",
-    price: 3000,
-    compareAtPrice: 3500,
-    description:
-      "Immortalise your wedding varmala and special-day blooms in resin — petals from your garland preserved in a stunning frame. Choose your size and full or half preservation. A once-in-a-lifetime memory to cherish forever.",
-    tags: ["varmala", "flower preservation", "wedding", "garland", "keepsake", "anniversary"],
-    stock: 6,
     isFeatured: true,
     images: [
-      ...many("Wedding Preservation/Varmala and Flower Preservation", "varmala", 3),
-      g("Wedding Preservation/Varmala and Flower Preservation/flower-preservation-1.jpg"),
+          "/products/level7/BottleGreenFront2.png",
+          "/products/level7/BottleGreenBack.png",
+          "/products/level7/BottleGreenBack2.png",
+          "/products/level7/BottleGreenFront3.png",
+          "/products/level7/BottleGreenTexture.png",
+          "/products/level7/BottleGreenFront.png"
     ],
     options: [
       {
         name: "Size",
-        choices: [
-          { label: "8 inch (Thick)", priceDelta: 0 },
-          { label: "14 inch", priceDelta: 2000 },
-          { label: "16 × 20 inch", priceDelta: 5000 },
-        ],
-      },
-      {
-        name: "Preservation",
-        choices: [
-          { label: "Full Preservation", priceDelta: 0 },
-          { label: "Half Preservation", priceDelta: -1500 },
-        ],
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0}],
       },
     ],
   },
-
-  // ------------------------- RAKHI COLLECTION -------------------------
   {
-    name: "Personalised Rakhi Preservation Hamper",
-    category: "Rakhi Collection",
-    secondaryCategory: "Personalised Gifts",
-    price: 149,
-    compareAtPrice: 249,
-    description:
-      "Preserve the love of Raksha Bandhan — a curated resin hamper that keeps your rakhi as a lasting keepsake. From a mini hamper to a deluxe set with a 12-inch resin thali.",
-    tags: ["rakhi hamper", "rakhi", "raksha bandhan", "brother", "gift set"],
-    stock: 25,
+    name: "LEVEL7 Reserve Unisex Oversized T-Shirt",
+    category: "Minimalistic Oversized T-shirts",
+    price: 977,
+    compareAtPrice: 1577,
+    description: "Wine reflects depth, restraint, and maturity. A composed tone designed to feel deliberate rather than loud. The oversized, drop-shoulder fit gives the piece structure and ease, making it suitable for everyday wear without visual noise. Built for comfort. Defined by proportion.",
+    tags: ["unisex","t-shirt","oversized","minimalistic","t-shirts"],
+    stock: 60,
     isFeatured: true,
-    images: many("Rakhi Collection/Rakhi Preservation Hamper", "rakhi-hamper", 3),
-    options: [
-      {
-        name: "Type",
-        choices: [
-          { label: "Mini Hamper", priceDelta: 0 },
-          { label: "Deluxe Hamper with Thali (12 inch)", priceDelta: 1250 },
-        ],
-      },
+    images: [
+          "/products/level7/Level7_Wine_Basic_Front_2.png",
+          "/products/level7/Level7_Wine_Basic_Front.png",
+          "/products/level7/Level7_Wine_Basic_Back_2.png",
+          "/products/level7/Level7_Wine_Basic_Back.png",
+          "/products/level7/Level7_Wine_Basic_Texture.png",
+          "/products/level7/Level7_Wine_Basic_Full.png"
     ],
-  },
-  {
-    name: "Handcrafted Resin Rakhi",
-    category: "Rakhi Collection",
-    secondaryCategory: "Personalised Gifts",
-    price: 120,
-    compareAtPrice: 199,
-    description:
-      "A handcrafted resin rakhi that lasts well beyond Raksha Bandhan — set with dried flowers and shimmer in crystal-clear resin. Choose from Evil-Eye, Hanumanji, Brother and Bhai-Bhabhi designs.",
-    tags: ["rakhi", "resin rakhi", "raksha bandhan", "keepsake", "gift"],
-    stock: 100,
-    images: many("Rakhi Collection/Resin Rakhi", "rakhi", 5),
-    options: [
-      {
-        name: "Design",
-        choices: [
-          { label: "Evil Eye", priceDelta: 0 },
-          { label: "Hanumanji", priceDelta: 0 },
-          { label: "Brother", priceDelta: 80 },
-          { label: "Bhai-Bhabhi Combo", priceDelta: 180 },
-        ],
-      },
-    ],
-  },
-
-  // ------------------------- TABLEWARE & DINING -------------------------
-  {
-    name: "Personalised Resin Ring Platter",
-    category: "Tableware & Dining",
-    secondaryCategory: "Wedding Preservation",
-    price: 799,
-    compareAtPrice: 999,
-    description:
-      "An elegant resin ring platter to hold rings, trinkets and small treasures — a favourite for weddings, engagements and dressing tables. Glossy, sturdy and gift-ready.",
-    tags: ["ring platter", "ring plate", "trinket tray", "wedding", "engagement", "gift"],
-    stock: 20,
-    isFeatured: true,
-    images: many("Tableware and Dining/Ring Platter", "ring-platter", 6),
     options: [
       {
         name: "Size",
-        choices: [
-          { label: "8 inch", priceDelta: 0 },
-          { label: "10 inch", priceDelta: 500 },
-        ],
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0}],
       },
     ],
   },
-
-  // ------------------------- CAR ACCESSORIES -------------------------
   {
-    name: "Resin Car Dashboard Idol (Ganesha)",
-    category: "Car Accessories",
-    secondaryCategory: "Pooja Essentials",
-    price: 199,
-    compareAtPrice: 299,
-    description:
-      "Bring calm to your drive with a compact resin Ganesha dashboard idol that sits securely on your car dashboard. A thoughtful gift for a new car.",
-    tags: ["car dashboard", "dashboard idol", "ganesha", "car accessory", "new car", "gift"],
-    stock: 40,
-    images: many("Car Accessories/Dashboard Idol", "dashboard-idol", 3),
+    name: "LEVEL7 Axis Unisex Drop-Shoulder Hoodie",
+    category: "Oversized Drop-Shoulder Hoodies",
+    price: 1777,
+    compareAtPrice: 3077,
+    description: "Steel grey represents balance, precision, and restraint. A neutral tone designed to hold everything together—calm, stable, and uninterrupted. The color reflects focus without severity, making it adaptable across moments and settings. Constructed in an oversized, drop-shoulder silhouette that prioritizes structure, comfort, and proportion. Built to last. Designed to stay relevant.",
+    tags: ["unisex","hoodie","oversized","drop-shoulder","hoodies"],
+    stock: 0,
+    isFeatured: false,
+    isActive: false,
+    images: [
+          "/products/level7/Level7_Axis_Front.png",
+          "/products/level7/Level7_Axis_Front2.png",
+          "/products/level7/Level7_Axis_FrontStand.png",
+          "/products/level7/Level7_Axis.png",
+          "/products/level7/Level7_Axis_Side2.png"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "LEVEL7 Planetary Reset Unisex Drop-Shoulder Hoodie",
+    category: "Oversized Drop-Shoulder Hoodies",
+    price: 1977,
+    compareAtPrice: 3577,
+    description: "A visual exploration of reset and renewal. The planetary graphic represents cycles breaking and reforming—movement after stillness, clarity after chaos. Set against a warm tan base, the design balances cosmic scale with grounded tone, making the statement intentional rather than loud. Built on an oversized, drop-shoulder silhouette for relaxed structure and everyday wear.",
+    tags: ["unisex","hoodie","oversized","drop-shoulder","hoodies"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/Level7_Planet_Front.png",
+          "/products/level7/Level7_PlanetBack.png",
+          "/products/level7/Level7_Planet_FrontStand.png",
+          "/products/level7/Level7_Planet_Seat.png"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "LEVEL7 Grounded Unisex Drop-Shoulder Hoodie",
+    category: "Oversized Drop-Shoulder Hoodies",
+    price: 1777,
+    compareAtPrice: 3077,
+    description: "Coffee reflects steadiness, warmth, and control. A neutral tone designed to anchor the look and slow the pace. Built for everyday wear where consistency matters more than attention.",
+    tags: ["unisex","hoodie","oversized","drop-shoulder","hoodies"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/Level7_Coffee_Grounded_Front.png",
+          "/products/level7/Level7_Coffee_Grounded.png",
+          "/products/level7/Level7_Coffee_Grounded_Back.png",
+          "/products/level7/Level7_Coffee_Grounded_Side.png",
+          "/products/level7/Level7_Coffee_Grounded_Side2.png"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "LEVEL7 Core Unisex Oversized Hoodie",
+    category: "Oversized Drop-Shoulder Hoodies",
+    price: 1777,
+    compareAtPrice: 3077,
+    description: "Black represents focus, discipline, and absolute clarity. Removed of distraction. Reduced to essentials. Designed to disappear—so your intent doesn’t.",
+    tags: ["unisex","hoodie","oversized","drop-shoulder","hoodies"],
+    stock: 60,
+    isFeatured: true,
+    images: [
+          "/products/level7/Level7_Core_Front2.png",
+          "/products/level7/Level7_Core.png",
+          "/products/level7/Level7_Core_Back.png",
+          "/products/level7/Level7_Core_Front.png",
+          "/products/level7/Level7_Core_Side.png",
+          "/products/level7/Level7_Core_Stand.png",
+          "/products/level7/Level7_Core_Style.png",
+          "/products/level7/Level7_Core_Walk.png"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "LEVEL7 Reserve Unisex Oversized Hoodie",
+    category: "Oversized Drop-Shoulder Hoodies",
+    price: 1777,
+    compareAtPrice: 3077,
+    description: "Wine reflects depth, maturity, and emotional control. A color associated with patience, restraint, and inner certainty. Designed for those who move with intention, not urgency.",
+    tags: ["unisex","hoodie","oversized","drop-shoulder","hoodies"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/Level7_Reserve.png",
+          "/products/level7/Level7_Reserve_Back.png",
+          "/products/level7/Level7_Reserve_Front.png",
+          "/products/level7/Level7_Reserve_Front2.png",
+          "/products/level7/Level7_Reserve_Side.png",
+          "/products/level7/Level7_Reserve_Side2.png"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "LEVEL7 Foundation Unisex Drop-Shoulder Hoodie",
+    category: "Oversized Drop-Shoulder Hoodies",
+    price: 1777,
+    compareAtPrice: 3077,
+    description: "Royal blue stands for composure, depth, and quiet authority. Designed for clarity of mind and control of pace. No graphics. No excess. Just presence.",
+    tags: ["unisex","hoodie","oversized","drop-shoulder","hoodies"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/Level7_Foundation_Front.png",
+          "/products/level7/Level7_Foundation.png",
+          "/products/level7/Level7_Foundation_Back.png",
+          "/products/level7/Level7_Foundation_Side.png",
+          "/products/level7/Level7_Foundation_Side2.png"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "You are Loved Unisex Minimalistic Oversized T-shirt",
+    category: "Minimalistic Oversized T-shirts",
+    price: 1177,
+    compareAtPrice: 1977,
+    description: "Spread love with our 'You Are Loved' T-shirt. This inspiring design features the phrase \"You Are Loved\" surrounded by other elements, symbolizing the importance of love and its ability to connect people. Share love with the world and make a difference.",
+    tags: ["unisex","t-shirt","oversized","minimalistic","t-shirts"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/05.10.2024-171.jpg",
+          "/products/level7/05.10.2024-163.jpg",
+          "/products/level7/05.10.2024-160.jpg",
+          "/products/level7/05.10.2024-167.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Perception Unisex Minimalistic Oversized T-shirt",
+    category: "Minimalistic Oversized T-shirts",
+    price: 1177,
+    compareAtPrice: 1577,
+    description: "Change your perspective with our 'Perception' T-shirt. This inspiring graphic showcases the word \"Perception\" in a dynamic layout, encouraging you to challenge your assumptions and see things from a new angle. Expand your worldview.",
+    tags: ["unisex","t-shirt","oversized","minimalistic","t-shirts"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/05.10.2024-134.jpg",
+          "/products/level7/05.10.2024-131.jpg",
+          "/products/level7/05.10.2024-129.jpg",
+          "/products/level7/05.10.2024-132.jpg",
+          "/products/level7/05.10.2024-133.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "The Original Black Magic: Coffee Unisex Minimalistic Oversized T-shirt",
+    category: "Minimalistic Oversized T-shirts",
+    price: 1177,
+    compareAtPrice: 2777,
+    description: "Fuel your day with our 'Coffee: The Original Black Magic' T-shirt. This playful design features the phrase \"Black Magic\" in bold, highlighting the energizing power of coffee. Start your day off right with a cup of your favorite brew.",
+    tags: ["unisex","t-shirt","oversized","minimalistic","t-shirts"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/05.10.2024-099.jpg",
+          "/products/level7/05.10.2024-108.jpg",
+          "/products/level7/05.10.2024-102.jpg",
+          "/products/level7/05.10.2024-103.jpg",
+          "/products/level7/05.10.2024-105.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Optimism Unisex Minimalistic Oversized T-shirt",
+    category: "Minimalistic Oversized T-shirts",
+    price: 1177,
+    compareAtPrice: 1977,
+    description: "Find your inner strength with our 'Optimism' T-shirt. This uplifting design features the word \"optimism\" in a bold font, encouraging you to maintain a positive outlook and see the bright side of life. Stay hopeful and persevere through challenges.",
+    tags: ["unisex","t-shirt","oversized","minimalistic","t-shirts"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/05.10.2024-093.jpg",
+          "/products/level7/05.10.2024-087.jpg",
+          "/products/level7/05.10.2024-084.jpg",
+          "/products/level7/05.10.2024-090.jpg",
+          "/products/level7/05.10.2024-091.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Rizz Unisex Minimalistic Oversized T-shirt",
+    category: "Minimalistic Oversized T-shirts",
+    price: 1177,
+    compareAtPrice: 1877,
+    description: "Unleash your potential with our 'Rizz' T-shirt. This motivational graphic showcases the message that vision is key to success. Believe in yourself, find your vision and make it a reality.",
+    tags: ["unisex","t-shirt","oversized","minimalistic","t-shirts"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/05.10.2024-094.jpg",
+          "/products/level7/05.10.2024-083.jpg",
+          "/products/level7/05.10.2024-074.jpg",
+          "/products/level7/05.10.2024-078.jpg",
+          "/products/level7/05.10.2024-077.jpg",
+          "/products/level7/05.10.2024-081.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Stay Resilient Unisex Minimalistic Oversized T-shirt",
+    category: "Minimalistic Oversized T-shirts",
+    price: 1177,
+    compareAtPrice: 2777,
+    description: "Embrace resilience with our 'Stay Resilient' T-shirt. This empowering design features the word \"resilient\" in bold, inspiring you to overcome challenges and bounce back stronger. Build your resilience and face adversity with courage.",
+    tags: ["unisex","t-shirt","oversized","minimalistic","t-shirts"],
+    stock: 0,
+    isFeatured: false,
+    isActive: false,
+    images: [
+          "/products/level7/05.10.2024-029.jpg",
+          "/products/level7/05.10.2024-045.jpg",
+          "/products/level7/05.10.2024-031.jpg",
+          "/products/level7/05.10.2024-033.jpg",
+          "/products/level7/05.10.2024-042.jpg",
+          "/products/level7/05.10.2024-063.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Make it 7 Unisex Premium Oversized T-shirt",
+    category: "Premium Oversized T-shirts",
+    price: 1477,
+    compareAtPrice: 2477,
+    description: "Embrace the challenge and make it 7 with our 'Just Make It 7' T-shirt. This motivational design features a basketball surrounded by energy, symbolizing the determination and perseverance needed to succeed. Step up to the challenge and prove yourself.",
+    tags: ["unisex","t-shirt","oversized","premium","t-shirts"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/05.10.2024-097.jpg",
+          "/products/level7/05.10.2024-071.jpg",
+          "/products/level7/05.10.2024-064.jpg",
+          "/products/level7/05.10.2024-066.jpg",
+          "/products/level7/05.10.2024-069.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Checkmate Knight Unisex Premium Oversized T-shirt",
+    category: "Premium Oversized T-shirts",
+    price: 1477,
+    compareAtPrice: 2997,
+    description: "Dominate the board with our 'Checkmate Knight' T-shirt. This captivating graphic showcases a knight leading a charge across the chessboard, symbolizing victory, strategy, and tactical brilliance. Achieve checkmate and reign supreme.",
+    tags: ["unisex","t-shirt","oversized","premium","t-shirts"],
+    stock: 60,
+    isFeatured: true,
+    images: [
+          "/products/level7/05.10.2024-175.jpg",
+          "/products/level7/05.10.2024-182.jpg",
+          "/products/level7/05.10.2024-174.jpg",
+          "/products/level7/05.10.2024-177.jpg",
+          "/products/level7/05.10.2024-180.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Chase Dream Unisex Premium Oversized T-shirt",
+    category: "Premium Oversized T-shirts",
+    price: 1477,
+    compareAtPrice: 2277,
+    description: "Soar to new heights with our 'Chase Dreams' T-shirt. This inspiring design features a butterfly taking flight, symbolizing transformation, freedom, and the pursuit of dreams. Believe in yourself and let your imagination take you anywhere.",
+    tags: ["unisex","t-shirt","oversized","premium","t-shirts"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/05.10.2024-191.jpg",
+          "/products/level7/05.10.2024-188.jpg",
+          "/products/level7/05.10.2024-185.jpg",
+          "/products/level7/05.10.2024-189.jpg",
+          "/products/level7/05.10.2024-190.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Off the Wall Unisex Premium Oversized T-shirt",
+    category: "Premium Oversized T-shirts",
+    price: 1477,
+    compareAtPrice: 2177,
+    description: "Challenge the status quo with our 'Off the Wall' T-shirt. This bold graphic showcases a bulldog defying expectations, perfect for those who dare to be different. Embrace your individuality and skate outside the box.",
+    tags: ["unisex","t-shirt","oversized","premium","t-shirts"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/05.10.2024-138.jpg",
+          "/products/level7/05.10.2024-148.jpg",
+          "/products/level7/05.10.2024-142.jpg",
+          "/products/level7/05.10.2024-143.jpg",
+          "/products/level7/05.10.2024-141.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Samurai Unisex Premium Oversized",
+    category: "Premium Oversized T-shirts",
+    price: 1477,
+    compareAtPrice: 2377,
+    description: "Master the art of stealth with our 'Samurai' T-shirt. This graphic features a legendary samurai, ready for battle, symbolizing courage, strength, and unwavering dedication. Channel the power of the samurai and become a force to be reckoned with.",
+    tags: ["unisex","t-shirt","oversized","premium","t-shirts"],
+    stock: 60,
+    isFeatured: true,
+    images: [
+          "/products/level7/05.10.2024-124.jpg",
+          "/products/level7/05.10.2024-128.jpg",
+          "/products/level7/05.10.2024-122.jpg",
+          "/products/level7/05.10.2024-123.jpg",
+          "/products/level7/05.10.2024-126.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Knight Warrior Unisex Premium Oversized T-shirts",
+    category: "Premium Oversized T-shirts",
+    price: 1477,
+    compareAtPrice: 2397,
+    description: "Become a part of the warrior's creed with our 'Knight Warriors' T-shirt. This inspiring design features a knight standing tall, embodying the qualities of courage, strength, and perseverance. It's a must-have for anyone who seeks to live a life of honor and integrity.",
+    tags: ["unisex","t-shirt","oversized","premium","t-shirts"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/05.10.2024-056.jpg",
+          "/products/level7/05.10.2024-049.jpg",
+          "/products/level7/05.10.2024-047.jpg",
+          "/products/level7/05.10.2024-052.jpg",
+          "/products/level7/05.10.2024-055.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Explore Unisex Premium Oversized T-shirt",
+    category: "Premium Oversized T-shirts",
+    price: 1477,
+    compareAtPrice: 2777,
+    description: "Experience the freedom of the open road with our 'Wander on Wheels' T-shirt. This bold graphic showcases a rider on a sleek electric scooter, ready to explore the city at your own pace. It's a perfect way to express your love for adventure and urban living",
+    tags: ["unisex","t-shirt","oversized","premium","t-shirts"],
+    stock: 60,
+    isFeatured: false,
+    images: [
+          "/products/level7/05.10.2024-114.jpg",
+          "/products/level7/05.10.2024-119.jpg",
+          "/products/level7/05.10.2024-110.jpg",
+          "/products/level7/05.10.2024-117.jpg",
+          "/products/level7/05.10.2024-113.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
+  },
+  {
+    name: "Voyager Space Unisex Premium Oversized T-shirt",
+    category: "Premium Oversized T-shirts",
+    price: 1477,
+    compareAtPrice: 3377,
+    description: "Unleash your inner explorer with our 'Voyager Space' Premium Oversized T-shirt. Featuring a bold spaceship and brave astronaut, this futuristic design will transport you to the stars. Made with premium materials, it's the perfect addition to any stylish wardrobe. Are you ready to take on the universe",
+    tags: ["unisex","t-shirt","oversized","premium","t-shirts"],
+    stock: 0,
+    isFeatured: true,
+    isActive: false,
+    images: [
+          "/products/level7/05.10.2024-011.jpg",
+          "/products/level7/05.10.2024-021.jpg",
+          "/products/level7/05.10.2024-012.jpg",
+          "/products/level7/05.10.2024-018.jpg",
+          "/products/level7/05.10.2024-017.jpg",
+          "/products/level7/05.10.2024-027.jpg"
+    ],
+    options: [
+      {
+        name: "Size",
+        choices: [{"label":"S","priceDelta":0},{"label":"M","priceDelta":0},{"label":"L","priceDelta":0},{"label":"XL","priceDelta":0},{"label":"2XL","priceDelta":0}],
+      },
+    ],
   },
 ];
 
@@ -486,8 +563,8 @@ async function main() {
   console.log("✓ Site settings ready");
 
   // Admin user
-  const email = (process.env.ADMIN_EMAIL || "admin@artvelle.com").toLowerCase();
-  const password = process.env.ADMIN_PASSWORD || "artvelle123";
+  const email = (process.env.ADMIN_EMAIL || "admin@level7clothing.com").toLowerCase();
+  const password = process.env.ADMIN_PASSWORD || "level7admin123";
   const passwordHash = await bcrypt.hash(password, 10);
   await prisma.adminUser.upsert({
     where: { email },
@@ -497,7 +574,7 @@ async function main() {
   console.log(`✓ Admin ready → ${email} / ${password}`);
 
   // Demo customer account (for trying the login + order tracking flow)
-  const demoEmail = "customer@artvelle.com";
+  const demoEmail = "customer@level7clothing.com";
   const demoPassword = "customer123";
   await prisma.user.upsert({
     where: { email: demoEmail },
@@ -512,7 +589,7 @@ async function main() {
   console.log(`✓ Demo customer → ${demoEmail} / ${demoPassword}`);
 
   // -----------------------------------------------------------------------
-  // Products: reset the catalogue to Artvelle's real product list.
+  // Products: reset the catalogue to Level7 Clothing's real product list.
   // (Removes any old demo/sample products so the store shows only real items.)
   // NOTE: this replaces ALL products — once you start editing products in the
   // admin panel, don't re-run the seed or it will reset them to this list.
@@ -538,7 +615,7 @@ async function main() {
       },
     });
   }
-  console.log(`✓ Loaded ${products.length} real Artvelle products`);
+  console.log(`✓ Loaded ${products.length} real Level7 Clothing products`);
 }
 
 main()

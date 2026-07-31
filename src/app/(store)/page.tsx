@@ -4,7 +4,7 @@ import {
   ArrowRight,
   Sparkles,
   Truck,
-  HandHeart,
+  Shirt,
   ShieldCheck,
   Star,
   Quote,
@@ -14,55 +14,55 @@ import { getSettings } from "@/lib/settings";
 import { ButtonLink } from "@/components/ui/button";
 import { ProductCard } from "@/components/store/product-card";
 import { Reveal } from "@/components/store/reveal";
-import { galleryImg } from "@/lib/utils";
+import { InstagramSection } from "@/components/store/instagram-section";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
-// Real studio photos used in the hero collage.
+// Real Level7 product photos used in the hero collage.
 const HERO_IMAGES = [
-  galleryImg("Pooja Essentials/Resin Pooja Thali/pooja-thali-1.jpg"),
-  galleryImg("Personalised Gifts/Resin Photo Frame/photo-frame-1.jpg"),
-  galleryImg("Tableware and Dining/Ring Platter/ring-platter-1.jpg"),
-  galleryImg("Wedding Preservation/Varmala and Flower Preservation/varmala-1.jpg"),
+  "/products/level7/Level7_Core_Front.png",
+  "/products/level7/05.10.2024-175.jpg",
+  "/products/level7/BottleGreenFront.png",
+  "/products/level7/05.10.2024-124.jpg",
 ];
 
-/* Style the final word of the headline in shimmering gold italic */
+/* Accent the final word of the headline in the brand violet */
 function FancyHeadline({ text }: { text: string }) {
   const words = text.trim().split(" ");
   const last = words.pop();
   return (
     <h1 className="mt-6 font-serif text-5xl leading-[1.04] tracking-tight md:text-7xl">
       {words.join(" ")}{" "}
-      <em className="text-gold-shimmer not-italic font-serif italic">{last}</em>
+      <span className="text-gold-shimmer font-serif">{last}</span>
     </h1>
   );
 }
 
 const MARQUEE_ITEMS = [
-  "Handmade with love",
-  "One-of-a-kind pieces",
-  "Custom commissions",
+  "Premium oversized fits",
+  "Graphic tees & hoodies",
+  "Unisex sizing S–2XL",
   "Ships across India",
   "Cash on delivery",
-  "Poured & cured by hand",
+  "Drop-shoulder silhouettes",
 ];
 
 const TESTIMONIALS = [
   {
     name: "Priya S.",
     city: "Mumbai",
-    text: "The ocean-wave coasters are even more beautiful in person — the gold rim catches light like real waves. Gifting a second set already!",
+    text: "The oversized fit is exactly what I wanted — the print quality on the Checkmate Knight tee is next level. Ordering another one already!",
   },
   {
     name: "Aarav M.",
     city: "Bengaluru",
-    text: "Ordered a custom name plate for our new home. The colours matched our door perfectly and it arrived safely packed. Truly premium work.",
+    text: "The Core hoodie is so comfortable and the drop-shoulder cut looks great. Arrived well packed and right on time.",
   },
   {
     name: "Ishita R.",
     city: "Delhi",
-    text: "My preserved-rose keepsake made the best anniversary gift ever. You can tell every piece is made with so much care. 10/10.",
+    text: "Love the minimalistic tees — soft fabric, true to size and the graphics don't fade after wash. 10/10.",
   },
 ];
 
@@ -93,7 +93,7 @@ export default async function HomePage() {
                 <span className="relative flex h-2 w-2">
                   <span className="absolute inline-flex h-full w-full animate-pulse-soft rounded-full bg-accent" />
                 </span>
-                Handmade resin art studio
+                Premium GenZ streetwear
                 <Sparkles className="h-3.5 w-3.5 gold-text" />
               </span>
             </Reveal>
@@ -118,7 +118,7 @@ export default async function HomePage() {
             <Reveal delay={0.2}>
               <div className="mt-10 flex flex-wrap gap-x-6 gap-y-3 text-sm text-muted-foreground">
                 <span className="inline-flex items-center gap-2">
-                  <HandHeart className="h-4 w-4 gold-text" /> One-of-a-kind pieces
+                  <Shirt className="h-4 w-4 gold-text" /> Premium oversized fits
                 </span>
                 <span className="inline-flex items-center gap-2">
                   <Truck className="h-4 w-4 gold-text" /> Ships across India
@@ -168,7 +168,7 @@ export default async function HomePage() {
                 <div className="animate-float absolute -right-3 top-6 hidden rounded-2xl border border-border bg-card/90 px-4 py-3 text-center shadow-xl backdrop-blur md:block">
                   <p className="font-serif text-2xl gold-text">{totalPieces}+</p>
                   <p className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                    unique pieces
+                    styles in stock
                   </p>
                 </div>
               )}
@@ -231,7 +231,7 @@ export default async function HomePage() {
                 <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/10 to-transparent transition-opacity duration-500 group-hover:from-black/85" />
                 <div className="absolute inset-x-0 bottom-0 translate-y-1 p-3 text-white transition-transform duration-500 group-hover:translate-y-0">
                   <p className="font-serif text-base leading-tight">{cat.name}</p>
-                  <p className="text-[11px] opacity-80">{countFor(cat.name)} pieces</p>
+                  <p className="text-[11px] opacity-80">{countFor(cat.name)} styles</p>
                 </div>
                 <span className="absolute right-3 top-3 grid h-8 w-8 translate-y-1 place-items-center rounded-full bg-white/15 opacity-0 backdrop-blur transition-all duration-500 group-hover:translate-y-0 group-hover:opacity-100">
                   <ArrowRight className="h-4 w-4 text-white" />
@@ -251,7 +251,7 @@ export default async function HomePage() {
                 Handpicked
               </p>
               <h2 className="mt-1 font-serif text-3xl md:text-4xl">
-                Featured pieces
+                Featured drops
               </h2>
             </div>
             <Link
@@ -296,12 +296,12 @@ export default async function HomePage() {
               {
                 n: "01",
                 t: "Choose or customise",
-                d: "Pick a ready piece from the shop, or request a custom commission in your colours.",
+                d: "Pick your favourite tee or hoodie from the shop, or ask us about a custom print run.",
               },
               {
                 n: "02",
-                t: "We craft it by hand",
-                d: "Each piece is poured, cured and finished with care in our studio.",
+                t: "We print & finish it",
+                d: "Every piece is printed on heavyweight cotton and quality-checked before it ships.",
               },
               {
                 n: "03",
@@ -332,7 +332,7 @@ export default async function HomePage() {
             Kind words
           </p>
           <h2 className="mt-1 text-center font-serif text-3xl md:text-4xl">
-            Customers love their pieces
+            What our customers say
           </h2>
         </Reveal>
         <div className="mt-12 grid gap-6 md:grid-cols-3">
@@ -365,7 +365,7 @@ export default async function HomePage() {
             <div className="relative">
               <div className="relative aspect-[5/4] overflow-hidden rounded-3xl bg-muted shadow-2xl">
                 <Image
-                  src={galleryImg("Home Decor/Resin Name Plate/name-plate-1.jpg")}
+                  src="/products/level7/Level7_Foundation_Front.png"
                   alt="Our studio"
                   fill
                   sizes="(max-width:768px) 100vw, 50vw"
@@ -375,7 +375,7 @@ export default async function HomePage() {
               <div className="animate-float absolute -bottom-6 -right-4 rounded-2xl border border-border bg-card px-5 py-4 shadow-xl md:-right-8">
                 <p className="font-serif text-3xl gold-text">100%</p>
                 <p className="text-xs uppercase tracking-wider text-muted-foreground">
-                  handmade
+                  premium quality
                 </p>
               </div>
             </div>
@@ -386,8 +386,8 @@ export default async function HomePage() {
                 Our story
               </p>
               <h2 className="mt-2 font-serif text-4xl leading-tight">
-                Little pieces of art,{" "}
-                <em className="text-gold-shimmer italic">made to last.</em>
+                Quality and design,{" "}
+                <span className="text-gold-shimmer">made to last.</span>
               </h2>
               <p className="mt-5 leading-relaxed text-muted-foreground">
                 {settings.aboutText}
@@ -402,6 +402,11 @@ export default async function HomePage() {
         </div>
       </section>
 
+      {/* ---------------- Instagram ---------------- */}
+      <Reveal>
+        <InstagramSection />
+      </Reveal>
+
       {/* ---------------- CTA band ---------------- */}
       <section className="container-px mx-auto max-w-7xl pb-24">
         <Reveal>
@@ -413,16 +418,16 @@ export default async function HomePage() {
 
             <Sparkles className="mx-auto h-8 w-8 gold-text" />
             <h2 className="mx-auto mt-4 max-w-2xl font-serif text-3xl md:text-5xl">
-              Want something{" "}
-              <em className="text-gold-shimmer italic">made just for you?</em>
+              Looking for{" "}
+              <span className="text-gold-shimmer">custom merch?</span>
             </h2>
             <p className="mx-auto mt-4 max-w-lg text-background/70">
-              Custom name plates, keepsakes and wall art in your colours and
-              size. Tell us your idea and we&apos;ll bring it to life.
+              Custom prints, tees and hoodies for your team, event or brand.
+              Tell us your idea and we&apos;ll bring it to life.
             </p>
             <div className="mt-8 flex justify-center">
               <ButtonLink href="/contact" variant="gold" size="lg">
-                Request a custom piece <ArrowRight className="h-4 w-4" />
+                Request a custom order <ArrowRight className="h-4 w-4" />
               </ButtonLink>
             </div>
           </div>
@@ -439,7 +444,7 @@ function HeroTile({ src, ratio }: { src: string; ratio: string }) {
     >
       <Image
         src={src}
-        alt="Resin art"
+        alt="Level7 Clothing"
         fill
         sizes="(max-width:768px) 50vw, 25vw"
         className="object-cover transition-transform duration-[1.4s] ease-out hover:scale-110"

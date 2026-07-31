@@ -1,4 +1,4 @@
-# 🎨 Artvelle — Setup & Deployment Guide
+# 🎨 Level7 Clothing — Setup & Deployment Guide
 
 **Read this from top to bottom. Do the steps in order. Copy-paste the commands.**
 
@@ -25,7 +25,7 @@ Open **PowerShell** (press `Windows key`, type `powershell`, press Enter).
 Then paste this command and press Enter:
 
 ```powershell
-cd "C:\Users\15ind\OneDrive\Desktop\Quellflow\code\ResinArt\artvelle"
+cd "C:\Users\15ind\OneDrive\Desktop\Quellflow\code\ResinArt\level7clothing"
 ```
 
 > 💡 This just moves you "inside" the project folder. All other commands must be run from here.
@@ -39,7 +39,7 @@ The website needs a **database** to store products, orders, and customers. We us
 1. Go to 👉 **https://neon.tech**
 2. Click **Sign Up** → sign up with your Google account (easiest).
 3. It will ask you to create a project:
-   - **Project name:** `artvelle` (or anything)
+   - **Project name:** `level7clothing` (or anything)
    - **Region:** choose **AWS Asia Pacific (Singapore)** — closest to India
    - Click **Create**
 4. After creating, you'll see a **"Connection string"** box. It looks like this:
@@ -59,7 +59,7 @@ The website needs a **database** to store products, orders, and customers. We us
 ## Step 1.3 — Fill in your settings (.env file)
 
 1. Open the project folder in **File Explorer**:
-   `Desktop → Quellflow → code → ResinArt → artvelle`
+   `Desktop → Quellflow → code → ResinArt → level7clothing`
 2. Find the file named **`.env`** and open it with **Notepad**
    (right-click → Open with → Notepad).
 
@@ -71,10 +71,10 @@ The website needs a **database** to store products, orders, and customers. We us
 DATABASE_URL="paste-your-POOLED-neon-url-here"
 DIRECT_URL="paste-your-DIRECT-neon-url-here"
 
-AUTH_SECRET="artvelle-super-secret-key-12345-change-this-to-anything-random"
+AUTH_SECRET="level7clothing-super-secret-key-12345-change-this-to-anything-random"
 
-ADMIN_EMAIL="admin@artvelle.com"
-ADMIN_PASSWORD="artvelle123"
+ADMIN_EMAIL="admin@level7clothing.com"
+ADMIN_PASSWORD="level7admin123"
 ```
 
 4. **Save the file** (Ctrl + S) and close Notepad.
@@ -88,7 +88,7 @@ ADMIN_PASSWORD="artvelle123"
 
 ## Step 1.4 — Create the database tables + sample products
 
-Back in PowerShell (still inside the artvelle folder), run:
+Back in PowerShell (still inside the level7clothing folder), run:
 
 ```powershell
 npm run setup
@@ -98,8 +98,8 @@ Wait ~30 seconds. You should see:
 
 ```
 ✓ Site settings ready
-✓ Admin ready → admin@artvelle.com / artvelle123
-✓ Demo customer → customer@artvelle.com / customer123
+✓ Admin ready → admin@level7clothing.com / level7admin123
+✓ Demo customer → customer@level7clothing.com / customer123
 ✓ Seeded 10 products
 ```
 
@@ -127,7 +127,7 @@ Wait until you see `Ready`. Then open your browser and go to:
 | 🔐 **Admin panel** | http://localhost:3000/admin |
 
 **Admin login:** the email + password you put in the `.env` file
-(default: `admin@artvelle.com` / `artvelle123`)
+(default: `admin@level7clothing.com` / `level7admin123`)
 
 **Two-tier customer capture:**
 
@@ -141,7 +141,7 @@ Wait until you see `Ready`. Then open your browser and go to:
    (address, email, payment mode, etc.). They can then track every order — with a
    live status timeline — under **My account**.
 
-Try the demo customer: `customer@artvelle.com` / `customer123`.
+Try the demo customer: `customer@level7clothing.com` / `customer123`.
 
 > 💡 To **stop** the website, go back to PowerShell and press `Ctrl + C`.
 > To start again later: open PowerShell, `cd` into the folder (Step 1.1), then `npm run dev`.
@@ -160,7 +160,7 @@ With this, you get an email when someone **adds to cart (lead)** or **places an 
 1. Go to 👉 **https://resend.com**
 2. Sign up (free — 100 emails/day, 3,000/month).
 3. In the left menu click **API Keys** → **Create API Key**
-   - Name: `artvelle`
+   - Name: `level7clothing`
    - Permission: **Sending access**
    - Click **Create**
 4. **Copy the key** (starts with `re_...`). ⚠️ It's shown only once — copy it now!
@@ -171,7 +171,7 @@ Open `.env` in Notepad again and **add these two lines** at the bottom:
 
 ```env
 RESEND_API_KEY="re_paste_your_key_here"
-EMAIL_FROM="Artvelle <onboarding@resend.dev>"
+EMAIL_FROM="Level7 Clothing <onboarding@resend.dev>"
 ```
 
 Save the file. If the website is running, stop it (`Ctrl + C`) and start again (`npm run dev`).
@@ -180,7 +180,7 @@ Save the file. If the website is running, stop it (`Ctrl + C`) and start again (
 
 - Emails are sent **to** the address set in **Admin panel → Branding & settings → "Send order & lead emails to"**.
 - ⚠️ **Free limitation:** with `onboarding@resend.dev` as sender, Resend only delivers to **the same email address you signed up to Resend with**. So set "Send order & lead emails to" = your Resend signup email.
-- Later, to send emails to *any* customer: in Resend click **Domains → Add Domain**, add your own domain (like `artvelle.com`), follow their DNS steps, then change `EMAIL_FROM` to `Artvelle <orders@artvelle.com>`.
+- Later, to send emails to *any* customer: in Resend click **Domains → Add Domain**, add your own domain (like `level7clothing.com`), follow their DNS steps, then change `EMAIL_FROM` to `Level7 Clothing <orders@level7clothing.com>`.
 
 ---
 
@@ -188,7 +188,7 @@ Save the file. If the website is running, stop it (`Ctrl + C`) and start again (
 
 # 🌍 PART 3 — Put your website LIVE (Deploy to Vercel)
 
-After this part, your website will have a real address like `https://artvelle.vercel.app` that anyone can visit.
+After this part, your website will have a real address like `https://level7clothing.vercel.app` that anyone can visit.
 
 ## Step 3.1 — Create a GitHub account & repository
 
@@ -196,7 +196,7 @@ GitHub stores your code online. Vercel reads it from there.
 
 1. Go to 👉 **https://github.com** and sign up (free).
 2. Click the **+** (top right) → **New repository**
-   - Repository name: `artvelle`
+   - Repository name: `level7clothing`
    - Keep it **Private**
    - **Don't** tick any checkboxes (no README, no gitignore)
    - Click **Create repository**
@@ -204,7 +204,7 @@ GitHub stores your code online. Vercel reads it from there.
 
 ## Step 3.2 — Upload your code to GitHub
 
-In PowerShell (inside the artvelle folder), run these commands **one at a time**.
+In PowerShell (inside the level7clothing folder), run these commands **one at a time**.
 
 > Replace `YOUR_USERNAME` with your actual GitHub username in the 4th command!
 
@@ -213,7 +213,7 @@ git add .
 ```
 
 ```powershell
-git commit -m "Artvelle store - first version"
+git commit -m "Level7 Clothing store - first version"
 ```
 
 ```powershell
@@ -221,7 +221,7 @@ git branch -M main
 ```
 
 ```powershell
-git remote add origin https://github.com/YOUR_USERNAME/artvelle.git
+git remote add origin https://github.com/YOUR_USERNAME/level7clothing.git
 ```
 
 ```powershell
@@ -239,7 +239,7 @@ git push -u origin main
 1. Go to 👉 **https://vercel.com**
 2. Click **Sign Up** → **Continue with GitHub** (this links the two accounts).
 3. On your Vercel dashboard click **Add New… → Project**.
-4. You'll see your `artvelle` repository → click **Import**.
+4. You'll see your `level7clothing` repository → click **Import**.
 5. **⚠️ STOP — don't click Deploy yet!** First we add the settings (next step).
 
 ## Step 3.4 — Add your settings (Environment Variables) in Vercel
@@ -254,7 +254,7 @@ On the same import screen, open the **Environment Variables** section and add th
 | `ADMIN_EMAIL` | your admin email |
 | `ADMIN_PASSWORD` | your admin password |
 | `RESEND_API_KEY` | your Resend key (only if you did Part 2) |
-| `EMAIL_FROM` | `Artvelle <onboarding@resend.dev>` (only if you did Part 2) |
+| `EMAIL_FROM` | `Level7 Clothing <onboarding@resend.dev>` (only if you did Part 2) |
 
 > 💡 Easiest way: open your `.env` file in Notepad side-by-side and copy each value across. Don't include the quote marks `"` in Vercel.
 
@@ -268,8 +268,8 @@ Your live addresses:
 
 | Page | Address |
 |------|---------|
-| 🛍️ Store | `https://artvelle-xxxx.vercel.app` |
-| 🔐 Admin | `https://artvelle-xxxx.vercel.app/admin` |
+| 🛍️ Store | `https://level7clothing-xxxx.vercel.app` |
+| 🔐 Admin | `https://level7clothing-xxxx.vercel.app/admin` |
 
 > 💡 Your database already has the products (you set it up in Part 1) — the live site uses the **same** Neon database, so everything is already there!
 
@@ -326,7 +326,7 @@ Log in to your **live admin panel** (`https://your-site.vercel.app/admin`) and:
 
 ## How to update the website later (when I change the code)
 
-Whenever the code changes, run these 3 commands in PowerShell (inside the artvelle folder):
+Whenever the code changes, run these 3 commands in PowerShell (inside the level7clothing folder):
 
 ```powershell
 git add .
@@ -389,7 +389,7 @@ Then open http://localhost:3001
 
 | I want to… | Command / Place |
 |---|---|
-| Start website locally | `npm run dev` (inside artvelle folder) |
+| Start website locally | `npm run dev` (inside level7clothing folder) |
 | Stop website | `Ctrl + C` in PowerShell |
 | Reset/load sample data | `npm run setup` |
 | See database visually | `npm run db:studio` |

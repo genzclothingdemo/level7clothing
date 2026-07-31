@@ -20,6 +20,14 @@ export default async function AccountPage() {
 
   if (!user) redirect("/account/login");
 
+  // Saved addresses (address book)
+  const addresses = await prisma.address
+    .findMany({
+      where: { userId: user.id },
+      orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+    })
+    .catch(() => []);
+
   // Orders
   const raw = await prisma.order
     .findMany({
@@ -27,6 +35,20 @@ export default async function AccountPage() {
       orderBy: { createdAt: "desc" },
     })
     .catch(() => []);
+
+  // Latest return/exchange request per order, so the card can show its status.
+  const returnRequests = raw.length
+    ? await prisma.returnRequest
+        .findMany({
+          where: { orderId: { in: raw.map((o) => o.id) } },
+          orderBy: { createdAt: "desc" },
+        })
+        .catch(() => [])
+    : [];
+  const returnByOrder = new Map<string, (typeof returnRequests)[number]>();
+  for (const r of returnRequests) {
+    if (!returnByOrder.has(r.orderId)) returnByOrder.set(r.orderId, r);
+  }
 
   const orders: AccountOrder[] = raw.map((o) => ({
     id: o.id,
@@ -48,28 +70,17 @@ export default async function AccountPage() {
     statusHistory: (Array.isArray(o.statusHistory)
       ? o.statusHistory
       : []) as unknown as StatusEntry[],
+    returnRequest: (() => {
+      const r = returnByOrder.get(o.id);
+      return r
+        ? { kind: r.kind, status: r.status, createdAt: r.createdAt.toISOString() }
+        : null;
+    })(),
     address: o.address,
     city: o.city,
     state: o.state,
     pincode: o.pincode,
     note: o.note,
-  }));
-
-  // Reviews — approved for portfolio display
-  const reviewModel = (prisma as unknown as Record<string, any>).review;
-  const rawReviews = reviewModel
-    ? await reviewModel
-        .findMany({
-          where: { approved: true },
-          orderBy: [{ featured: "desc" }, { createdAt: "desc" }],
-          take: 50,
-        })
-        .catch(() => [])
-    : [];
-
-  const reviews = (rawReviews || []).map((r: Record<string, any>) => ({
-    ...r,
-    createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : new Date().toISOString(),
   }));
 
   return (
@@ -81,7 +92,7 @@ export default async function AccountPage() {
             Hello, {user.name.split(" ")[0]} 👋
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Manage your profile, view orders, and explore our portfolio
+            Manage your profile and view your orders
           </p>
         </div>
         <form action={logout}>
@@ -95,7 +106,7 @@ export default async function AccountPage() {
       </div>
 
       {/* ── Tabbed View ── */}
-      <AccountView user={user} orders={orders} reviews={reviews} />
+      <AccountView user={user} orders={orders} addresses={addresses} />
     </div>
   );
 }

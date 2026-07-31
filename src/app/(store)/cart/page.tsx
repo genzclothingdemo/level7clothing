@@ -5,22 +5,27 @@ import Link from "next/link";
 import { Minus, Plus, Trash2, ShoppingBag, ArrowRight } from "lucide-react";
 import { useCart } from "@/context/cart";
 import { ButtonLink } from "@/components/ui/button";
+import { CartUpsell } from "@/components/store/cart-upsell";
 import { formatINR } from "@/lib/utils";
 
 export default function CartPage() {
   const { items, updateQty, removeItem, subtotal } = useCart();
+  const cartSlugs = items.map((i) => i.slug);
 
   if (items.length === 0) {
     return (
-      <div className="container-px mx-auto flex max-w-2xl flex-col items-center py-28 text-center">
-        <ShoppingBag className="h-12 w-12 text-muted-foreground" />
-        <h1 className="mt-6 font-serif text-3xl">Your cart is empty</h1>
-        <p className="mt-2 text-muted-foreground">
-          Discover handmade resin pieces made to be loved.
-        </p>
-        <ButtonLink href="/shop" className="mt-8" size="lg">
-          Browse the shop <ArrowRight className="h-4 w-4" />
-        </ButtonLink>
+      <div className="container-px mx-auto max-w-6xl py-12">
+        <div className="flex flex-col items-center py-16 text-center">
+          <ShoppingBag className="h-12 w-12 text-muted-foreground" />
+          <h1 className="mt-6 font-serif text-3xl">Your cart is empty</h1>
+          <p className="mt-2 text-muted-foreground">
+            Discover premium tees and hoodies made to be worn.
+          </p>
+          <ButtonLink href="/shop" className="mt-8" size="lg">
+            Browse the shop <ArrowRight className="h-4 w-4" />
+          </ButtonLink>
+        </div>
+        <CartUpsell slugs={[]} title="Popular right now" />
       </div>
     );
   }
@@ -124,6 +129,8 @@ export default function CartPage() {
           </ButtonLink>
         </aside>
       </div>
+
+      <CartUpsell slugs={cartSlugs} />
     </div>
   );
 }

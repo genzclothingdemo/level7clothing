@@ -2,10 +2,23 @@ import Image from "next/image";
 import { getSettings } from "@/lib/settings";
 import { ButtonLink } from "@/components/ui/button";
 import { Reveal } from "@/components/store/reveal";
-import { galleryImg } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "About" };
+export const metadata = {
+  title: "About",
+  description:
+    "Level7 Clothing is a contemporary apparel brand focused on quality and design — premium oversized tees and hoodies.",
+  alternates: { canonical: "/about" },
+};
+
+const ABOUT_HERO_IMAGE =
+  "/products/level7/Level7_Core_Style.png";
+const ABOUT_GRID_IMAGES = [
+  "/products/level7/05.10.2024-182.jpg",
+  "/products/level7/Level7_Planet_Front.png",
+  "/products/level7/05.10.2024-128.jpg",
+  "/products/level7/Level7_Wine_Basic_Front.png",
+];
 
 export default async function AboutPage() {
   const s = await getSettings();
@@ -18,7 +31,7 @@ export default async function AboutPage() {
             Our story
           </p>
           <h1 className="mt-3 font-serif text-5xl leading-tight">
-            The art of {s.brandName}
+            {s.brandName}
           </h1>
           <p className="mx-auto mt-5 max-w-2xl text-lg leading-relaxed text-muted-foreground">
             {s.tagline}
@@ -29,7 +42,7 @@ export default async function AboutPage() {
       <Reveal delay={0.1}>
         <div className="relative mt-12 aspect-[16/9] overflow-hidden rounded-3xl bg-muted">
           <Image
-            src={galleryImg("Pooja Essentials/Resin Pooja Thali/pooja-thali-3.jpg")}
+            src={ABOUT_HERO_IMAGE}
             alt={s.brandName}
             fill
             sizes="100vw"
@@ -42,25 +55,19 @@ export default async function AboutPage() {
       <div className="mt-14 grid gap-10 md:grid-cols-2">
         <Reveal>
           <div>
-            <h2 className="font-serif text-3xl">Made by hand, with heart</h2>
+            <h2 className="font-serif text-3xl">Quality and design, always</h2>
             <p className="mt-4 leading-relaxed text-muted-foreground">
               {s.aboutText}
             </p>
             <p className="mt-4 leading-relaxed text-muted-foreground">
-              Every pour is a little unpredictable — that&apos;s the beauty of
-              resin. No two pieces are ever exactly alike, which means the piece
-              you receive is truly one of a kind.
+              Every piece is designed to be worn, not just owned — oversized
+              fits, premium fabric and graphics built to last through every wash.
             </p>
           </div>
         </Reveal>
         <Reveal delay={0.08}>
           <div className="grid grid-cols-2 gap-4">
-            {[
-              galleryImg("Pooja Essentials/God Photo Frame/god-frame-1.jpg"),
-              galleryImg("Tableware and Dining/Ring Platter/ring-platter-2.jpg"),
-              galleryImg("Pooja Essentials/Krishna Jhula/krishna-jhula-1.jpg"),
-              galleryImg("Personalised Gifts/Resin Photo Frame/photo-frame-2.jpg"),
-            ].map((src) => (
+            {ABOUT_GRID_IMAGES.map((src) => (
               <div
                 key={src}
                 className="relative aspect-square overflow-hidden rounded-2xl bg-muted"
@@ -80,8 +87,8 @@ export default async function AboutPage() {
 
       <div className="mt-16 grid gap-6 sm:grid-cols-3">
         {[
-          { t: "Handcrafted", d: "Poured & finished by hand in small batches." },
-          { t: "Made to order", d: "Custom colours, names and sizes on request." },
+          { t: "Premium quality", d: "Heavyweight fabric, oversized fits, built to last." },
+          { t: "Made to order", d: "Custom prints, sizes and colours on request." },
           { t: "Loved across India", d: "Carefully packed and shipped nationwide." },
         ].map((v, i) => (
           <Reveal key={v.t} delay={i * 0.06}>

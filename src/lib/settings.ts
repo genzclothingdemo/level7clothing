@@ -3,21 +3,21 @@ import { prisma } from "./prisma";
 import type { SettingsDTO } from "./types";
 
 export const DEFAULT_SETTINGS: SettingsDTO = {
-  brandName: "Artvelle",
-  tagline: "Handcrafted resin art, made to be seen.",
+  brandName: "Level7 Clothing",
+  tagline: "Premium GenZ Graphic Tees",
   logoUrl: null,
-  heroHeadline: "Art that captures light.",
+  heroHeadline: "Wear the statement.",
   heroSubtext:
-    "Original, handmade resin pieces — coasters, wall art, keepsakes and custom commissions.",
+    "Premium oversized tees and drop-shoulder hoodies — quality and design that enhance your everyday.",
   aboutText:
-    "Artvelle is a small studio creating one-of-a-kind resin art. Every piece is poured, cured and finished by hand.",
-  contactEmail: "hello@artvelle.example",
+    "Level7 Clothing is a contemporary apparel brand focused on quality and design. We curate graphic tees and hoodies that enhance your everyday.",
+  contactEmail: "hello@level7clothing.example",
   contactPhone: "+91 90000 00000",
   whatsapp: "+919000000000",
-  address: "Studio Artvelle, India",
+  address: "Level7 Clothing, India",
   instagram: "https://instagram.com",
   facebook: "",
-  adminNotifyEmail: "admin@artvelle.example",
+  adminNotifyEmail: "admin@level7clothing.example",
   currency: "INR",
   freeShippingThreshold: null,
   codEnabled: true,
@@ -26,7 +26,7 @@ export const DEFAULT_SETTINGS: SettingsDTO = {
   directEnabled: true,
   razorpayEnabled: false,
   nimbusEnabled: false,
-  announcement: "Free shipping on all prepaid orders • Handmade in India",
+  announcement: "Join the club — exclusive deals and early access to new drops",
 };
 
 /**

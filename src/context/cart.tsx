@@ -16,9 +16,9 @@ import { MiniSignupModal } from "@/components/store/mini-signup-modal";
 
 type NewCartItem = Omit<CartItem, "quantity" | "lineId">;
 
-const STORAGE_KEY = "artvelle_cart";
-const VISITOR_KEY = "artvelle_vid";
-const LEAD_COOKIE = "artvelle_lead";
+const STORAGE_KEY = "level7_cart";
+const VISITOR_KEY = "level7_vid";
+const LEAD_COOKIE = "level7_lead";
 const LEAD_MAX_AGE = 60 * 60 * 24 * 180; // 180 days
 
 export type LeadInfo = { name: string; phone: string };

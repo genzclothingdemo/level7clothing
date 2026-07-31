@@ -46,7 +46,7 @@ export function ShopFilters({ categories }: { categories: string[] }) {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search pieces…"
+            placeholder="Search tees, hoodies…"
             className="h-11 w-full rounded-full border border-input bg-card pl-10 pr-4 text-sm outline-none focus:ring-2 focus:ring-ring"
           />
         </form>

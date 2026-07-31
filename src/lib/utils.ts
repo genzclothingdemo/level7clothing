@@ -24,10 +24,10 @@ export function slugify(text: string): string {
 }
 
 export function orderNumber(): string {
-  // AV-<base36 time><2 random chars> — human friendly, hard to collide
+  // L7-<base36 time><2 random chars> — human friendly, hard to collide
   const t = Date.now().toString(36).toUpperCase();
   const r = Math.random().toString(36).slice(2, 4).toUpperCase();
-  return `AV-${t}${r}`;
+  return `L7-${t}${r}`;
 }
 
 /**
@@ -46,8 +46,4 @@ export function whatsappLink(phone: string, message: string): string {
   const to = normalisePhone(phone);
   return `https://wa.me/${to}?text=${encodeURIComponent(message)}`;
 }
-
-/** Encode a gallery path (folder names contain spaces → %20). */
-export const galleryImg = (path: string) =>
-  encodeURI(`/products/gallery/${path}`);
 

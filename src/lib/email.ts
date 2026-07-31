@@ -4,7 +4,7 @@ import type { SettingsDTO } from "./types";
 import { formatINR } from "./utils";
 
 const apiKey = process.env.RESEND_API_KEY;
-const FROM = process.env.EMAIL_FROM || "Artvelle <onboarding@resend.dev>";
+const FROM = process.env.EMAIL_FROM || "Level7 Clothing <onboarding@resend.dev>";
 
 const resend = apiKey ? new Resend(apiKey) : null;
 

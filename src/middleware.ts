@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const ADMIN_COOKIE = "artvelle_admin";
+const ADMIN_COOKIE = "level7_admin";
 
 // Lightweight gate: redirect to login if the admin cookie is missing.
 // Full JWT verification happens in the admin layout (Node runtime).

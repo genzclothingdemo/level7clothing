@@ -1,4 +1,4 @@
-// Artvelle — Prisma schema
+// Level7 Clothing — Prisma schema
 // Database: PostgreSQL (Vercel Postgres / Neon)
 
 generator client {
@@ -115,8 +115,28 @@ model User {
   resetToken       String?   @unique
   resetTokenExpiry DateTime?
   orders           Order[]
+  addresses        Address[]
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
+}
+
+// -------- Saved shipping addresses (address book) --------
+model Address {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label     String   @default("Home") // Home | Work | Other — customer's own name for it
+  fullName  String
+  phone     String
+  address   String
+  city      String
+  state     String
+  pincode   String
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
 }
 
 // -------- Leads (interested customers / add-to-cart) --------
@@ -156,19 +176,19 @@ model Message {
 // -------- Site settings (branding + contact), single row --------
 model SiteSettings {
   id                    String   @id @default("main")
-  brandName             String   @default("Artvelle")
-  tagline               String   @default("Handcrafted resin art, made to be seen.")
+  brandName             String   @default("Level7 Clothing")
+  tagline               String   @default("Premium GenZ Graphic Tees")
   logoUrl               String?
-  heroHeadline          String   @default("Art that captures light.")
-  heroSubtext           String   @default("Original, handmade resin pieces — coasters, wall art, keepsakes and custom commissions.")
-  aboutText             String   @default("Artvelle is a small studio creating one-of-a-kind resin art. Every piece is poured, cured and finished by hand.")
-  contactEmail          String   @default("hello@artvelle.example")
+  heroHeadline          String   @default("Wear the statement.")
+  heroSubtext           String   @default("Premium oversized tees and drop-shoulder hoodies — quality and design that enhance your everyday.")
+  aboutText             String   @default("Level7 Clothing is a contemporary apparel brand focused on quality and design. We curate graphic tees and hoodies that enhance your everyday.")
+  contactEmail          String   @default("hello@level7clothing.example")
   contactPhone          String   @default("+91 90000 00000")
   whatsapp              String?  @default("+919000000000")
-  address               String?  @default("Studio Artvelle, India")
+  address               String?  @default("Level7 Clothing, India")
   instagram             String?  @default("https://instagram.com")
   facebook              String?  @default("")
-  adminNotifyEmail      String   @default("admin@artvelle.example")
+  adminNotifyEmail      String   @default("admin@level7clothing.example")
   currency              String   @default("INR")
   freeShippingThreshold Int? // free shipping above this order value
   razorpayEnabled       Boolean  @default(false) // master switch for online payments
@@ -178,7 +198,7 @@ model SiteSettings {
   prepaidEnabled        Boolean  @default(true)  // Prepaid (full online) — needs Razorpay
   partialEnabled        Boolean  @default(true)  // Advance + COD — needs Razorpay
   directEnabled         Boolean  @default(true)  // Customised order (pay to owner)
-  announcement          String?  @default("Free shipping on all prepaid orders • Handmade in India")
+  announcement          String?  @default("Join the club — exclusive deals and early access to new drops")
   updatedAt             DateTime @updatedAt
 }
 
@@ -192,6 +212,39 @@ model AdminUser {
 }
 
 // -------- Categories --------
+// -------- Return / exchange requests --------
+model ReturnRequest {
+  id          String   @id @default(cuid())
+  orderId     String
+  orderNumber String
+  userId      String? // null for guest lookups
+  email       String
+  kind        String   @default("return") // return | exchange
+  reason      String
+  details     String?
+  // Preferred replacement size, only meaningful for exchanges.
+  exchangeSize String?
+  status      String   @default("requested") // requested | approved | rejected | completed
+  adminNote   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([status])
+  @@index([email])
+}
+
+// -------- Newsletter --------
+model NewsletterSubscriber {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  source       String    @default("footer") // where they signed up from
+  unsubscribed Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+
+  @@index([unsubscribed])
+}
+
 model Category {
   id        String   @id @default(cuid())
   name      String   @unique

@@ -25,7 +25,7 @@ import {
 
 function orderWhatsAppMessage(o: AdminOrder): string {
   const lines = [
-    `Hi ${o.customerName.split(" ")[0]}, thank you for your order with Artvelle! 🧡`,
+    `Hi ${o.customerName.split(" ")[0]}, thank you for your order with Level7 Clothing! 🧡`,
     ``,
     `Order: ${o.orderNumber}`,
     ...o.items.map((i) => `• ${i.name} × ${i.quantity}`),

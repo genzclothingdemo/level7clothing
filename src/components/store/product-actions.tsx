@@ -73,14 +73,16 @@ export function WhatsAppProductButton({
         onClick={open}
         aria-label={`Ask about ${product.name} on WhatsApp`}
         className={cn(
-          "inline-flex h-12 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-full border border-[#25D366]/50 px-5 text-sm font-medium text-[#1da851] transition-all duration-200",
+          "inline-flex h-12 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-full border border-[#25D366]/50 px-3 text-sm font-medium text-[#1da851] transition-all duration-200 sm:px-5",
           "hover:border-[#25D366] hover:bg-[#25D366]/8 hover:shadow-sm hover:-translate-y-0.5",
           "active:scale-[0.97]",
           className
         )}
       >
         <WhatsAppIcon className="h-4 w-4 shrink-0" />
-        <span>WhatsApp</span>
+        {/* Icon-only on phones — this button is shrink-0, so keeping the label
+            here is what forced the Buy now row past the viewport at 320px. */}
+        <span className="hidden sm:inline">WhatsApp</span>
       </button>
     );
   }

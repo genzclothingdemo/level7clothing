@@ -187,6 +187,27 @@ select.input {
   color: var(--muted-foreground);
 }
 
+/* ---------------------------------------------------------------------------
+   iOS Safari force-zooms the whole page whenever a focused form field has a
+   font-size below 16px — and never zooms back out. Our fields are 14px
+   (`.input`, plus a few inline `text-sm` ones), so every search, filter and
+   checkout field triggered it. This is the "the site zooms itself" bug.
+
+   Fix it by raising fields to the 16px floor on phones only; desktop keeps the
+   tighter 14px scale. `!important` is needed because Tailwind utilities
+   (`text-sm`) sit in a later layer than anything we can write here.
+
+   Do NOT "fix" this with `maximum-scale=1` / `user-scalable=no` in the viewport
+   meta — that disables pinch-zoom for everyone and is a WCAG failure.
+--------------------------------------------------------------------------- */
+@media (max-width: 767px) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
 /* Fade-in-up used by non-JS sections */
 @keyframes fadeUp {
   from {

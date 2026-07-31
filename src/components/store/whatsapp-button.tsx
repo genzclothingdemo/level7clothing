@@ -1,6 +1,7 @@
 "use client";
 
 import { useSettings } from "@/context/settings";
+import { useKeyboardOpen } from "@/hooks/use-keyboard-open";
 
 function WhatsAppIcon({ className }: { className?: string }) {
   return (
@@ -12,21 +13,27 @@ function WhatsAppIcon({ className }: { className?: string }) {
 
 export function WhatsAppButton() {
   const s = useSettings();
+  const keyboardOpen = useKeyboardOpen();
+
   if (!s.whatsapp) return null;
   const number = s.whatsapp.replace(/[^0-9]/g, "");
   if (!number) return null;
+  // While typing, a floating button just covers the field being filled in.
+  if (keyboardOpen) return null;
 
   const message = encodeURIComponent(
     `Hi ${s.brandName}, I'd love to know more about your tees and hoodies.`
   );
 
+  // bottom-24 clears the fixed mobile tab bar; md+ has no tab bar so the
+  // button drops back to the usual FAB offset.
   return (
     <a
       href={`https://wa.me/${number}?text=${message}`}
       target="_blank"
       rel="noreferrer"
       aria-label="Chat on WhatsApp"
-      className="group fixed bottom-5 right-5 z-30 grid h-13 w-13 place-items-center rounded-full bg-[#25D366] text-white shadow-lg shadow-black/15 transition-colors hover:bg-[#1FB855]"
+      className="group fixed bottom-24 right-5 z-30 grid h-13 w-13 place-items-center rounded-full bg-[#25D366] text-white shadow-lg shadow-black/15 transition-colors hover:bg-[#1FB855] md:bottom-5"
     >
       {/* No perpetual ping ring — the label on hover is enough of an invitation. */}
       <WhatsAppIcon className="relative h-6 w-6" />

@@ -203,7 +203,12 @@ export default async function ProductPage({
       </nav>
 
       <ProductViewProvider>
-      <div className="grid items-start gap-10 md:grid-cols-2 lg:gap-16">
+      {/* grid-cols-[minmax(0,1fr)]: below md there is no explicit column, so the
+          implicit track is auto-sized and grows to the gallery's min-content
+          (307px inside a 280px container) — that was the horizontal scroll on
+          320px phones. min-w-0 on the child can't fix track sizing; only the
+          track's own minmax(0,…) can. md:grid-cols-2 is already safe. */}
+      <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-10 md:grid-cols-2 lg:gap-16">
         {/* Gallery: pinned to the top and sticky so a long description never
             stretches or scrolls the square photo out of view. */}
         {/* min-w-0: the gallery's thumbnail rail is a horizontal scroller, and a

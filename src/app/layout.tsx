@@ -27,6 +27,9 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
+  // Shrink the layout viewport when the on-screen keyboard opens, so fixed
+  // elements stay anchored to the visible area instead of drifting behind it.
+  interactiveWidget: "resizes-content",
 };
 
 function siteUrl() {

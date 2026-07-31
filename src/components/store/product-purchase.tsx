@@ -237,12 +237,12 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
               variant="gold"
               size="lg"
               disabled={buying || needsChoice}
-              className="flex-1 min-w-0"
+              className="flex-1 min-w-0 whitespace-nowrap"
             >
               {buying ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
               ) : (
-                <Zap className="h-4 w-4" />
+                <Zap className="h-4 w-4 shrink-0" />
               )}
               Buy now · {formatINR(unitPrice * qty)}
             </Button>

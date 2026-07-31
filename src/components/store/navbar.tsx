@@ -21,6 +21,7 @@ import { useSettings } from "@/context/settings";
 import { useWishlist } from "@/context/wishlist";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { SearchBox } from "@/components/store/search-box";
+import { useKeyboardOpen } from "@/hooks/use-keyboard-open";
 import { cn } from "@/lib/utils";
 
 const cat = (name: string) => `/shop?category=${encodeURIComponent(name)}`;
@@ -132,6 +133,7 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
   const { count, setOpen } = useCart();
   const { count: wishlistCount } = useWishlist();
   const pathname = usePathname();
+  const keyboardOpen = useKeyboardOpen();
   const [scrolled, setScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [prevPathname, setPrevPathname] = useState(pathname);
@@ -169,7 +171,7 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
             : "border-b border-transparent bg-background/0"
         )}
       >
-        <nav className="container-px mx-auto flex h-14 max-w-7xl items-center justify-between gap-3 md:h-20">
+        <nav className="container-px mx-auto flex h-14 max-w-7xl items-center justify-between gap-2 md:h-20 md:gap-3">
           {/* Mobile: hamburger */}
           <button
             onClick={() => setMobileMenuOpen(true)}
@@ -180,17 +182,20 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
           </button>
 
           {/* Logo */}
-          <Link href="/" className="flex shrink-0 items-center gap-2">
+          {/* min-w-0 (not shrink-0): the brand is the only flexible item in this
+              row, so pinning it at content width pushed the header past the
+              viewport on 320px phones. Let it truncate instead. */}
+          <Link href="/" className="flex min-w-0 items-center gap-2">
             {settings.logoUrl ? (
               <Image
                 src={settings.logoUrl}
                 alt={settings.brandName}
                 width={130}
                 height={36}
-                className="h-7 w-auto object-contain md:h-8"
+                className="h-7 w-auto max-w-[42vw] object-contain md:h-8 md:max-w-none"
               />
             ) : (
-              <span className="font-serif text-xl tracking-tight md:text-2xl">
+              <span className="truncate font-serif text-lg tracking-tight sm:text-xl md:text-2xl">
                 {settings.brandName}
               </span>
             )}
@@ -372,9 +377,10 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
         </div>
       </div>
 
-      {/* ── Mobile bottom tab bar (hidden on md+) ── */}
+      {/* ── Mobile bottom tab bar (hidden on md+, and while typing) ── */}
       <nav
         aria-label="Mobile navigation"
+        hidden={keyboardOpen}
         className={cn(
           "fixed bottom-0 inset-x-0 z-50 md:hidden",
           "border-t border-border bg-background/95 backdrop-blur-xl",

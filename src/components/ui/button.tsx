@@ -18,10 +18,13 @@ const variants: Record<Variant, string> = {
     "bg-transparent text-danger border border-danger/40 hover:bg-danger/10",
 };
 
+// Horizontal padding tightens on small screens. At 320px a `lg` button with
+// px-8 spends 64px of its width on padding alone, which crushed the label on
+// the product page's Buy now row (and pushed the page into horizontal scroll).
 const sizes: Record<Size, string> = {
-  sm: "h-9 px-4 text-[13px]",
-  md: "h-11 px-6 text-sm",
-  lg: "h-[52px] px-8 text-sm",
+  sm: "h-9 px-3 text-[13px] sm:px-4",
+  md: "h-11 px-4 text-sm sm:px-6",
+  lg: "h-[52px] px-4 text-sm sm:px-8",
   icon: "h-10 w-10",
 };
 

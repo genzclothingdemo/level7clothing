@@ -15,7 +15,7 @@ export default function ProductLoading() {
         <Skeleton className="h-3 w-40" />
       </div>
 
-      <div className="grid items-start gap-10 md:grid-cols-2 lg:gap-16">
+      <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-10 md:grid-cols-2 lg:gap-16">
         {/* Gallery */}
         <div className="min-w-0">
           <Skeleton className="aspect-[4/5] w-full rounded-lg" />

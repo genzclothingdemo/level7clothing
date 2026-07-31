@@ -8,7 +8,11 @@ import { getSettings } from "@/lib/settings";
 import { sendOrderStatusEmail } from "@/lib/email";
 import { isLeadStatus } from "@/lib/leads";
 import { slugify } from "@/lib/utils";
-import { createDraftForOrder, dispatchOrder } from "@/lib/fulfilment";
+import {
+  createDraftForOrder,
+  dispatchOrder,
+  syncOrderFromNimbus,
+} from "@/lib/fulfilment";
 
 async function requireAdmin() {
   const session = await getAdminSession();
@@ -513,17 +517,30 @@ export async function confirmOrder(id: string) {
 
 // -------- Shipping (NimbusPost) --------
 // One-click dispatch: generate the AWB (uses the staged draft if present).
+/**
+ * Books a staged draft. If nothing is staged yet it stages the draft and stops
+ * — booking never happens on the same click, so the draft can be reviewed in
+ * NimbusPost (or here) first.
+ */
 export async function shipOrderViaNimbus(id: string) {
-  console.log(`[STEP 1 & 2] Server Action shipOrderViaNimbus invoked for orderId: ${id}`);
   await requireAdmin();
-  console.log("[STEP 3 & 4] Admin Auth Check Passed.");
 
   const result = await dispatchOrder(id);
   if (!result.ok) {
-    console.error("[STEP-FAIL] dispatchOrder failed:", result.error);
+    console.error("[admin] dispatchOrder failed:", result.error);
     return { ok: false as const, error: result.error || "Failed to create shipment." };
   }
-  console.log("[STEP 8] Shipment success! AWB:", result.awb);
+
+  // Draft staged only — no courier, no AWB, no wallet charge, nothing to email.
+  if (result.outcome === "drafted") {
+    revalidatePath("/admin/orders");
+    revalidatePath("/admin");
+    return {
+      ok: true as const,
+      outcome: "drafted" as const,
+      nimbusOrderId: result.nimbusOrderId,
+    };
+  }
 
   // Notify the customer their order has shipped (with tracking).
   try {
@@ -548,7 +565,60 @@ export async function shipOrderViaNimbus(id: string) {
 
   revalidatePath("/admin/orders");
   revalidatePath("/admin");
-  return { ok: true as const, awb: result.awb, courier: result.courier };
+  return {
+    ok: true as const,
+    outcome: "booked" as const,
+    awb: result.awb,
+    courier: result.courier,
+  };
+}
+
+/**
+ * Pull in a booking made by a human in the NimbusPost dashboard, so the AWB,
+ * courier and tracking link land in our database and the customer gets notified.
+ */
+export async function syncOrderFromNimbusAction(id: string) {
+  await requireAdmin();
+
+  const result = await syncOrderFromNimbus(id);
+  if (!result.ok) return { ok: false as const, error: result.error };
+
+  if (result.outcome === "not-booked") {
+    return {
+      ok: true as const,
+      outcome: "not-booked" as const,
+      orderStatus: result.orderStatus,
+    };
+  }
+
+  try {
+    const [settings, order] = await Promise.all([
+      getSettings(),
+      prisma.order.findUnique({ where: { id } }),
+    ]);
+    if (order) {
+      await sendOrderStatusEmail(settings, {
+        orderNumber: order.orderNumber,
+        customerName: order.customerName,
+        email: order.email,
+        status: "shipped",
+        courier: order.courier,
+        trackingNumber: order.trackingNumber,
+        trackingUrl: order.trackingUrl,
+      });
+    }
+  } catch (err) {
+    console.error("[admin] sync ship email failed:", err);
+  }
+
+  revalidatePath("/admin/orders");
+  revalidatePath("/admin");
+  return {
+    ok: true as const,
+    outcome: "synced" as const,
+    awb: result.awb,
+    courier: result.courier,
+  };
 }
 
 // -------- Cancel abandoned order & restore stock --------

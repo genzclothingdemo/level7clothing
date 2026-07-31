@@ -3,7 +3,7 @@ import { getSettings } from "./settings";
 import {
   isNimbusPostConfigured,
   createDraftOrder,
-  createShipment,
+  getOrderState,
   shipDraft,
   type ShipmentInput,
 } from "./nimbuspost";
@@ -117,14 +117,22 @@ export async function createDraftForOrder(
   }
 }
 
+export type DispatchResult =
+  | { ok: true; outcome: "booked"; awb: string; courier: string | null }
+  | { ok: true; outcome: "drafted"; nimbusOrderId: string }
+  | { ok: false; error: string };
+
 /**
- * One-click dispatch: generate the AWB. Uses the existing NimbusPost draft when
- * present (orders/ship), otherwise creates the shipment outright (shipments).
- * Updates the order with courier/AWB/tracking and marks it shipped.
+ * Book a staged draft → allocates the courier, generates the AWB and charges
+ * the NimbusPost wallet.
+ *
+ * Deliberately CANNOT create-and-book in one call. Every order must exist in
+ * NimbusPost as an unbooked draft first so a human can review it there (or
+ * here) before any money moves. If no draft is staged yet this stages one and
+ * stops, returning `outcome: "drafted"` — booking then needs a second,
+ * separate action.
  */
-export async function dispatchOrder(
-  orderId: string
-): Promise<{ ok: boolean; awb?: string; courier?: string | null; error?: string }> {
+export async function dispatchOrder(orderId: string): Promise<DispatchResult> {
   const settings = await getSettings();
   if (!settings.nimbusEnabled) {
     return { ok: false, error: "NimbusPost shipping is turned off. Enable it in Admin → Settings." };
@@ -133,7 +141,7 @@ export async function dispatchOrder(
     return {
       ok: false,
       error:
-        "NimbusPost isn't set up. Add NIMBUSPOST_EMAIL, NIMBUSPOST_PASSWORD and NIMBUSPOST_WAREHOUSE_NAME.",
+        "NimbusPost isn't set up. Add NIMBUSPOST_API_KEY, NIMBUSPOST_API_SECRET and NIMBUSPOST_WAREHOUSE_NAME.",
     };
   }
 
@@ -143,16 +151,22 @@ export async function dispatchOrder(
     return { ok: false, error: `This order already has an AWB (${order.trackingNumber}).` };
   }
 
-  try {
-    let result;
-    if (order.nimbusShipmentId) {
-      // Draft already staged → just generate the AWB.
-      result = await shipDraft(order.nimbusShipmentId);
-    } else {
-      const input = await buildShipmentInput(orderId);
-      if (!input) return { ok: false, error: "Order not found" };
-      result = await createShipment(input);
+  // No draft yet → stage one and stop. Booking is a separate, deliberate act.
+  if (!order.nimbusShipmentId) {
+    const staged = await createDraftForOrder(orderId);
+    if (!staged.ok || !staged.nimbusOrderId) {
+      return {
+        ok: false,
+        error:
+          staged.error ??
+          `Could not stage a draft in NimbusPost (${staged.skipped ?? "unknown reason"}).`,
+      };
     }
+    return { ok: true, outcome: "drafted", nimbusOrderId: staged.nimbusOrderId };
+  }
+
+  try {
+    const result = await shipDraft(order.nimbusShipmentId);
 
     const history = Array.isArray(order.statusHistory)
       ? (order.statusHistory as unknown as { status: string; note?: string; at: string }[])
@@ -175,7 +189,71 @@ export async function dispatchOrder(
       },
     });
 
-    return { ok: true, awb: result.awb, courier: result.courierName };
+    return {
+      ok: true,
+      outcome: "booked",
+      awb: result.awb,
+      courier: result.courierName,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export type SyncResult =
+  | { ok: true; outcome: "synced"; awb: string; courier: string | null }
+  | { ok: true; outcome: "not-booked"; orderStatus: string }
+  | { ok: false; error: string };
+
+/**
+ * Pull a booking made outside this admin — i.e. someone reviewed the draft in
+ * the NimbusPost dashboard and booked it there. Without this the AWB never
+ * reaches our database, so the customer gets no tracking and the status webhook
+ * (which matches on AWB) can never find the order.
+ */
+export async function syncOrderFromNimbus(orderId: string): Promise<SyncResult> {
+  if (!isNimbusPostConfigured()) {
+    return { ok: false, error: "NimbusPost isn't configured." };
+  }
+
+  const order = await prisma.order.findUnique({ where: { id: orderId } });
+  if (!order) return { ok: false, error: "Order not found" };
+  if (!order.nimbusShipmentId) {
+    return { ok: false, error: "No NimbusPost draft is staged for this order yet." };
+  }
+
+  try {
+    const state = await getOrderState(order.nimbusShipmentId);
+    if (!state.booked || !state.awb) {
+      return { ok: true, outcome: "not-booked", orderStatus: state.orderStatus };
+    }
+
+    // Already recorded — nothing to do, and don't re-append history.
+    if (order.trackingNumber === state.awb) {
+      return { ok: true, outcome: "synced", awb: state.awb, courier: state.courierName };
+    }
+
+    const history = Array.isArray(order.statusHistory)
+      ? (order.statusHistory as unknown as { status: string; note?: string; at: string }[])
+      : [];
+    history.push({
+      status: "shipped",
+      note: `Booked in the NimbusPost dashboard${state.courierName ? ` (${state.courierName})` : ""} — AWB ${state.awb}`,
+      at: new Date().toISOString(),
+    });
+
+    await prisma.order.update({
+      where: { id: orderId },
+      data: {
+        status: "shipped",
+        courier: state.courierName,
+        trackingNumber: state.awb,
+        trackingUrl: state.trackingUrl,
+        statusHistory: history as unknown as object[],
+      },
+    });
+
+    return { ok: true, outcome: "synced", awb: state.awb, courier: state.courierName };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

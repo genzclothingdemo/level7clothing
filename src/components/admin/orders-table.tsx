@@ -11,6 +11,7 @@ import {
   XCircle,
   CheckCircle2,
   MessageSquare,
+  RefreshCw,
 } from "lucide-react";
 import { formatINR, whatsappLink } from "@/lib/utils";
 import {
@@ -18,6 +19,7 @@ import {
   updatePaymentStatus,
   updateOrderTracking,
   shipOrderViaNimbus,
+  syncOrderFromNimbusAction,
   cancelAndRestoreStock,
   confirmOrder,
   addOrderNote,
@@ -432,6 +434,7 @@ function TrackingEditor({ order }: { order: AdminOrder }) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [shipping, startShip] = useTransition();
+  const [syncing, startSync] = useTransition();
   const [courier, setCourier] = useState(order.courier ?? "");
   const [trackingNumber, setTrackingNumber] = useState(
     order.trackingNumber ?? ""
@@ -455,12 +458,41 @@ function TrackingEditor({ order }: { order: AdminOrder }) {
   function shipViaNimbus() {
     startShip(async () => {
       const res = await shipOrderViaNimbus(order.id);
-      if (res.ok) {
+      if (!res.ok) {
+        toast.error(res.error || "Could not dispatch", { duration: 10000 });
+        return;
+      }
+      if (res.outcome === "drafted") {
         toast.success(
-          `Dispatched — AWB ${res.awb}${res.courier ? ` (${res.courier})` : ""}`
+          "Draft sent to NimbusPost — review it there, then book to generate the AWB.",
+          { duration: 8000 }
         );
-        router.refresh();
-      } else toast.error(res.error || "Could not dispatch", { duration: 10000 });
+      } else {
+        toast.success(
+          `Booked — AWB ${res.awb}${res.courier ? ` (${res.courier})` : ""}`
+        );
+      }
+      router.refresh();
+    });
+  }
+
+  function syncFromNimbus() {
+    startSync(async () => {
+      const res = await syncOrderFromNimbusAction(order.id);
+      if (!res.ok) {
+        toast.error(res.error || "Could not sync", { duration: 8000 });
+        return;
+      }
+      if (res.outcome === "not-booked") {
+        toast.info(`Not booked in NimbusPost yet (status: ${res.orderStatus}).`, {
+          duration: 6000,
+        });
+        return;
+      }
+      toast.success(
+        `Synced — AWB ${res.awb}${res.courier ? ` (${res.courier})` : ""}`
+      );
+      router.refresh();
     });
   }
 
@@ -474,28 +506,50 @@ function TrackingEditor({ order }: { order: AdminOrder }) {
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
         {staged
-          ? "A draft shipment is staged in NimbusPost — one click generates the AWB."
-          : "Generate a courier + AWB via NimbusPost, or enter tracking manually."}{" "}
+          ? "A draft is staged in NimbusPost. Review it there, then book here — or book it in their dashboard and press Sync to pull the AWB back."
+          : "Step 1 sends an unbooked draft to NimbusPost for review. Nothing is booked and no wallet charge happens until you book it."}{" "}
         Saved details show in the customer&apos;s account.
       </p>
 
       {!order.trackingNumber && (
-        <button
-          onClick={shipViaNimbus}
-          disabled={shipping}
-          className="mt-3 inline-flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-xs font-medium text-accent-foreground disabled:opacity-50 cursor-pointer"
-        >
-          {shipping ? (
-            <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Dispatching…
-            </>
-          ) : (
-            <>
-              <Truck className="h-3.5 w-3.5" />{" "}
-              {staged ? "Dispatch (generate AWB)" : "Dispatch via NimbusPost"}
-            </>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            onClick={shipViaNimbus}
+            disabled={shipping || syncing}
+            className="inline-flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-xs font-medium text-accent-foreground disabled:opacity-50 cursor-pointer"
+          >
+            {shipping ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />{" "}
+                {staged ? "Booking…" : "Sending draft…"}
+              </>
+            ) : (
+              <>
+                <Truck className="h-3.5 w-3.5" />{" "}
+                {staged ? "Book & generate AWB" : "Send draft to NimbusPost"}
+              </>
+            )}
+          </button>
+
+          {staged && (
+            <button
+              onClick={syncFromNimbus}
+              disabled={shipping || syncing}
+              className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2 text-xs font-medium disabled:opacity-50 cursor-pointer hover:bg-muted"
+              title="Already booked it in the NimbusPost dashboard? Pull the AWB in."
+            >
+              {syncing ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Syncing…
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="h-3.5 w-3.5" /> Sync from NimbusPost
+                </>
+              )}
+            </button>
           )}
-        </button>
+        </div>
       )}
       <div className="mt-3 grid gap-3 sm:grid-cols-3">
         <label className="block">

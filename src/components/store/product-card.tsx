@@ -7,6 +7,7 @@ import { ButtonLink } from "@/components/ui/button";
 import { AddToCartButton } from "./add-to-cart";
 import { BuyNowButton, WhatsAppProductButton } from "./product-actions";
 import { WishlistButton } from "./wishlist-button";
+import { LinkPendingOverlay, LinkPendingDot } from "./link-pending";
 
 export function ProductCard({ product }: { product: ProductDTO }) {
   const discount =
@@ -76,6 +77,9 @@ export function ProductCard({ product }: { product: ProductDTO }) {
         <span className="absolute inset-x-3 bottom-3 hidden translate-y-3 items-center justify-center gap-1.5 rounded-full bg-card/90 py-2 text-xs font-medium opacity-0 shadow-lg backdrop-blur transition-all duration-500 group-hover:translate-y-0 group-hover:opacity-100 sm:flex">
           <Eye className="h-3.5 w-3.5" /> Quick view
         </span>
+
+        {/* Acknowledges the click immediately while the page is fetched. */}
+        <LinkPendingOverlay />
       </Link>
       </div>
 
@@ -88,6 +92,7 @@ export function ProductCard({ product }: { product: ProductDTO }) {
           className="mt-0.5 line-clamp-2 font-serif text-sm leading-snug transition-colors hover:text-accent sm:mt-1 sm:text-lg"
         >
           {product.name}
+          <LinkPendingDot />
         </Link>
         <div className="mt-1 flex flex-wrap items-baseline gap-x-2 sm:mt-2">
           <span className="text-sm font-semibold sm:text-base">

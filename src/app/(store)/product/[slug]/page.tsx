@@ -83,20 +83,18 @@ export default async function ProductPage({
   const product = await getProductBySlug(slug);
   if (!product || !product.isActive) notFound();
 
-  const related = await getRelated(
-    product.category,
-    product.id,
-    4,
-    product.secondaryCategory
-  );
-
-  const rawReviews = await prisma.review
-    .findMany({
-      where: { productId: product.id, approved: true },
-      orderBy: [{ featured: "desc" }, { createdAt: "desc" }],
-      take: 50,
-    })
-    .catch(() => []);
+  // Both of these only need product.id, so run them together rather than
+  // sequentially — one fewer database round trip on every product view.
+  const [related, rawReviews] = await Promise.all([
+    getRelated(product.category, product.id, 4, product.secondaryCategory),
+    prisma.review
+      .findMany({
+        where: { productId: product.id, approved: true },
+        orderBy: [{ featured: "desc" }, { createdAt: "desc" }],
+        take: 50,
+      })
+      .catch(() => []),
+  ]);
 
   const reviews: PublicReview[] = rawReviews.map((r) => ({
     id: r.id,

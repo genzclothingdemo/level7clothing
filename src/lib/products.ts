@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { prisma } from "./prisma";
 import type { Prisma, Product } from "@prisma/client";
 import type {
@@ -130,12 +131,12 @@ export async function getFeatured(limit = 4): Promise<ProductDTO[]> {
  * engines a live product had been deleted. A thrown error surfaces as a 500
  * instead, which is both accurate and retried rather than deindexed.
  */
-export async function getProductBySlug(
-  slug: string
-): Promise<ProductDTO | null> {
-  const product = await prisma.product.findUnique({ where: { slug } });
-  return product ? toDTO(product) : null;
-}
+export const getProductBySlug = cache(
+  async (slug: string): Promise<ProductDTO | null> => {
+    const product = await prisma.product.findUnique({ where: { slug } });
+    return product ? toDTO(product) : null;
+  }
+);
 
 /** Fetch active products for a set of slugs, preserving the given slug order. */
 export async function getProductsBySlugs(

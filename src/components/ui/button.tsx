@@ -1,6 +1,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
+import { LinkPendingDot } from "@/components/store/link-pending";
 
 type Variant = "primary" | "outline" | "ghost" | "gold" | "danger";
 type Size = "sm" | "md" | "lg" | "icon";
@@ -57,12 +58,18 @@ export function ButtonLink({
   className,
   variant = "primary",
   size = "md",
+  children,
   ...props
 }: ButtonLinkProps) {
   return (
     <Link
       className={cn(base, variants[variant], sizes[size], className)}
       {...props}
-    />
+    >
+      {children}
+      {/* Every button-shaped link acknowledges a click while the next route
+          loads, so nothing feels unresponsive on a slow navigation. */}
+      <LinkPendingDot />
+    </Link>
   );
 }

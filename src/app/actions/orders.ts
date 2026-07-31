@@ -216,6 +216,7 @@ export async function placeOrder(input: PlaceOrderInput) {
         breadthCm: nimbusBreadth,
         heightCm: nimbusHeight,
         paymentType: mode === "cod" ? "cod" : "prepaid",
+        orderValueRupees: subtotal,
       });
       if (rate !== null) {
         shipping += rate + nimbusMarkupTotal;

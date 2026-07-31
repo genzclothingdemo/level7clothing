@@ -19,7 +19,7 @@ export async function POST(req: Request) {
     const ids = items.map((i) => i.productId);
     const products = await prisma.product.findMany({
       where: { id: { in: ids } },
-      select: { id: true, weightGrams: true, lengthCm: true, breadthCm: true, heightCm: true, shippingType: true, shippingFee: true, shippingMarkup: true },
+      select: { id: true, price: true, weightGrams: true, lengthCm: true, breadthCm: true, heightCm: true, shippingType: true, shippingFee: true, shippingMarkup: true },
     });
     const byId = new Map(products.map((p) => [p.id, p]));
 
@@ -31,6 +31,7 @@ export async function POST(req: Request) {
     let nimbusHeight = 0;
     let nimbusMarkupTotal = 0;
     let hasNimbusProducts = false;
+    let cartValue = 0;
 
     for (const it of items) {
       const p = byId.get(it.productId);
@@ -38,6 +39,7 @@ export async function POST(req: Request) {
 
       const qty = it.quantity || 1;
       const type = p.shippingType || "nimbus";
+      cartValue += (p.price || 0) * qty;
 
       if (type === "fixed") {
         totalShipping += (p.shippingFee || 0) * qty;
@@ -59,6 +61,7 @@ export async function POST(req: Request) {
         breadthCm: nimbusBreadth,
         heightCm: nimbusHeight,
         paymentType: paymentType === "cod" ? "cod" : "prepaid",
+        orderValueRupees: cartValue,
       });
 
       if (rate === null) {

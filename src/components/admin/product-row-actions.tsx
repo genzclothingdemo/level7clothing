@@ -4,7 +4,7 @@ import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Pencil, Trash2, Eye, EyeOff, Loader2 } from "lucide-react";
+import { Pencil, Trash2, Eye, EyeOff, Loader2, Copy } from "lucide-react";
 import { deleteProduct, setProductActive } from "@/app/actions/admin";
 
 export function ProductRowActions({
@@ -52,6 +52,15 @@ export function ProductRowActions({
           <EyeOff className="h-4 w-4 text-muted-foreground" />
         )}
       </button>
+      {/* Fastest route to the next near-identical piece in a set: copy this
+          one, change the name and photos, save. */}
+      <Link
+        href={`/admin/products/new?copyOf=${id}`}
+        title="Duplicate — opens a pre-filled copy"
+        className="grid h-9 w-9 place-items-center rounded-lg hover:bg-muted"
+      >
+        <Copy className="h-4 w-4" />
+      </Link>
       <Link
         href={`/admin/products/${id}/edit`}
         title="Edit"

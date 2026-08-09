@@ -4,13 +4,23 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { cookies } from "next/headers";
 import { prisma } from "./prisma";
+import { USER_COOKIE } from "./auth-cookie";
 
-export const USER_COOKIE = "level7_user";
+export { USER_COOKIE };
 
-const SECRET =
-  process.env.AUTH_SECRET ||
-  process.env.JWT_SECRET ||
-  "level7-dev-secret-change-me";
+// See resolveSecret() in ./auth.ts — the dev fallback must never sign real
+// customer sessions in production.
+const SECRET = (() => {
+  const configured = process.env.AUTH_SECRET || process.env.JWT_SECRET;
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "AUTH_SECRET is not set. Refusing to sign customer sessions with the " +
+        "development fallback key in production."
+    );
+  }
+  return "level7-dev-secret-change-me";
+})();
 
 export type UserSession = { id: string; email: string; name: string };
 

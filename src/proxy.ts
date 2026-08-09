@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { ADMIN_COOKIE } from "@/lib/auth-cookie";
 
-const ADMIN_COOKIE = "level7_admin";
-
-// Lightweight gate: redirect to login if the admin cookie is missing.
+// Lightweight admin gate: redirect to login if the admin cookie is missing.
 // Full JWT verification happens in the admin layout (Node runtime).
-export function middleware(req: NextRequest) {
+//
+// The cookie name is imported rather than re-declared. When it was duplicated
+// here, this file and lib/auth.ts drifted apart and admin login silently looped
+// forever — the login route set one cookie and this gate looked for another.
+export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (pathname.startsWith("/admin") && pathname !== "/admin/login") {

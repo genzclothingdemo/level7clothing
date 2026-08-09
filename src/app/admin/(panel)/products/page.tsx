@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { formatINR } from "@/lib/utils";
 import { ProductRowActions } from "@/components/admin/product-row-actions";
 import { ProductFilters } from "@/components/admin/product-filters";
+import { CopyableId } from "@/components/admin/copy-id";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Products" };
@@ -13,6 +14,8 @@ export const metadata = { title: "Products" };
 type SP = {
   q?: string;
   category?: string;
+  /** A subcategory id, or "__none" for pieces not in any group. */
+  subcategoryId?: string;
   status?: string;
   stock?: string;
   sort?: string;
@@ -41,6 +44,14 @@ function buildWhere(sp: SP): Prisma.ProductWhereInput {
         { secondaryCategory: sp.category },
       ],
     });
+  }
+
+  if (sp.subcategoryId) {
+    conditions.push(
+      sp.subcategoryId === "__none"
+        ? { subcategoryId: null }
+        : { subcategoryId: sp.subcategoryId }
+    );
   }
 
   if (sp.status) {
@@ -90,13 +101,29 @@ export default async function AdminProducts({
 
   const [products, totalCount, categoriesList] = await Promise.all([
     prisma.product
-      .findMany({ where, orderBy })
+      .findMany({
+        where,
+        orderBy,
+        include: { subcategory: { select: { name: true } } },
+      })
       .catch(() => []),
     prisma.product.count().catch(() => 0),
     prisma.category.findMany({ orderBy: { name: "asc" } }),
   ]);
 
+  const subcategoriesList = await prisma.subcategory
+    .findMany({
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      select: { id: true, name: true, category: { select: { name: true } } },
+    })
+    .catch(() => []);
+
   const categories = categoriesList.map((c) => c.name);
+  const subcategories = subcategoriesList.map((s) => ({
+    id: s.id,
+    name: s.name,
+    categoryName: s.category.name,
+  }));
 
   return (
     <div>
@@ -127,7 +154,10 @@ export default async function AdminProducts({
       </div>
 
       <div className="mt-6">
-        <ProductFilters categories={categories} />
+        <ProductFilters
+          categories={categories}
+          subcategories={subcategories}
+        />
       </div>
 
       {products.length === 0 ? (
@@ -158,6 +188,7 @@ export default async function AdminProducts({
                 <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
                   <th className="px-4 py-3 font-medium">Product</th>
                   <th className="px-4 py-3 font-medium">Category</th>
+                  <th className="px-4 py-3 font-medium">Subcategory</th>
                   <th className="px-4 py-3 font-medium">Price</th>
                   <th className="px-4 py-3 font-medium">Stock</th>
                   <th className="px-4 py-3 font-medium">Status</th>
@@ -183,15 +214,29 @@ export default async function AdminProducts({
                         <div className="min-w-0">
                           <p className="truncate font-medium">{p.name}</p>
                           {p.isFeatured && (
-                            <span className="text-[11px] gold-text">
+                            <span className="block text-[11px] gold-text">
                               ★ Featured
                             </span>
                           )}
+                          {/* Same ID shown on order line items, so one copied
+                              off an order can be matched back to here. */}
+                          <span className="mt-1 block">
+                            <CopyableId id={p.id} />
+                          </span>
                         </div>
                       </div>
                     </td>
                     <td className="px-4 py-3 text-muted-foreground">
                       {p.category}
+                    </td>
+                    <td className="px-4 py-3">
+                      {p.subcategory ? (
+                        <span className="rounded-full bg-accent/10 px-2.5 py-1 text-xs text-foreground">
+                          {p.subcategory.name}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3">{formatINR(p.price)}</td>
                     <td className="px-4 py-3">

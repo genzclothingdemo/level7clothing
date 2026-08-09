@@ -151,8 +151,13 @@ export async function POST(req: NextRequest) {
       data: {
         // Only change status if we have a recognised mapping.
         ...(newStatus ? { status: newStatus } : {}),
-        // Always record the raw courier status for live display.
+        // Always record the raw courier status for live display. These are the
+        // same columns the polling sync writes, so push and poll cannot show
+        // two different "latest" states.
         deliveryStatus: nimbusStatusRaw || order.deliveryStatus,
+        deliveryLocation: location || order.deliveryLocation,
+        deliveryStatusAt: new Date(nimbusAt),
+        lastSyncedAt: new Date(),
         statusHistory: history as unknown as object[],
       },
     })

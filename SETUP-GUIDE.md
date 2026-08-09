@@ -25,7 +25,7 @@ Open **PowerShell** (press `Windows key`, type `powershell`, press Enter).
 Then paste this command and press Enter:
 
 ```powershell
-cd "C:\Users\15ind\OneDrive\Desktop\Quellflow\code\ResinArt\level7clothing"
+cd "C:\Users\15ind\OneDrive\Desktop\Quellflow\code\Clothing\level7clothing"
 ```
 
 > 💡 This just moves you "inside" the project folder. All other commands must be run from here.
@@ -59,7 +59,7 @@ The website needs a **database** to store products, orders, and customers. We us
 ## Step 1.3 — Fill in your settings (.env file)
 
 1. Open the project folder in **File Explorer**:
-   `Desktop → Quellflow → code → ResinArt → level7clothing`
+   `Desktop → Quellflow → code → Clothing → level7clothing`
 2. Find the file named **`.env`** and open it with **Notepad**
    (right-click → Open with → Notepad).
 
@@ -103,7 +103,7 @@ Wait ~30 seconds. You should see:
 ✓ Seeded 10 products
 ```
 
-🎉 Your database now has 10 sample resin products, your admin account, and a demo
+🎉 Your database now has the Level7 product catalogue, your admin account, and a demo
 customer account you can use to test login + order tracking.
 
 > ❌ **Got an error?** Jump to Part 5 (Troubleshooting) at the bottom.
@@ -300,7 +300,7 @@ Log in to your **live admin panel** (`https://your-site.vercel.app/admin`) and:
    - Click **Save settings**
 2. **Products** page:
    - 🗑️ Delete the 10 sample products
-   - ➕ Add your real resin art products with real photos
+   - ➕ Add your real products with real photos
 3. **Test the full flow yourself:**
    - Open your store → add a product to cart → a **mini popup asks for your name +
      mobile** (this is the guest lead capture)

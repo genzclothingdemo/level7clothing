@@ -4,7 +4,7 @@ import { useState } from "react";
 import { ChevronDown, Package, ExternalLink } from "lucide-react";
 import { formatINR } from "@/lib/utils";
 import { OrderTimeline, type StatusEntry } from "./order-timeline";
-import { ReturnRequest, type ExistingRequest } from "./return-request";
+import { useSettings } from "@/context/settings";
 
 export type AccountOrder = {
   id: string;
@@ -29,7 +29,6 @@ export type AccountOrder = {
     options?: { name: string; value: string }[];
   }[];
   statusHistory: StatusEntry[];
-  returnRequest?: ExistingRequest | null;
   address: string;
   city: string;
   state: string;
@@ -48,10 +47,11 @@ const statusColor: Record<string, string> = {
 
 export function AccountOrders({ orders }: { orders: AccountOrder[] }) {
   const [openId, setOpenId] = useState<string | null>(orders[0]?.id ?? null);
+  const { brandName } = useSettings();
 
   if (orders.length === 0) {
     return (
-      <div className="rounded-lg border border-dashed border-border p-12 text-center">
+      <div className="rounded-2xl border border-dashed border-border p-12 text-center">
         <Package className="mx-auto h-10 w-10 text-muted-foreground" />
         <p className="mt-4 font-serif text-xl">No orders yet</p>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -68,7 +68,7 @@ export function AccountOrders({ orders }: { orders: AccountOrder[] }) {
         return (
           <div
             key={o.id}
-            className="overflow-hidden rounded-lg border border-border bg-card"
+            className="overflow-hidden rounded-2xl border border-border bg-card"
           >
             <button
               onClick={() => setOpenId(open ? null : o.id)}
@@ -117,9 +117,10 @@ export function AccountOrders({ orders }: { orders: AccountOrder[] }) {
                       history={o.statusHistory}
                       deliveryStatus={o.deliveryStatus}
                       note={o.note}
+                      brandName={brandName}
                     />
                     {(o.courier || o.trackingNumber || o.trackingUrl) && (
-                      <div className="mt-4 rounded-lg bg-muted p-4 text-sm">
+                      <div className="mt-4 rounded-xl bg-muted p-4 text-sm">
                         {o.courier && (
                           <p>
                             <span className="text-muted-foreground">
@@ -196,7 +197,7 @@ export function AccountOrders({ orders }: { orders: AccountOrder[] }) {
                         <span>{formatINR(o.total)}</span>
                       </div>
                     </div>
-                    <div className="mt-4 rounded-lg bg-muted p-4 text-sm text-muted-foreground">
+                    <div className="mt-4 rounded-xl bg-muted p-4 text-sm text-muted-foreground">
                       <p className="font-medium text-foreground">
                         Delivery address
                       </p>
@@ -208,12 +209,6 @@ export function AccountOrders({ orders }: { orders: AccountOrder[] }) {
                         {o.paymentStatus === "paid" ? " · Paid" : ""}
                       </p>
                     </div>
-
-                    <ReturnRequest
-                      orderId={o.id}
-                      orderStatus={o.status}
-                      existing={o.returnRequest}
-                    />
                   </div>
                 </div>
               </div>

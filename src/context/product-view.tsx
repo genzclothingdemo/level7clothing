@@ -17,15 +17,18 @@ const ProductViewContext = createContext<ProductViewValue>({
 /**
  * Shares the variant selection between the option picker (ProductPurchase) and
  * the gallery, so the two stay in sync both ways: picking an option filters the
- * photos, and clicking a photo can pin the matching variant. Starts with
- * nothing selected — the customer browses everything, then narrows down.
+ * photos, and clicking a photo can pin the matching variant. Seeded with the
+ * first available variant (computed on the server and passed as `initial`) so the
+ * product loads already orderable, with the correct price and gallery.
  */
 export function ProductViewProvider({
+  initial,
   children,
 }: {
+  initial?: Selection;
   children: React.ReactNode;
 }) {
-  const [selection, setSelection] = useState<Selection>({});
+  const [selection, setSelection] = useState<Selection>(initial ?? {});
   return (
     <ProductViewContext.Provider value={{ selection, setSelection }}>
       {children}

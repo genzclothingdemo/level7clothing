@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { put } from "@vercel/blob";
 import { getAdminSession } from "@/lib/auth";
 import { slugify } from "@/lib/utils";
+import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
 
@@ -37,7 +38,20 @@ export async function POST(req: Request) {
       addRandomSuffix: true,
     });
 
-    return NextResponse.json({ url: blob.url });
+    // Record the upload in the Media library so it shows up in the picker and
+    // admin library. Upsert keyed on the (unique) blob URL keeps this idempotent.
+    const media = await prisma.media.upsert({
+      where: { url: blob.url },
+      update: {},
+      create: {
+        url: blob.url,
+        file: file.name,
+        source: "blob",
+        size: file.size || undefined,
+      },
+    });
+
+    return NextResponse.json({ url: blob.url, id: media.id, file: media.file });
   } catch (err) {
     console.error("[upload] error:", err);
     return NextResponse.json({ error: "Upload failed" }, { status: 500 });

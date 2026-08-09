@@ -12,22 +12,29 @@ import {
   CheckCircle2,
   MessageSquare,
   RefreshCw,
+  ExternalLink,
+  Check,
+  MapPin,
 } from "lucide-react";
 import { formatINR, whatsappLink } from "@/lib/utils";
+import { CopyableId } from "@/components/admin/copy-id";
 import {
   updateOrderStatus,
   updatePaymentStatus,
   updateOrderTracking,
   shipOrderViaNimbus,
   syncOrderFromNimbusAction,
+  getCourierOptionsAction,
+  chooseCourierAction,
   cancelAndRestoreStock,
   confirmOrder,
   addOrderNote,
 } from "@/app/actions/admin";
+import { useSettings } from "@/context/settings";
 
-function orderWhatsAppMessage(o: AdminOrder): string {
+function orderWhatsAppMessage(o: AdminOrder, brandName: string): string {
   const lines = [
-    `Hi ${o.customerName.split(" ")[0]}, thank you for your order with Level7 Clothing! 🧡`,
+    `Hi ${o.customerName.split(" ")[0]}, thank you for your order with ${brandName}! 🖤`,
     ``,
     `Order: ${o.orderNumber}`,
     ...o.items.map((i) => `• ${i.name} × ${i.quantity}`),
@@ -56,6 +63,10 @@ export type AdminOrder = {
   state: string;
   pincode: string;
   items: {
+    /** Present on orders placed after line items started recording it. */
+    productId?: string;
+    /** Resolved server-side; null when the product has since been deleted. */
+    slug?: string | null;
     name: string;
     quantity: number;
     price: number;
@@ -75,8 +86,29 @@ export type AdminOrder = {
   trackingNumber: string | null;
   trackingUrl: string | null;
   nimbusShipmentId: string | null;
+  nimbusCourierId: string | null;
+  nimbusCourierName: string | null;
+  deliveryStatus: string | null;
+  deliveryLocation: string | null;
+  deliveryStatusAt: string | null;
+  lastSyncedAt: string | null;
   note: string | null;
   createdAt: string;
+  /** How many return requests this order has. */
+  returnCount: number;
+};
+
+type CourierOption = {
+  courierId: string;
+  name: string;
+  type: string | null;
+  tatDays: number | null;
+  chargeableGrams: number | null;
+  total: number;
+  forward: number;
+  rto: number;
+  cod: number;
+  surcharges: number;
 };
 
 const STATUSES = [
@@ -110,8 +142,53 @@ function paymentBadge(o: AdminOrder): { text: string; cls: string } {
   return { text: "COD due", cls: "bg-orange-500/15 text-orange-500" };
 }
 
-export function OrdersTable({ orders }: { orders: AdminOrder[] }) {
+/**
+ * How much of the return window is left for an order — the same rule the
+ * storefront uses (counted from delivery, never from the order date).
+ * `windowDays` is null when returns are switched off store-wide.
+ */
+function returnWindowState(
+  o: AdminOrder,
+  windowDays: number | null
+): { label: string; cls: string; title: string } | null {
+  if (windowDays == null) return null;
+  if (o.status === "cancelled") return null;
+  if (o.status !== "delivered") {
+    return {
+      label: "returns: not delivered",
+      cls: "bg-muted text-muted-foreground",
+      title: `The ${windowDays}-day return window starts when you mark this order delivered.`,
+    };
+  }
+  // deliveryStatusAt is stamped when the status flips to delivered (or by the
+  // courier scan), so a delivered order always has a date to count from.
+  const from = o.deliveryStatusAt ? new Date(o.deliveryStatusAt) : new Date(o.createdAt);
+  const daysLeft =
+    windowDays - Math.floor((Date.now() - from.getTime()) / 86_400_000);
+  if (daysLeft > 0) {
+    return {
+      label: `returns: ${daysLeft}d left`,
+      cls: "bg-success/15 text-success",
+      title: `Delivered ${from.toLocaleDateString("en-IN")} — the customer can raise a return for ${daysLeft} more day(s).`,
+    };
+  }
+  return {
+    label: "returns: closed",
+    cls: "bg-muted text-muted-foreground",
+    title: `The ${windowDays}-day window closed. The customer can no longer raise a return themselves.`,
+  };
+}
+
+export function OrdersTable({
+  orders,
+  returnWindowDays,
+}: {
+  orders: AdminOrder[];
+  /** null = returns are switched off in Admin > Returns. */
+  returnWindowDays: number | null;
+}) {
   const router = useRouter();
+  const { brandName } = useSettings();
   const [openId, setOpenId] = useState<string | null>(null);
   const [pending, start] = useTransition();
 
@@ -194,6 +271,23 @@ export function OrdersTable({ orders }: { orders: AdminOrder[] }) {
                       </span>
                     );
                   })()}
+                  {o.returnCount > 0 && (
+                    <span className="rounded-full bg-danger/15 px-2 py-0.5 text-xs text-danger">
+                      {o.returnCount} return{o.returnCount === 1 ? "" : "s"}
+                    </span>
+                  )}
+                  {(() => {
+                    const rw = returnWindowState(o, returnWindowDays);
+                    if (!rw) return null;
+                    return (
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs ${rw.cls}`}
+                        title={rw.title}
+                      >
+                        {rw.label}
+                      </span>
+                    );
+                  })()}
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {o.orderNumber} · {new Date(o.createdAt).toLocaleString("en-IN")}
@@ -219,9 +313,23 @@ export function OrdersTable({ orders }: { orders: AdminOrder[] }) {
                     </p>
                     <ul className="mt-2 space-y-1.5">
                       {o.items.map((it, i) => (
-                        <li key={i} className="flex justify-between">
-                          <span>
-                            {it.name} × {it.quantity}
+                        <li key={i} className="flex justify-between gap-3">
+                          <span className="min-w-0">
+                            {it.slug ? (
+                              <a
+                                href={`/product/${it.slug}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                title="Open this product on the store"
+                                className="inline-flex items-baseline gap-1 font-medium underline-offset-2 hover:underline"
+                              >
+                                {it.name}
+                                <ExternalLink className="h-3 w-3 shrink-0 self-center opacity-60" />
+                              </a>
+                            ) : (
+                              <span className="font-medium">{it.name}</span>
+                            )}{" "}
+                            × {it.quantity}
                             {it.options && it.options.length > 0 && (
                               <span className="block text-xs text-muted-foreground">
                                 {it.options
@@ -229,8 +337,18 @@ export function OrdersTable({ orders }: { orders: AdminOrder[] }) {
                                   .join(" · ")}
                               </span>
                             )}
+                            {it.productId && (
+                              <span className="mt-1 block">
+                                <CopyableId id={it.productId} />
+                                {!it.slug && (
+                                  <span className="ml-1.5 text-[11px] text-muted-foreground">
+                                    · product no longer in the catalogue
+                                  </span>
+                                )}
+                              </span>
+                            )}
                           </span>
-                          <span className="font-medium">
+                          <span className="whitespace-nowrap font-medium">
                             {formatINR(it.price * it.quantity)}
                           </span>
                         </li>
@@ -321,6 +439,13 @@ export function OrdersTable({ orders }: { orders: AdminOrder[] }) {
                           ))}
                         </select>
                       </label>
+                      {returnWindowDays != null && o.status !== "delivered" && (
+                        <p className="w-full text-xs text-muted-foreground">
+                          Marking this <b>delivered</b> starts the{" "}
+                          {returnWindowDays}-day return window — until then the
+                          customer can&apos;t raise a return.
+                        </p>
+                      )}
 
                       {/* Payment status dropdown */}
                       <label className="flex items-center gap-2 text-sm">
@@ -339,7 +464,7 @@ export function OrdersTable({ orders }: { orders: AdminOrder[] }) {
                       </label>
 
                       <a
-                        href={whatsappLink(o.phone, orderWhatsAppMessage(o))}
+                        href={whatsappLink(o.phone, orderWhatsAppMessage(o, brandName))}
                         target="_blank"
                         rel="noreferrer"
                         className="inline-flex items-center gap-1.5 rounded-full bg-[#25D366]/15 px-3 py-1.5 text-xs font-medium text-[#128C7E] hover:bg-[#25D366]/25"
@@ -471,6 +596,10 @@ function TrackingEditor({ order }: { order: AdminOrder }) {
         toast.success(
           `Booked — AWB ${res.awb}${res.courier ? ` (${res.courier})` : ""}`
         );
+        // NimbusPost decides the carrier; if it overrode the choice, say so.
+        if (res.courierMismatch) {
+          toast.warning(res.courierMismatch, { duration: 10000 });
+        }
       }
       router.refresh();
     });
@@ -484,13 +613,58 @@ function TrackingEditor({ order }: { order: AdminOrder }) {
         return;
       }
       if (res.outcome === "not-booked") {
-        toast.info(`Not booked in NimbusPost yet (status: ${res.orderStatus}).`, {
-          duration: 6000,
-        });
+        toast.info(
+          `Not booked in NimbusPost yet (status: ${res.orderStatus}).`,
+          { duration: 6000 }
+        );
+        router.refresh();
+        return;
+      }
+      if (res.outcome === "tracked") {
+        toast.success(
+          res.deliveryStatus
+            ? `Courier says: ${res.deliveryStatus}`
+            : "No new scan from the courier yet."
+        );
+        router.refresh();
         return;
       }
       toast.success(
         `Synced — AWB ${res.awb}${res.courier ? ` (${res.courier})` : ""}`
+      );
+      router.refresh();
+    });
+  }
+
+  // ---- Available couriers (reviewed before the draft is booked) ----
+  const [couriers, setCouriers] = useState<CourierOption[] | null>(null);
+  const [loadingCouriers, startCouriers] = useTransition();
+  const [choosing, startChoose] = useTransition();
+
+  function loadCouriers() {
+    if (couriers) {
+      setCouriers(null); // toggle closed
+      return;
+    }
+    startCouriers(async () => {
+      const res = await getCourierOptionsAction(order.id);
+      if (!res.ok) {
+        toast.error(res.error, { duration: 8000 });
+        return;
+      }
+      setCouriers(res.options);
+    });
+  }
+
+  function chooseCourier(option: CourierOption | null) {
+    startChoose(async () => {
+      await chooseCourierAction(
+        order.id,
+        option?.courierId ?? null,
+        option?.name ?? null
+      );
+      toast.success(
+        option ? `${option.name} selected for this order` : "Courier choice cleared"
       );
       router.refresh();
     });
@@ -531,6 +705,24 @@ function TrackingEditor({ order }: { order: AdminOrder }) {
             )}
           </button>
 
+          <button
+            onClick={loadCouriers}
+            disabled={loadingCouriers || shipping}
+            className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2 text-xs font-medium disabled:opacity-50 cursor-pointer hover:bg-muted"
+            title="See every courier that will carry this parcel, with rates"
+          >
+            {loadingCouriers ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking…
+              </>
+            ) : (
+              <>
+                <Truck className="h-3.5 w-3.5" />{" "}
+                {couriers ? "Hide couriers" : "Available couriers & rates"}
+              </>
+            )}
+          </button>
+
           {staged && (
             <button
               onClick={syncFromNimbus}
@@ -549,6 +741,145 @@ function TrackingEditor({ order }: { order: AdminOrder }) {
               )}
             </button>
           )}
+        </div>
+      )}
+
+      {order.nimbusCourierName && !order.trackingNumber && (
+        <p className="mt-2 text-xs">
+          <span className="rounded-full bg-accent/15 px-2.5 py-1 text-accent">
+            Will book with {order.nimbusCourierName}
+          </span>{" "}
+          <button
+            onClick={() => chooseCourier(null)}
+            disabled={choosing}
+            className="cursor-pointer text-muted-foreground underline disabled:opacity-50"
+          >
+            clear
+          </button>
+        </p>
+      )}
+
+      {couriers && !order.trackingNumber && (
+        <div className="mt-3 overflow-hidden rounded-xl border border-border">
+          <div className="flex items-center justify-between gap-2 border-b border-border bg-muted/40 px-3 py-2">
+            <p className="text-xs font-medium">
+              {couriers.length} couriers serve this pincode
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              Rates are what your NimbusPost wallet gets charged
+            </p>
+          </div>
+          <div className="max-h-72 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground">
+                  <th className="px-3 py-2 font-medium">Courier</th>
+                  <th className="px-3 py-2 font-medium">ETA</th>
+                  <th className="px-3 py-2 font-medium">Forward</th>
+                  <th className="px-3 py-2 font-medium">RTO</th>
+                  <th className="px-3 py-2 font-medium">COD</th>
+                  <th className="px-3 py-2 font-medium">Total</th>
+                  <th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {couriers.map((c, i) => {
+                  const picked = order.nimbusCourierId === c.courierId;
+                  return (
+                    <tr key={c.courierId} className={picked ? "bg-accent/5" : ""}>
+                      <td className="px-3 py-2">
+                        <span className="font-medium">{c.name}</span>
+                        {i === 0 && (
+                          <span className="ml-1.5 rounded-full bg-success/15 px-1.5 py-0.5 text-[10px] text-success">
+                            cheapest
+                          </span>
+                        )}
+                        {c.type && (
+                          <span className="block text-[11px] text-muted-foreground">
+                            {c.type}
+                            {c.chargeableGrams
+                              ? ` · charged for ${c.chargeableGrams} g`
+                              : ""}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-muted-foreground">
+                        {c.tatDays ? `${c.tatDays} d` : "—"}
+                      </td>
+                      <td className="px-3 py-2">{formatINR(c.forward)}</td>
+                      <td className="px-3 py-2 text-muted-foreground">
+                        {c.rto ? formatINR(c.rto) : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-muted-foreground">
+                        {c.cod ? formatINR(c.cod) : "—"}
+                      </td>
+                      <td className="px-3 py-2 font-semibold">
+                        {formatINR(c.total)}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <button
+                          onClick={() => chooseCourier(picked ? null : c)}
+                          disabled={choosing}
+                          className={`cursor-pointer rounded-full border px-2.5 py-1 text-[11px] disabled:opacity-50 ${
+                            picked
+                              ? "border-accent bg-accent text-accent-foreground"
+                              : "border-border hover:bg-muted"
+                          }`}
+                        >
+                          {picked ? (
+                            <>
+                              <Check className="mr-1 inline h-3 w-3" />
+                              Chosen
+                            </>
+                          ) : (
+                            "Choose"
+                          )}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {order.trackingNumber && (
+        <div className="mt-3 rounded-xl border border-border bg-muted/30 px-3 py-2.5 text-xs">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="font-medium">
+              {order.deliveryStatus ?? "Awaiting first scan"}
+            </span>
+            {order.deliveryLocation && (
+              <span className="inline-flex items-center gap-1 text-muted-foreground">
+                <MapPin className="h-3 w-3" /> {order.deliveryLocation}
+              </span>
+            )}
+            {order.deliveryStatusAt && (
+              <span className="text-muted-foreground">
+                {new Date(order.deliveryStatusAt).toLocaleString("en-IN")}
+              </span>
+            )}
+            <button
+              onClick={syncFromNimbus}
+              disabled={syncing}
+              className="ml-auto inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-[11px] hover:bg-muted disabled:opacity-50"
+            >
+              {syncing ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3 w-3" />
+              )}
+              Refresh now
+            </button>
+          </div>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Updates automatically every 2 hours and whenever NimbusPost sends a
+            status webhook.
+            {order.lastSyncedAt &&
+              ` Last checked ${new Date(order.lastSyncedAt).toLocaleString("en-IN")}.`}
+          </p>
         </div>
       )}
       <div className="mt-3 grid gap-3 sm:grid-cols-3">

@@ -5,13 +5,11 @@ import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
 import { sendOrderEmails } from "@/lib/email";
 import { getUserSession, setUserCookie } from "@/lib/user-auth";
-import { priceWithOptions } from "@/lib/options";
-import {
-  normalizeVariants,
-  resolveVariant,
-  toSelection,
-} from "@/lib/variants";
+
+import { priceForSelection, repairSelection, imagesForSelection } from "@/lib/variants";
+import { comboKey } from "@/lib/options";
 import { orderNumber } from "@/lib/utils";
+import type { Attribute, SellableVariant } from "@/lib/types";
 import {
   createRazorpayOrder,
   isRazorpayConfigured,
@@ -131,37 +129,42 @@ export async function placeOrder(input: PlaceOrderInput) {
     where: { id: { in: ids }, isActive: true },
   });
 
+  // Cart problems are the shopper's to fix, so they come back as a message
+  // rather than a thrown error the checkout page can only show as "something
+  // went wrong".
+  let cartError: string | null = null;
+  const fail = (message: string) => {
+    cartError ??= message;
+    return null;
+  };
+
   const lineItems = data.items.map((i) => {
     const p = products.find((pr) => pr.id === i.productId);
-    if (!p) throw new Error("A product in your cart is no longer available.");
+    if (!p) return fail("A product in your cart is no longer available.");
     // Recompute the unit price from the product's real option prices.
-    const productOptions = Array.isArray(p.options)
-      ? (p.options as unknown as ProductOption[])
-      : [];
-    const variantPrices = Array.isArray(p.variantPrices)
-      ? (p.variantPrices as unknown as VariantPrice[])
-      : [];
-    const variants = Array.isArray(p.variants)
-      ? (p.variants as unknown as Variant[])
-      : [];
+    const attributes = (p.attributes as any) as Attribute[] || [];
+    const sellableVariants = (p.sellableVariants as any) as SellableVariant[] || [];
+    
+    // Clean and validate selection
+    const rawSelection = Object.fromEntries((i.options || []).map(o => [o.name, o.value]));
+    const cleanSelection = repairSelection(attributes, rawSelection);
+    
+    // Check if they answered everything
+    const unanswered = attributes.filter((a: Attribute) => !cleanSelection[a.name]).map((a: Attribute) => a.name);
+    if (unanswered.length > 0) {
+      return fail(`Please choose ${unanswered.join(" and ")} for "${p.name}" before checking out.`);
+    }
 
-    // Validate the client's option choices against the product's real deltas.
-    const { unitPrice: additivePrice, clean } = priceWithOptions(
-      p.price,
-      productOptions,
-      i.options,
-      variantPrices
-    );
+    const key = comboKey(cleanSelection);
+    const variant = sellableVariants.find((v: SellableVariant) => v.id === key);
+    
+    if (variant && !variant.available) {
+      return fail(`The combination you picked for “${p.name}” is out of stock.`);
+    }
 
-    // Prefer the Flipkart-style variant matrix when the product uses one.
-    const source = { price: p.price, options: productOptions, variants, variantPrices, images: p.images };
-    const normalized = normalizeVariants(source);
-    const matched =
-      normalized.length && clean.length
-        ? resolveVariant(normalized, toSelection(clean))
-        : null;
-    const unitPrice = matched ? matched.price : additivePrice;
-    const image = matched?.images[0] ?? p.images[0] ?? "";
+    const unitPrice = variant?.price ?? p.price;
+    const image = variant?.images?.[0] ?? p.images?.[0] ?? "";
+    const cleanOptions = Object.entries(cleanSelection).map(([name, value]) => ({ name, value }));
 
     return {
       productId: p.id,
@@ -169,12 +172,16 @@ export async function placeOrder(input: PlaceOrderInput) {
       image,
       price: unitPrice,
       quantity: i.quantity,
-      options: clean,
+      options: cleanOptions,
       note: i.note ?? "",
     };
   });
 
-  const subtotal = lineItems.reduce((n, i) => n + i.price * i.quantity, 0);
+  // Stop before any stock is reserved or any payment is started.
+  if (cartError) return { ok: false as const, error: cartError };
+  const validItems = lineItems.filter((i) => i !== null);
+
+  const subtotal = validItems.reduce((n, i) => n + i.price * i.quantity, 0);
 
   const settings = await getSettings();
   const mode = METHOD_TO_MODE[data.paymentMethod] ?? "cod";
@@ -191,7 +198,7 @@ export async function placeOrder(input: PlaceOrderInput) {
     let hasNimbusProducts = false;
     const byId = new Map(products.map((p) => [p.id, p]));
 
-    for (const i of lineItems) {
+    for (const i of validItems) {
       const p = byId.get(i.productId);
       if (!p) continue;
       const type = (p as any).shippingType || "nimbus";
@@ -234,7 +241,7 @@ export async function placeOrder(input: PlaceOrderInput) {
     });
     
     if (coupon && coupon.isActive && (coupon.usageLimit === null || coupon.usedCount < coupon.usageLimit)) {
-      const applicableItems = lineItems.filter(i => coupon.productIds.includes(i.productId));
+      const applicableItems = validItems.filter(i => coupon.productIds.includes(i.productId));
       if (applicableItems.length > 0) {
         appliedCoupon = coupon;
         const applicableSubtotal = applicableItems.reduce((sum, i) => sum + (i.price * i.quantity), 0);
@@ -262,7 +269,7 @@ export async function placeOrder(input: PlaceOrderInput) {
   const productById = new Map(products.map((p) => [p.id, p]));
   let advance = 0;
   if (mode === "partial") {
-    for (const li of lineItems) {
+    for (const li of validItems) {
       const pct = productById.get(li.productId)?.advancePercent ?? 0;
       advance += Math.round((li.price * li.quantity * pct) / 100);
     }
@@ -296,7 +303,7 @@ export async function placeOrder(input: PlaceOrderInput) {
         pincode: data.pincode,
         note: data.note,
         paymentMethod: data.paymentMethod,
-        items: lineItems,
+        items: validItems,
         subtotal,
         shipping,
         discountTotal,
@@ -311,7 +318,7 @@ export async function placeOrder(input: PlaceOrderInput) {
     });
 
     // Reduce stock (reserves it while an online payment is completed).
-    for (const i of lineItems) {
+    for (const i of validItems) {
       await tx.product.update({
         where: { id: i.productId },
         data: { stock: { decrement: i.quantity } },
@@ -389,7 +396,7 @@ export async function placeOrder(input: PlaceOrderInput) {
       // don't leave a dangling unpaid order with depleted stock.
       await prisma
         .$transaction(async (tx) => {
-          for (const i of lineItems) {
+          for (const i of validItems) {
             await tx.product.update({
               where: { id: i.productId },
               data: { stock: { increment: i.quantity } },
@@ -416,7 +423,7 @@ export async function placeOrder(input: PlaceOrderInput) {
       city: order.city,
       state: order.state,
       pincode: order.pincode,
-      items: lineItems,
+      items: validItems,
       subtotal,
       shipping,
       total,

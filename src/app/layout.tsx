@@ -5,6 +5,7 @@ import { Providers } from "@/components/providers";
 import { getSettings } from "@/lib/settings";
 import { getUserSession } from "@/lib/user-auth";
 import { prisma } from "@/lib/prisma";
+import { siteUrl } from "@/lib/site-url";
 
 const inter = Inter({
   variable: "--font-inter",
@@ -32,23 +33,16 @@ export const viewport: Viewport = {
   interactiveWidget: "resizes-content",
 };
 
-function siteUrl() {
-  const fromEnv = process.env.NEXT_PUBLIC_SITE_URL;
-  if (fromEnv) return fromEnv.replace(/\/$/, "");
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
-  return "http://localhost:3000";
-}
-
 export async function generateMetadata(): Promise<Metadata> {
   const s = await getSettings();
   const base = siteUrl();
+  const title = `${s.brandName} — ${s.tagline}`;
+
   return {
-    // Lets relative OG/canonical URLs resolve to absolute ones.
+    // Required for relative OG/canonical URLs to resolve; without it Next
+    // silently drops them and social cards render blank.
     metadataBase: new URL(base),
-    title: {
-      default: `${s.brandName} — ${s.tagline}`,
-      template: `%s · ${s.brandName}`,
-    },
+    title: { default: title, template: `%s · ${s.brandName}` },
     description: s.heroSubtext,
     keywords: [
       "oversized t-shirts",
@@ -60,7 +54,7 @@ export async function generateMetadata(): Promise<Metadata> {
     ],
     alternates: { canonical: "/" },
     openGraph: {
-      title: `${s.brandName} — ${s.tagline}`,
+      title,
       description: s.heroSubtext,
       url: base,
       siteName: s.brandName,
@@ -69,7 +63,7 @@ export async function generateMetadata(): Promise<Metadata> {
     },
     twitter: {
       card: "summary_large_image",
-      title: `${s.brandName} — ${s.tagline}`,
+      title,
       description: s.heroSubtext,
     },
     robots: { index: true, follow: true },
@@ -82,6 +76,12 @@ export default async function RootLayout({
   children: React.ReactNode;
 }>) {
   const settings = await getSettings();
+  const {
+    defaultMaterialsCare: _dmc,
+    defaultShippingInfo: _dsi,
+    defaultReturnsInfo: _dri,
+    ...clientSettings
+  } = settings;
 
   // If the shopper is logged in, hand their name/phone to the cart so the
   // add-to-cart mini sign-up never prompts them again.
@@ -96,9 +96,10 @@ export default async function RootLayout({
 
   const base = siteUrl();
 
-  // Site-wide structured data: identifies the brand to search engines and
-  // declares the on-site search endpoint for a potential sitelinks searchbox.
-  const orgJsonLd = {
+  // Site-wide structured data: who the brand is (knowledge panel) and how to
+  // search it (sitelinks searchbox). Per-page Product/Breadcrumb graphs live
+  // on their own routes.
+  const jsonLd = {
     "@context": "https://schema.org",
     "@graph": [
       {
@@ -106,16 +107,14 @@ export default async function RootLayout({
         "@id": `${base}/#organization`,
         name: settings.brandName,
         url: base,
-        description: settings.aboutText,
-        ...(settings.logoUrl && {
-          logo: settings.logoUrl.startsWith("http")
-            ? settings.logoUrl
-            : `${base}${settings.logoUrl}`,
-        }),
-        ...(settings.instagram && { sameAs: [settings.instagram] }),
+        description: settings.heroSubtext,
+        ...(settings.logoUrl ? { logo: settings.logoUrl } : {}),
+        ...(settings.instagram || settings.facebook
+          ? { sameAs: [settings.instagram, settings.facebook].filter(Boolean) }
+          : {}),
         contactPoint: {
           "@type": "ContactPoint",
-          contactType: "customer support",
+          contactType: "customer service",
           email: settings.contactEmail,
           telephone: settings.contactPhone,
           areaServed: "IN",
@@ -127,9 +126,7 @@ export default async function RootLayout({
         "@id": `${base}/#website`,
         url: base,
         name: settings.brandName,
-        description: settings.heroSubtext,
         publisher: { "@id": `${base}/#organization` },
-        inLanguage: "en-IN",
         potentialAction: {
           "@type": "SearchAction",
           target: {
@@ -151,9 +148,11 @@ export default async function RootLayout({
       <body className="min-h-full flex flex-col antialiased">
         <script
           type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(orgJsonLd) }}
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
         />
-        <Providers settings={settings} initialLead={initialLead}>
+        {/* Server-only fields (the product-page default copy) are stripped here
+            so they don't ride along in every page's client payload. */}
+        <Providers settings={clientSettings} initialLead={initialLead}>
           {children}
         </Providers>
       </body>

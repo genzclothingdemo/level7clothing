@@ -409,3 +409,24 @@ select.input {
     animation-duration: 0.01ms !important;
   }
 }
+
+/* Badge entrance for cart counts and product ribbons (navbar, product-card).
+   The only motion kept from the upstream port: it fires once on mount rather
+   than looping, so it does not reintroduce ambient movement. */
+@keyframes popIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.animate-pop {
+  animation: popIn 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}

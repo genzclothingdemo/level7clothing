@@ -1,5 +1,6 @@
 // Level7 Clothing — Prisma schema
-// Database: PostgreSQL (Vercel Postgres / Neon)
+// Database: PostgreSQL (Supabase). DATABASE_URL must use the pooler host;
+// DIRECT_URL keeps the direct host and is only used by `prisma db push`.
 
 generator client {
   provider = "prisma-client-js"
@@ -19,6 +20,10 @@ model Product {
   description       String
   category          String // primary category
   secondaryCategory String? // optional — lets a piece appear under a second category
+  // Optional group inside the primary category ("Oversized Tees").
+  // Null = the product is a one-off and sits directly on the category page.
+  subcategoryId     String?
+  subcategory       Subcategory? @relation(fields: [subcategoryId], references: [id], onDelete: SetNull)
   tags              String[] @default([])
   // Per-product options/variants the customer chooses (Size, Type, Shape…).
   // Shape: [{ name, choices: [{ label, priceDelta, image? }] }]
@@ -31,6 +36,10 @@ model Product {
   // availability and its own set of photos. Supersedes variantPrices when set.
   // Shape: [{ combo: { "Size": "4 inch", "Vatki": "1" }, price, available, images: [] }]
   variants          Json     @default("[]")
+  attributes        Json     @default("[]")
+  propertyModules   Json     @default("{}")
+  rules             Json     @default("{}")
+  sellableVariants  Json     @default("[]")
   price             Int // whole rupees
   compareAtPrice    Int? // optional "was" price for showing a discount
   images            String[] @default([])
@@ -45,11 +54,21 @@ model Product {
   lengthCm          Int?
   breadthCm         Int?
   heightCm          Int?
-  // Free shipping is the house default; switch a product to "fixed" or
-  // "nimbus" (live courier rate) only when it needs to be charged for.
-  shippingType      String   @default("free") // "free", "fixed", "nimbus"
+  shippingType      String   @default("nimbus") // "free", "fixed", "nimbus"
   shippingFee       Int      @default(0)
   shippingMarkup    Int      @default(0)
+  // Product-page info blocks. NULL = inherit the store-wide default from
+  // SiteSettings (defaultMaterialsCare / defaultShippingInfo / defaultReturnsInfo);
+  // a string here overrides it for this product only. One line per bullet.
+  materialsCare     String?
+  shippingInfo      String?
+  returnsInfo       String?
+  // NULL = inherit SiteSettings.defaultReturnable. False marks a piece
+  // non-returnable (customised / personalised work).
+  returnable        Boolean?
+  // Social/video links shown as "Video previews" under the info accordion.
+  // Shape: [{ title, url }] — YouTube, Instagram reels, packaging clips.
+  videos            Json     @default("[]")
   isFeatured        Boolean  @default(false)
   isActive          Boolean  @default(true)
   createdAt         DateTime @default(now())
@@ -57,7 +76,11 @@ model Product {
 
   @@index([category])
   @@index([secondaryCategory])
+  @@index([subcategoryId])
   @@index([isActive])
+
+  productImages     ProductImage[]
+  reviews           Review[]
 }
 
 // -------- Orders --------
@@ -90,13 +113,21 @@ model Order {
   trackingNumber  String? // AWB / tracking number
   trackingUrl     String? // optional courier tracking link
   nimbusShipmentId String? // NimbusPost shipment/order id, set when shipped via NimbusPost
-  deliveryStatus  String? // latest raw courier status from NimbusPost webhook (e.g. "In Transit")
+  // Courier the admin picked while reviewing rates, before the draft is booked.
+  nimbusCourierId   String?
+  nimbusCourierName String?
+  deliveryStatus  String? // latest raw courier status from NimbusPost (e.g. "In Transit")
+  deliveryLocation String? // where the parcel was last scanned
+  deliveryStatusAt DateTime? // when that status was reported by the courier
+  lastSyncedAt     DateTime? // last time the auto-sync polled NimbusPost
   statusHistory  Json     @default("[]") // [{ status, note, at }] appended on each admin update
   note          String?
   couponCode    String?
   discountTotal Int      @default(0)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  returnRequests ReturnRequest[]
 
   @@index([status])
   @@index([userId])
@@ -123,6 +154,9 @@ model User {
 }
 
 // -------- Saved shipping addresses (address book) --------
+// Level7-only model. It does not exist in the upstream store this repo was
+// forked from, so a wholesale schema copy silently drops it — and
+// `prisma db push` would then DROP the live table with its data. Keep it.
 model Address {
   id        String   @id @default(cuid())
   userId    String
@@ -139,6 +173,18 @@ model Address {
   updatedAt DateTime @updatedAt
 
   @@index([userId])
+}
+
+// -------- Newsletter --------
+// Level7-only model — same warning as Address above.
+model NewsletterSubscriber {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  source       String   @default("footer") // where they signed up from
+  unsubscribed Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([unsubscribed])
 }
 
 // -------- Leads (interested customers / add-to-cart) --------
@@ -201,6 +247,20 @@ model SiteSettings {
   partialEnabled        Boolean  @default(true)  // Advance + COD — needs Razorpay
   directEnabled         Boolean  @default(true)  // Customised order (pay to owner)
   announcement          String?  @default("Join the club — exclusive deals and early access to new drops")
+  // ---- Product defaults ----
+  // Store-wide copy for the product page's info accordion. Every product uses
+  // these unless it sets its own (Product.materialsCare / shippingInfo /
+  // returnsInfo). One line per bullet; blank hides the section entirely.
+  defaultMaterialsCare  String   @default("Premium heavyweight cotton, pre-shrunk and bio-washed\nMachine wash cold, inside out, with like colours\nDo not bleach or tumble dry — hang to dry\nWarm iron on the reverse; never iron directly on the print")
+  defaultShippingInfo   String   @default("Free shipping across India on every order\nDispatched in 1–2 working days, tracking shared on dispatch\nCash on Delivery available on eligible pin codes")
+  defaultReturnsInfo    String   @default("7-day easy returns on unworn items with tags attached.\nWrong size? Exchange it once, free of charge.\nApproved refunds go back to the original payment method within 5–7 working days.")
+  // ---- Returns ----
+  // Master switch: OFF hides the request form everywhere, whatever a product says.
+  returnsEnabled        Boolean  @default(true)
+  // Applies to every product that hasn't set Product.returnable.
+  defaultReturnable     Boolean  @default(true)
+  // Days after delivery a request can still be raised.
+  returnWindowDays      Int      @default(7)
   updatedAt             DateTime @updatedAt
 }
 
@@ -214,64 +274,116 @@ model AdminUser {
 }
 
 // -------- Categories --------
-// -------- Return / exchange requests --------
-model ReturnRequest {
-  id          String   @id @default(cuid())
-  orderId     String
-  orderNumber String
-  userId      String? // null for guest lookups
-  email       String
-  kind        String   @default("return") // return | exchange
-  reason      String
-  details     String?
-  // Preferred replacement size, only meaningful for exchanges.
-  exchangeSize String?
-  status      String   @default("requested") // requested | approved | rejected | completed
-  adminNote   String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  @@index([orderId])
-  @@index([status])
-  @@index([email])
-}
-
-// -------- Newsletter --------
-model NewsletterSubscriber {
-  id           String    @id @default(cuid())
-  email        String    @unique
-  source       String    @default("footer") // where they signed up from
-  unsubscribed Boolean   @default(false)
-  createdAt    DateTime  @default(now())
-
-  @@index([unsubscribed])
-}
-
 model Category {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  slug      String   @unique
-  imageUrl  String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id            String        @id @default(cuid())
+  name          String        @unique
+  slug          String        @unique
+  imageUrl      String?
+  sortOrder     Int           @default(0)
+  subcategories Subcategory[]
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+}
+
+// -------- Subcategories (a "group" shown in place of its products) --------
+// A subcategory is the middle shelf: "T-Shirts" (category) →
+// "Oversized Tees" (subcategory) → the individual tees (products).
+// On the storefront it is displayed like a product card — name, photo,
+// price range — but clicking it opens the list of real products inside.
+// A subcategory holding a single product collapses to that product instead,
+// so one-off pieces never make the customer click twice.
+model Subcategory {
+  id         String   @id @default(cuid())
+  name       String
+  slug       String
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  // 1–2 cover photos. Left empty, the storefront borrows photos from the
+  // products inside — so the same file is never uploaded twice.
+  images     String[] @default([])
+  // Optional manual price range. Left null, it is computed live from the
+  // products inside (min–max), so it can never drift out of date.
+  priceMin   Int?
+  priceMax   Int?
+  sortOrder  Int      @default(0)
+  isActive   Boolean  @default(true)
+  products   Product[]
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([categoryId, slug])
+  @@index([categoryId])
+  @@index([isActive])
 }
 
 // -------- Customer Reviews --------
 model Review {
   id        String   @id @default(cuid())
   productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   userId    String?  // null = guest / manually added
   name      String   // reviewer display name
+  email     String?  // contact for follow-up; never shown publicly
   rating    Int      // 1–5 stars
   title     String?  // short headline
   body      String   // review text
   approved  Boolean  @default(false) // admin must approve before public display
-  featured  Boolean  @default(false) // show on Portfolio section
+  featured  Boolean  @default(false) // pinned to the top of the product's reviews
+  // Set when the reviewer has a delivered order containing this product — shown
+  // as a "Verified buyer" badge. Never self-declared by the reviewer.
+  verified  Boolean  @default(false)
+  // Private reply/reason the admin recorded when moderating.
+  adminNote String?
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([productId])
   @@index([approved])
   @@index([featured])
+  @@index([productId, approved])
+  @@index([createdAt])
+}
+
+// -------- Returns --------
+// A customer's request to send a delivered item back. Kept separate from Order
+// so one order can have several independent requests (different items, or a
+// second attempt after a rejection).
+model ReturnRequest {
+  id            String   @id @default(cuid())
+  // Human-quotable reference (RET-XXXXXX) — what support asks for on the phone.
+  requestNumber String   @unique
+  orderId       String
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  // Order.items is JSON, so the line is captured by value — a later product
+  // rename or price change must not rewrite what was actually returned.
+  productId     String?
+  productName   String
+  variantLabel  String?  // e.g. "Design: Pink · Size: 8\""
+  quantity      Int      @default(1)
+  unitPrice     Int      @default(0)
+  reason        String   // see RETURN_REASONS in lib/returns.ts
+  customerNote  String?
+  images        String[] @default([]) // unboxing / damage photos from the customer
+  status        String   @default("pending") // see RETURN_STATUSES in lib/returns.ts
+  // Shown to the customer on the order page — the decision explained.
+  adminNote     String?
+  refundAmount  Int?
+  refundMethod  String?  // "original" | "upi" | "bank" | "replacement"
+  // ---- Reverse pickup (NimbusPost) ----
+  nimbusOrderId String?  // draft reverse order id
+  nimbusAwb     String?  // AWB once the reverse shipment is booked
+  nimbusCourier String?
+  // Last reverse-pickup failure, surfaced in the admin so a silent Nimbus error
+  // can't leave an approved return with no pickup booked.
+  nimbusError   String?
+  statusHistory Json     @default("[]") // [{ status, note, at, by }]
+  resolvedAt    DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([status])
+  @@index([orderId])
+  @@index([createdAt])
 }
 
 // -------- Coupons --------
@@ -288,4 +400,48 @@ model Coupon {
   updatedAt      DateTime @updatedAt
 
   @@index([isActive])
+}
+
+// -------- Media --------
+model Media {
+  id               String   @id @default(cuid())
+  url              String   @unique
+  file             String
+  alt              String?
+  width            Int?
+  height           Int?
+  size             Int?
+  source           String   // "repo", "blob", "external"
+  tags             String[] @default([])
+  roles            String[] @default([])
+  // Smart variant tagging — optional. When set, the photo is automatically
+  // suggested when the admin opens that variant's gallery in the picker.
+  // e.g. variantAttribute = "Design", variantValue = "Pink"
+  variantAttribute String?  // e.g. "Design"
+  variantValue     String?  // e.g. "Pink"
+  // Denormalised subcategory name for fast search without a join.
+  subcategoryName  String?  // e.g. "Oversized Tees"
+  createdAt        DateTime @default(now())
+
+  productImages     ProductImage[]
+
+  @@index([variantAttribute, variantValue])
+  @@index([subcategoryName])
+}
+
+model ProductImage {
+  id           String  @id @default(cuid())
+  productId    String
+  mediaId      String
+  // variantValue = null  → common (shown for all variants)
+  // variantValue = "Pink" → shown only when Design = Pink is selected
+  variantValue String?
+  slot         String  @default("gallery") // "preview", "gallery", "common"
+  sortOrder    Int     @default(0)
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  media   Media   @relation(fields: [mediaId], references: [id], onDelete: Restrict)
+
+  @@unique([productId, mediaId, variantValue])
+  @@index([productId, variantValue])
 }

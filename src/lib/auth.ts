@@ -3,13 +3,28 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { cookies } from "next/headers";
 import { prisma } from "./prisma";
+import { ADMIN_COOKIE } from "./auth-cookie";
 
-export const ADMIN_COOKIE = "level7_admin";
+export { ADMIN_COOKIE };
 
-const SECRET =
-  process.env.AUTH_SECRET ||
-  process.env.JWT_SECRET ||
-  "level7-dev-secret-change-me";
+const SECRET = resolveSecret();
+
+/**
+ * Signing key for admin sessions. A build-time constant fallback is fine for
+ * local dev but must never reach production — anyone who has read this repo
+ * could forge an admin session with it.
+ */
+function resolveSecret(): string {
+  const configured = process.env.AUTH_SECRET || process.env.JWT_SECRET;
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "AUTH_SECRET is not set. Refusing to sign admin sessions with the " +
+        "development fallback key in production."
+    );
+  }
+  return "level7-dev-secret-change-me";
+}
 
 export type AdminSession = { id: string; email: string; name?: string };
 

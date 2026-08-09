@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useSettings } from "@/context/settings";
 import {
   LayoutDashboard,
   Package,
@@ -16,9 +17,9 @@ import {
   Menu,
   X,
   Ticket,
+  Images,
   Star,
-  Mail,
-  RotateCcw,
+  PackageX,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { logout } from "@/app/actions/auth";
@@ -29,11 +30,11 @@ const nav = [
   { href: "/admin/products", label: "Products", icon: Package },
   { href: "/admin/categories", label: "Categories", icon: Tag },
   { href: "/admin/orders", label: "Orders", icon: ShoppingCart },
-  { href: "/admin/returns", label: "Returns", icon: RotateCcw },
-  { href: "/admin/coupons", label: "Coupons", icon: Ticket },
+  { href: "/admin/returns", label: "Returns", icon: PackageX },
   { href: "/admin/reviews", label: "Reviews", icon: Star },
+  { href: "/admin/coupons", label: "Coupons", icon: Ticket },
+  { href: "/admin/media", label: "Media Library", icon: Images },
   { href: "/admin/leads", label: "Interested customers", icon: Users },
-  { href: "/admin/newsletter", label: "Newsletter", icon: Mail },
   { href: "/admin/messages", label: "Inquiries", icon: MessageSquare },
   { href: "/admin/settings", label: "Branding & settings", icon: Settings },
 ];
@@ -47,11 +48,12 @@ export function AdminShell({
 }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const { brandName } = useSettings();
 
   const SidebarContent = (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 px-6 py-5">
-        <span className="font-serif text-2xl">Level7 Clothing</span>
+        <span className="font-serif text-2xl">{brandName}</span>
         <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
           Admin
         </span>

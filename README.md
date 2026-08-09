@@ -1,8 +1,8 @@
-# 🎨 Level7 Clothing — Resin Art E‑commerce
+# 🖤 Level7 Clothing — Streetwear E‑commerce
 
 > 🟢 **New here? Start with [SETUP-GUIDE.md](./SETUP-GUIDE.md)** — a step-by-step guide in simple language covering everything: running locally, email setup, and going live on Vercel.
 
-A modern, premium storefront **and** admin dashboard for a handmade resin‑art brand.
+A modern, premium storefront **and** admin dashboard for a streetwear apparel brand.
 Built as a single Next.js app so it deploys to **Vercel in one click**.
 
 - **Storefront:** home, shop (search / filter / sort), product pages, cart, checkout (Cash on Delivery), order confirmation, about, contact.
@@ -63,7 +63,7 @@ Run this once:
 npm run setup
 ```
 
-This creates all the tables and loads **10 sample resin products** plus your admin account.
+This creates all the tables and loads **the Level7 product catalogue** plus your admin account.
 
 ### Step 4 — Start the website
 

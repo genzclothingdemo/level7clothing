@@ -210,13 +210,48 @@ Let it throw → 500 → crawlers retry instead of deindexing. Don't add a try/c
 npm run dev              # dev server (localhost:3000)
 npm run db:push          # push schema
 npm run db:seed          # DESTRUCTIVE: deletes + recreates all products
+npm run db:backup        # snapshot the DB to scripts/tmp/ (gitignored)
+npm run media:manifest   # rebuild src/lib/media-manifest.json from public/products
 npm run shipping:free    # safe: only shipping fields, keeps reviews/orders
 npx tsc --noEmit         # typecheck
-npx next build           # should be 24/24 pages
+npx next build           # production build
 ```
 
-`db:seed` wipes products. To change shipping or settings on live data, use targeted
-scripts in `scripts/` instead.
+`db:seed` wipes products. It now **refuses to run when the database holds real
+orders** unless you set `SEED_ALLOW_DESTRUCTIVE=1`, because it also orphans the
+reviews and photo links. To change shipping or settings on live data, use
+targeted scripts in `scripts/` instead.
+
+**`npm run build` must never contain `prisma db push`.** A wholesale copy from
+upstream reintroduced it once, and because the schema at that moment was missing
+`Address` and `NewsletterSubscriber`, the next deploy would have dropped both
+live tables.
+
+## Copying files from the upstream repo will break these
+
+The upstream resin store shares most of this codebase, so copying files across
+looks safe and is not. Each of these has bitten exactly once — see
+`UPGRADE-STATUS.md` §0 for the full repair log.
+
+- **`Address` and `NewsletterSubscriber` are Level7-only models.** They do not
+  exist upstream, so any schema copy silently deletes them.
+- **`prisma/seed.ts` is Level7's catalogue.** The upstream one seeds resin art.
+- **`SubcategoryImage` must not exist.** It has no table in the live DB and
+  nothing writes it. Schema and DB are currently in exact step — 16 models,
+  16 tables — so no `db push` is needed at all.
+- **Photos live flat in `public/products/level7/`**, not
+  `public/products/gallery/`. `lib/media.ts` and `scripts/build-media-manifest.mjs`
+  both scan `public/products`; pointing them at `gallery` empties the admin photo
+  picker silently and makes the build write an empty manifest.
+- **Cookie names come from `src/lib/auth-cookie.ts`**, imported by both
+  `src/proxy.ts` and `lib/auth.ts`. Re-declaring the name in either file makes
+  admin login bounce back to the login page forever.
+- **There is no `src/middleware.ts`** — Next 16 uses `src/proxy.ts` exporting
+  `proxy`. Having both means two admin gates with two different cookies.
+- **`lib/products.ts` must keep `getProductsBySlugs`** — the Level7-only wishlist
+  and recommendations routes import it.
+- **`.gitignore` must ignore all of `scripts/tmp/`** (DB snapshots contain order
+  PII and password hashes), and `!.env.example` must stay after the last `.env*`.
 
 ## Environment gotchas (Windows)
 

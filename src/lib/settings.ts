@@ -2,6 +2,12 @@ import { cache } from "react";
 import { prisma } from "./prisma";
 import type { SettingsDTO } from "./types";
 
+/**
+ * Fallback branding, used only when the SiteSettings row cannot be read (a DB
+ * outage during a build, or a fresh database). The live values come from
+ * Admin → Settings. Keep these in step with the @default(...) values on the
+ * SiteSettings model in prisma/schema.prisma.
+ */
 export const DEFAULT_SETTINGS: SettingsDTO = {
   brandName: "Level7 Clothing",
   tagline: "Premium GenZ Graphic Tees",
@@ -27,7 +33,56 @@ export const DEFAULT_SETTINGS: SettingsDTO = {
   razorpayEnabled: false,
   nimbusEnabled: false,
   announcement: "Join the club — exclusive deals and early access to new drops",
+  defaultMaterialsCare: [
+    "Premium heavyweight cotton, pre-shrunk and bio-washed",
+    "Machine wash cold, inside out, with like colours",
+    "Do not bleach or tumble dry — hang to dry",
+    "Warm iron on the reverse; never iron directly on the print",
+  ].join("\n"),
+  defaultShippingInfo: [
+    "Free shipping across India on every order",
+    "Dispatched in 1–2 working days, tracking shared on dispatch",
+    "Cash on Delivery available on eligible pin codes",
+  ].join("\n"),
+  defaultReturnsInfo: [
+    "7-day easy returns on unworn items with tags attached.",
+    "Wrong size? Exchange it once, free of charge.",
+    "Approved refunds go back to the original payment method within 5–7 working days.",
+  ].join("\n"),
+  returnsEnabled: true,
+  defaultReturnable: true,
+  returnWindowDays: 7,
 };
+
+/**
+ * Resolve the product page's info blocks: a product's own copy wins, otherwise
+ * the store-wide default. A blank result means "hide this section" — that's how
+ * an admin switches a block off store-wide (clear it in Product defaults).
+ *
+ * Single source of truth for the rule, so the product page, any future PDP
+ * variant and the admin preview can't drift apart.
+ */
+export function resolveProductInfo(
+  product: {
+    materialsCare?: string | null;
+    shippingInfo?: string | null;
+    returnsInfo?: string | null;
+  },
+  settings: Pick<
+    SettingsDTO,
+    "defaultMaterialsCare" | "defaultShippingInfo" | "defaultReturnsInfo"
+  >
+): { materialsCare: string; shippingInfo: string; returnsInfo: string } {
+  // Only `null` inherits. An empty string is a deliberate per-product "hide
+  // this section", which is why this isn't a `||` chain.
+  const pick = (own: string | null | undefined, fallback: string) =>
+    (own ?? fallback).trim();
+  return {
+    materialsCare: pick(product.materialsCare, settings.defaultMaterialsCare),
+    shippingInfo: pick(product.shippingInfo, settings.defaultShippingInfo),
+    returnsInfo: pick(product.returnsInfo, settings.defaultReturnsInfo),
+  };
+}
 
 /**
  * Load site settings. Falls back to defaults if the DB is unavailable so the
@@ -60,6 +115,12 @@ export const getSettings = cache(async (): Promise<SettingsDTO> => {
       razorpayEnabled: row.razorpayEnabled,
       nimbusEnabled: row.nimbusEnabled,
       announcement: row.announcement,
+      defaultMaterialsCare: row.defaultMaterialsCare,
+      defaultShippingInfo: row.defaultShippingInfo,
+      defaultReturnsInfo: row.defaultReturnsInfo,
+      returnsEnabled: row.returnsEnabled,
+      defaultReturnable: row.defaultReturnable,
+      returnWindowDays: row.returnWindowDays,
     };
   } catch {
     return DEFAULT_SETTINGS;

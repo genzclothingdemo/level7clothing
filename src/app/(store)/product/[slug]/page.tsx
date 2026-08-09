@@ -1,29 +1,32 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import type { Metadata } from "next";
-import { Truck, ShieldCheck, Shirt, ChevronRight } from "lucide-react";
+import { ChevronRight, Star } from "lucide-react";
 import { getProductBySlug, getRelated } from "@/lib/products";
-import { prisma } from "@/lib/prisma";
+import { getProductCrumb } from "@/lib/catalog";
 import { formatINR } from "@/lib/utils";
 import { ProductGallery } from "@/components/store/product-gallery";
 import { ProductPurchase } from "@/components/store/product-purchase";
+import { ProductPrice } from "@/components/store/product-price";
 import { ProductCard } from "@/components/store/product-card";
-import {
-  ProductReviews,
-  type PublicReview,
-} from "@/components/store/product-reviews";
+import { ProductInfoSections } from "@/components/store/product-info-sections";
+import { ReviewPanel } from "@/components/store/review-panel";
+import { VideoPreviews } from "@/components/store/video-previews";
 import { ProductViewProvider } from "@/context/product-view";
-import { normalizeVariants, priceRange } from "@/lib/variants";
+import { priceRange, firstAvailableSelection } from "@/lib/variants";
+import { getSettings, resolveProductInfo } from "@/lib/settings";
+import { siteUrl } from "@/lib/site-url";
+import { resolveVideos } from "@/lib/videos";
+import {
+  getProductReviews,
+  getReviewSummaries,
+  getReviewSummary,
+} from "@/lib/reviews";
+import { getUserSession } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
-function siteUrl() {
-  const fromEnv = process.env.NEXT_PUBLIC_SITE_URL;
-  if (fromEnv) return fromEnv.replace(/\/$/, "");
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
-  return "http://localhost:3000";
-}
-
+// ─── Metadata ────────────────────────────────────────────────────────────────
 export async function generateMetadata({
   params,
 }: {
@@ -33,148 +36,162 @@ export async function generateMetadata({
   const product = await getProductBySlug(slug);
   if (!product) return { title: "Product" };
 
-  // Lead the description with intent-matching terms (price, sizes, COD) rather
-  // than only the brand-voice copy — better click-through from search results.
-  const sizes = (product.options.find((o) => /^size$/i.test(o.name))?.choices ?? [])
-    .map((c) => c.label)
-    .join(", ");
+  const range = priceRange(product);
   const description = [
-    `${product.name} — ₹${product.price}.`,
-    sizes ? `Sizes ${sizes}.` : "",
-    "Premium heavyweight cotton, unisex oversized fit.",
-    "Free shipping on prepaid orders, COD available across India.",
+    `${product.name} — ${formatINR(range.min)}${range.min !== range.max ? `+` : ""}.`,
+    product.description.replace(/\s+/g, " ").trim(),
   ]
-    .filter(Boolean)
     .join(" ")
     .slice(0, 158);
+
+  // Prefer the relational gallery (source of truth) for share images; fall back
+  // to the legacy product.images array.
+  const mediaUrls = (product.media ?? []).map((m) => m.url).filter(Boolean);
+  const images    = mediaUrls.length ? mediaUrls : product.images.filter(Boolean);
+  const canonical = `/product/${product.slug}`;
 
   return {
     title: product.name,
     description,
-    keywords: [
-      product.name,
-      product.category,
-      ...product.tags,
-      "buy online India",
-      "Level7 Clothing",
-    ],
-    alternates: { canonical: `/product/${product.slug}` },
+    keywords: [product.name, product.category, ...(product.tags ?? [])].filter(
+      Boolean
+    ) as string[],
+    alternates: { canonical },
     openGraph: {
       title: product.name,
       description,
+      url: canonical,
       type: "website",
-      images: product.images[0] ? [{ url: product.images[0] }] : undefined,
+      ...(images.length ? { images: [{ url: images[0], alt: product.name }] } : {}),
     },
     twitter: {
       card: "summary_large_image",
       title: product.name,
       description,
-      images: product.images[0] ? [product.images[0]] : undefined,
+      ...(images.length ? { images: [images[0]] } : {}),
     },
+    robots: { index: true, follow: true },
   };
 }
 
+// ─── Page ────────────────────────────────────────────────────────────────────
 export default async function ProductPage({
   params,
 }: {
   params: Promise<{ slug: string }>;
 }) {
-  const { slug } = await params;
-  const product = await getProductBySlug(slug);
+  const { slug }    = await params;
+  const product     = await getProductBySlug(slug);
   if (!product || !product.isActive) notFound();
 
-  // Both of these only need product.id, so run them together rather than
-  // sequentially — one fewer database round trip on every product view.
-  const [related, rawReviews] = await Promise.all([
-    getRelated(product.category, product.id, 4, product.secondaryCategory),
-    prisma.review
-      .findMany({
-        where: { productId: product.id, approved: true },
-        orderBy: [{ featured: "desc" }, { createdAt: "desc" }],
-        take: 50,
-      })
-      .catch(() => []),
+  const [related, settings, crumb, reviews, summary, session] = await Promise.all([
+    getRelated(
+      product.category,
+      product.id,
+      6,
+      product.secondaryCategory,
+      product.subcategoryId
+    ),
+    getSettings(),
+    getProductCrumb(product.subcategoryId),
+    getProductReviews(product.id),
+    // The headline figure counts every approved review, not just the page shown.
+    getReviewSummary(product.id),
+    getUserSession(),
   ]);
 
-  const reviews: PublicReview[] = rawReviews.map((r) => ({
-    id: r.id,
-    name: r.name,
-    rating: r.rating,
-    title: r.title,
-    body: r.body,
-    createdAt: r.createdAt.toISOString(),
-  }));
-  const discount =
-    product.compareAtPrice && product.compareAtPrice > product.price
-      ? Math.round(
-          ((product.compareAtPrice - product.price) / product.compareAtPrice) *
-            100
-        )
-      : 0;
+  const range     = priceRange(product);
+  const initialSelection = firstAvailableSelection(product);
+  const relatedRatings = await getReviewSummaries(related.map((p) => p.id));
 
-  // Flipkart-style: nothing is pre-selected — the customer browses all photos
-  // and narrows down. Header shows a price range when variants differ.
-  const variants = normalizeVariants(product);
-  const range = priceRange(product);
-  const hasRange = range.min !== range.max;
+  // Info-accordion copy: this product's own text where set, otherwise the
+  // store-wide default from Settings > Product defaults.
+  const info = resolveProductInfo(product, settings);
 
-  // Product structured data so Google can show price / availability / rating.
-  const ratingCount = reviews.length;
-  const ratingValue =
-    ratingCount > 0
-      ? Math.round(
-          (reviews.reduce((n, r) => n + r.rating, 0) / ratingCount) * 10
-        ) / 10
-      : null;
+  // Physical specs, shown inside the Materials & Care panel when the admin has
+  // filled the parcel fields.
+  const dims = [product.lengthCm, product.breadthCm, product.heightCm];
+  const specs = [
+    ...(dims.every((d) => d != null)
+      ? [{ label: "Dimensions", value: `${dims[0]} × ${dims[1]} × ${dims[2]} cm` }]
+      : []),
+    ...(product.weightGrams != null
+      ? [{ label: "Weight", value: `${product.weightGrams} g` }]
+      : []),
+    { label: "Category", value: product.category },
+  ];
+
+  const base            = siteUrl();
+  const productUrl      = `${base}/product/${product.slug}`;
+  // JSON-LD images: prefer the relational gallery, fall back to product.images.
+  const mediaUrls       = (product.media ?? []).map((m) => m.url).filter(Boolean);
+  const absoluteImages  = (mediaUrls.length ? mediaUrls : product.images.filter(Boolean))
+    .map((src) => (src.startsWith("http") ? src : `${base}${src}`));
 
   const jsonLd = {
     "@context": "https://schema.org",
-    "@type": "Product",
-    name: product.name,
-    description: product.description,
-    // Structured data needs absolute image URLs.
-    image: product.images.map((src) =>
-      src.startsWith("http") ? src : `${siteUrl()}${src}`
-    ),
-    category: product.category,
-    brand: { "@type": "Brand", name: "Level7 Clothing" },
-    offers: {
-      "@type": "AggregateOffer",
-      priceCurrency: "INR",
-      lowPrice: range.min,
-      highPrice: range.max,
-      availability:
-        product.stock > 0
-          ? "https://schema.org/InStock"
-          : "https://schema.org/OutOfStock",
-    },
-    ...(ratingValue !== null && {
-      aggregateRating: {
-        "@type": "AggregateRating",
-        ratingValue,
-        reviewCount: ratingCount,
-      },
-    }),
-  };
-
-  const base = siteUrl();
-  const breadcrumbJsonLd = {
-    "@context": "https://schema.org",
-    "@type": "BreadcrumbList",
-    itemListElement: [
-      { "@type": "ListItem", position: 1, name: "Home", item: base },
-      { "@type": "ListItem", position: 2, name: "Shop", item: `${base}/shop` },
+    "@graph": [
       {
-        "@type": "ListItem",
-        position: 3,
-        name: product.category,
-        item: `${base}/shop?category=${encodeURIComponent(product.category)}`,
-      },
-      {
-        "@type": "ListItem",
-        position: 4,
+        "@type": "Product",
+        "@id": `${productUrl}#product`,
         name: product.name,
-        item: `${base}/product/${product.slug}`,
+        description: product.description.replace(/\s+/g, " ").trim(),
+        ...(absoluteImages.length ? { image: absoluteImages } : {}),
+        category: product.category,
+        brand: { "@type": "Brand", name: settings.brandName },
+        // Emitted only when real approved reviews exist. Structured-data rating
+        // with no reviews behind it is exactly what Google penalises.
+        ...(summary
+          ? {
+              aggregateRating: {
+                "@type": "AggregateRating",
+                ratingValue: summary.average,
+                reviewCount: summary.count,
+              },
+            }
+          : {}),
+        offers: {
+          "@type": "AggregateOffer",
+          priceCurrency: "INR",
+          lowPrice: range.min,
+          highPrice: range.max,
+          offerCount: 1,
+          availability:
+            product.stock > 0
+              ? "https://schema.org/InStock"
+              : "https://schema.org/OutOfStock",
+          url: productUrl,
+          seller: { "@id": `${base}/#organization` },
+        },
+      },
+      {
+        "@type": "BreadcrumbList",
+        itemListElement: [
+          { "@type": "ListItem", position: 1, name: "Home", item: base },
+          { "@type": "ListItem", position: 2, name: "Shop", item: `${base}/shop` },
+          {
+            "@type": "ListItem",
+            position: 3,
+            name: product.category,
+            item: `${base}/shop?category=${encodeURIComponent(product.category)}`,
+          },
+          ...(crumb
+            ? [
+                {
+                  "@type": "ListItem",
+                  position: 4,
+                  name: crumb.name,
+                  item: `${base}${crumb.href}`,
+                },
+              ]
+            : []),
+          {
+            "@type": "ListItem",
+            position: crumb ? 5 : 4,
+            name: product.name,
+            item: productUrl,
+          },
+        ],
       },
     ],
   };
@@ -185,123 +202,143 @@ export default async function ProductPage({
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}
-      />
+
       {/* Breadcrumb */}
-      <nav className="mb-2 md:mb-6 flex items-center gap-1 text-sm text-muted-foreground">
-        <Link href="/" className="hover:text-accent">
-          Home
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <Link href="/shop" className="hover:text-accent">
-          Shop
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <span className="text-foreground">{product.name}</span>
+      <nav className="mb-4 flex items-center gap-1 text-xs text-muted-foreground md:mb-6 md:text-sm">
+        <Link href="/" className="hover:text-accent">Home</Link>
+        <ChevronRight className="h-3.5 w-3.5" />
+        <Link href="/shop" className="hover:text-accent">Shop</Link>
+        {crumb && (
+          <>
+            <ChevronRight className="h-3.5 w-3.5" />
+            <Link href={crumb.href} className="hover:text-accent">{crumb.name}</Link>
+          </>
+        )}
+        <ChevronRight className="h-3.5 w-3.5" />
+        <span className="truncate text-foreground">{product.name}</span>
       </nav>
 
-      <ProductViewProvider>
-      {/* grid-cols-[minmax(0,1fr)]: below md there is no explicit column, so the
-          implicit track is auto-sized and grows to the gallery's min-content
-          (307px inside a 280px container) — that was the horizontal scroll on
-          320px phones. min-w-0 on the child can't fix track sizing; only the
-          track's own minmax(0,…) can. md:grid-cols-2 is already safe. */}
-      <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-10 md:grid-cols-2 lg:gap-16">
-        {/* Gallery: pinned to the top and sticky so a long description never
-            stretches or scrolls the square photo out of view. */}
-        {/* min-w-0: the gallery's thumbnail rail is a horizontal scroller, and a
-            grid item's default `min-width: auto` would otherwise stretch this
-            column to the rail's full min-content width and overflow the page. */}
-        <div className="md:sticky md:top-24 self-start min-w-0">
-          <ProductGallery
-            product={product}
-            variants={variants}
-            name={product.name}
-          />
-        </div>
+      <ProductViewProvider initial={initialSelection}>
+        <div className="grid items-start gap-8 md:grid-cols-2 md:gap-12 lg:gap-16">
+          {/* ── Gallery — sticky on desktop ── */}
+          <div className="md:sticky md:top-24 md:self-start min-w-0">
+            <ProductGallery
+              product={product}
+              media={product.media ?? []}
+            />
+          </div>
 
-        <div className="md:pt-4">
-          <p className="text-xs uppercase tracking-widest text-muted-foreground">
-            {product.category}
-          </p>
-          <h1 className="mt-2 font-serif text-2xl leading-tight md:text-4xl">
-            {product.name}
-          </h1>
+          {/* ── Product summary + variant selection + purchase ──
+              Order is deliberate: the customer's first question is "which one do
+              I want", so the option pickers sit directly under the price and the
+              long-form copy (details, care, shipping, reviews) moves below the
+              fold into <ProductInfoSections />. */}
+          <div className="md:pt-2">
+            {/* Category */}
+            <p className="text-[10px] uppercase tracking-widest text-muted-foreground sm:text-xs">
+              {product.category}
+            </p>
 
-          <div className="mt-4 flex items-center gap-3">
-            <span className="text-2xl font-medium">
-              {hasRange
-                ? `${formatINR(range.min)} – ${formatINR(range.max)}`
-                : formatINR(range.min)}
-            </span>
-            {!hasRange && discount > 0 && (
-              <>
-                <span className="text-lg text-muted-foreground line-through">
-                  {formatINR(product.compareAtPrice!)}
+            {/* Product name */}
+            <h1 className="mt-1.5 font-serif text-2xl leading-tight md:text-[2rem]">
+              {product.name}
+            </h1>
+
+            {/* Rating + stock on one compact line. The rating block only exists
+                once a real approved review does — no placeholder stars. */}
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+              {summary && (
+                <>
+                  <span className="flex items-center gap-1">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <Star
+                        key={star}
+                        className={`h-3.5 w-3.5 ${
+                          star <= Math.round(summary.average)
+                            ? "fill-accent text-accent"
+                            : "fill-muted text-muted-foreground"
+                        }`}
+                      />
+                    ))}
+                    <span className="ml-0.5 font-medium">{summary.average}</span>
+                  </span>
+                  <span className="text-muted-foreground">
+                    ({summary.count} review{summary.count === 1 ? "" : "s"})
+                  </span>
+                  <span className="text-border">|</span>
+                </>
+              )}
+              {product.stock > 0 ? (
+                <span className="text-success">
+                  In stock{product.stock <= 5 ? ` · only ${product.stock} left` : ""}
                 </span>
-                <span className="rounded-full bg-accent px-2.5 py-1 text-xs font-medium text-accent-foreground">
-                  Save {discount}%
-                </span>
-              </>
-            )}
-          </div>
+              ) : (
+                <span className="text-danger">Currently sold out</span>
+              )}
+            </div>
 
-          <p className="mt-3 text-sm">
-            {product.stock > 0 ? (
-              <span className="text-success">
-                In stock{product.stock <= 5 ? ` · only ${product.stock} left` : ""}
-              </span>
-            ) : (
-              <span className="text-danger">Currently sold out</span>
-            )}
-          </p>
+            {/* Price — tracks the selected variant (client component) */}
+            <ProductPrice product={product} />
+            <p className="mt-1 text-xs text-muted-foreground">Inclusive of all taxes</p>
 
-          <div className="mt-6 h-px bg-border" />
+            <div className="mt-5 h-px bg-border" />
 
-          <p className="mt-6 leading-relaxed text-muted-foreground">
-            {product.description}
-          </p>
-
-          <div className="mt-8">
-            <ProductPurchase product={product} />
-          </div>
-
-          <div className="mt-8 grid gap-4 rounded-lg border border-border p-5 sm:grid-cols-3">
-            <Feature icon={<Shirt className="h-5 w-5" />} label="Premium quality fabric" />
-            <Feature icon={<Truck className="h-5 w-5" />} label="Ships across India" />
-            <Feature icon={<ShieldCheck className="h-5 w-5" />} label="Cash on delivery" />
+            {/* Purchase controls (variant pickers, qty, CTAs, trust) */}
+            <div className="mt-5">
+              <ProductPurchase product={product} />
+            </div>
           </div>
         </div>
-      </div>
       </ProductViewProvider>
 
-      <ProductReviews
-        productId={product.id}
-        productSlug={product.slug}
-        reviews={reviews}
-      />
+      {/* ── Below the fold: everything read after the decision is made ── */}
+      <section className="mt-10 md:mt-16 md:max-w-3xl">
+        <ProductInfoSections
+          description={product.description}
+          materialsCare={info.materialsCare}
+          shippingInfo={info.shippingInfo}
+          returnsInfo={info.returnsInfo}
+          rating={summary?.average ?? null}
+          reviewCount={summary?.count ?? 0}
+          specs={specs}
+          reviews={
+            <ReviewPanel
+              productId={product.id}
+              summary={summary}
+              items={reviews.items}
+              distribution={reviews.distribution}
+              signedInName={session?.name ?? null}
+            />
+          }
+        />
+      </section>
 
+      {/* ── Video previews — the admin's YouTube / Instagram links ── */}
+      <VideoPreviews videos={resolveVideos(product.videos)} />
+
+      {/* ── You may also love — horizontal carousel ── */}
       {related.length > 0 && (
-        <section className="mt-24">
-          <h2 className="font-serif text-3xl">You may also like</h2>
-          <div className="mt-8 grid grid-cols-2 gap-x-5 gap-y-10 md:grid-cols-4">
-            {related.map((p) => (
-              <ProductCard key={p.id} product={p} />
-            ))}
+        <section className="mt-20 md:mt-28">
+          <h2 className="font-serif text-2xl md:text-3xl">You may also love</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Handpicked pieces that go beautifully together
+          </p>
+
+          {/* Horizontal scroll carousel — snap on mobile, grid on desktop */}
+          <div className="-mx-5 mt-6 sm:mx-0">
+            <div className="no-scrollbar flex gap-4 overflow-x-auto px-5 pb-2 sm:px-0 md:grid md:grid-cols-4 md:gap-6 md:overflow-visible">
+              {related.map((p) => (
+                <div
+                  key={p.id}
+                  className="w-[calc(50vw-2rem)] shrink-0 sm:w-[calc(33vw-2rem)] md:w-auto"
+                >
+                  <ProductCard product={p} rating={relatedRatings.get(p.id)} />
+                </div>
+              ))}
+            </div>
           </div>
         </section>
       )}
-    </div>
-  );
-}
-
-function Feature({ icon, label }: { icon: React.ReactNode; label: string }) {
-  return (
-    <div className="flex items-center gap-3 sm:flex-col sm:text-center">
-      <span className="gold-text">{icon}</span>
-      <span className="text-xs text-muted-foreground">{label}</span>
     </div>
   );
 }

@@ -1,4 +1,3 @@
-import { cache } from "react";
 import { prisma } from "./prisma";
 import type { Prisma, Product } from "@prisma/client";
 import type {
@@ -7,13 +6,66 @@ import type {
   VariantPrice,
   Variant,
   PaymentMode,
+  Attribute,
+  SellableVariant,
+  ProductVideo,
 } from "./types";
+import { deriveVariantModel } from "./variants";
 import { searchProducts } from "./search";
 
 /** Normalise a Prisma product row into a ProductDTO (coerces the JSON columns). */
-function toDTO(p: Product): ProductDTO {
+export function toDTO(
+  p: Product & {
+    productImages?: {
+      slot: string;
+      variantValue: string | null;
+      sortOrder: number;
+      media: any;
+    }[];
+  }
+): ProductDTO {
+  const storedAttributes = Array.isArray(p.attributes)
+    ? (p.attributes as unknown as Attribute[])
+    : [];
+  const storedSellable = Array.isArray(p.sellableVariants)
+    ? (p.sellableVariants as unknown as SellableVariant[])
+    : [];
+  // Products saved before the admin model was bridged to the storefront read model
+  // have empty attributes/sellableVariants. Derive them on read from options/variants
+  // so every existing product works without needing a re-save.
+  const derived =
+    storedAttributes.length === 0
+      ? deriveVariantModel({
+          options: p.options,
+          variants: p.variants,
+          price: p.price,
+          stock: p.stock,
+        })
+      : null;
+
+  const storedSellableRemapped = storedSellable;
+
+  // Drop the raw Prisma relation before spreading `p` — otherwise its
+  // un-typed `media.url` values ride along on the DTO (ProductDTO has no
+  // `productImages` field, so nothing reads them) and get serialized into the
+  // RSC payload anyway once the product is passed to a client component.
+  const { productImages: _rawProductImages, ...rest } = p;
+
   return {
-    ...p,
+    ...rest,
+    images: p.images,
+    media: p.productImages?.map((pi) => ({
+      id: pi.media.id,
+      url: pi.media.url,
+      alt: pi.media.alt,
+      width: pi.media.width,
+      height: pi.media.height,
+      // Relational gallery metadata — the storefront's source of truth for
+      // ordering (sortOrder) and per-variant scoping (variantValue).
+      slot: pi.slot,
+      variantValue: pi.variantValue,
+      sortOrder: pi.sortOrder,
+    })),
     options: Array.isArray(p.options)
       ? (p.options as unknown as ProductOption[])
       : [],
@@ -23,11 +75,26 @@ function toDTO(p: Product): ProductDTO {
     variants: Array.isArray(p.variants)
       ? (p.variants as unknown as Variant[])
       : [],
+    videos: Array.isArray(p.videos) ? (p.videos as unknown as ProductVideo[]) : [],
     paymentModes: (Array.isArray(p.paymentModes)
       ? p.paymentModes
       : ["prepaid", "cod"]) as PaymentMode[],
+    // New rule engine fields — stored as JSON, cast to proper types
+    attributes: derived ? derived.attributes : storedAttributes,
+    propertyModules: (p.propertyModules as any) ?? {},
+    rules: (p.rules as any) ?? {},
+    sellableVariants: derived ? derived.sellableVariants : storedSellableRemapped,
   };
 }
+
+/**
+ * The relational gallery every list/detail query needs. ProductCard and the
+ * subcategory tiles read `product.media` (one preview per design); a query that
+ * forgets this include degrades those cards to one photo with no error.
+ */
+const GALLERY_INCLUDE = {
+  include: { productImages: { include: { media: true }, orderBy: { sortOrder: "asc" } } },
+} as const;
 
 export type ShopQuery = {
   category?: string;
@@ -67,6 +134,12 @@ export async function getProducts(query: ShopQuery = {}): Promise<ProductDTO[]> 
       await prisma.product.findMany({
         where: { AND: and },
         orderBy: orderBy(query.sort),
+        include: {
+          productImages: {
+            include: { media: true },
+            orderBy: { sortOrder: "asc" },
+          },
+        },
       })
     ).map(toDTO);
 
@@ -91,6 +164,12 @@ export async function searchCatalogue(
       await prisma.product.findMany({
         where: { isActive: true },
         orderBy: { isFeatured: "desc" },
+        include: {
+          productImages: {
+            include: { media: true },
+            orderBy: { sortOrder: "asc" },
+          },
+        },
       })
     ).map(toDTO);
     return searchProducts(products, q, limit);
@@ -102,10 +181,14 @@ export async function searchCatalogue(
 
 export async function getFeatured(limit = 4): Promise<ProductDTO[]> {
   try {
+    // GALLERY_INCLUDE on every list query: ProductCard builds its swipe gallery
+    // from the relational rows (one preview per design), so omitting it makes the
+    // card fall back to a single cover photo.
     const products = await prisma.product.findMany({
       where: { isActive: true, isFeatured: true },
       orderBy: { createdAt: "desc" },
       take: limit,
+      ...GALLERY_INCLUDE,
     });
     if (products.length === 0) {
       return (
@@ -113,6 +196,7 @@ export async function getFeatured(limit = 4): Promise<ProductDTO[]> {
           where: { isActive: true },
           orderBy: { createdAt: "desc" },
           take: limit,
+          ...GALLERY_INCLUDE,
         })
       ).map(toDTO);
     }
@@ -123,22 +207,35 @@ export async function getFeatured(limit = 4): Promise<ProductDTO[]> {
   }
 }
 
-/**
- * Look up a single product.
- *
- * Deliberately does NOT swallow database errors: callers turn `null` into a
- * 404, so returning null on a transient connection failure would tell search
- * engines a live product had been deleted. A thrown error surfaces as a 500
- * instead, which is both accurate and retried rather than deindexed.
- */
-export const getProductBySlug = cache(
-  async (slug: string): Promise<ProductDTO | null> => {
-    const product = await prisma.product.findUnique({ where: { slug } });
-    return product ? toDTO(product) : null;
+export async function getProductBySlug(
+  slug: string
+): Promise<ProductDTO | null> {
+  try {
+    const product = await prisma.product.findUnique({
+      where: { slug },
+      include: {
+        productImages: {
+          include: { media: true },
+          orderBy: { sortOrder: "asc" },
+        },
+      },
+    });
+    if (!product || !product.isActive) return null;
+    return toDTO(product);
+  } catch (err) {
+    console.error("[products] getProductBySlug failed:", err);
+    return null;
   }
-);
+}
 
-/** Fetch active products for a set of slugs, preserving the given slug order. */
+/**
+ * Look up several products by slug at once, returning them in the order the
+ * slugs were given. Backs the wishlist and the recommendations endpoint, both
+ * of which store slugs in localStorage rather than ids.
+ *
+ * Unlike getProductBySlug this DOES swallow errors: a failed lookup here means
+ * an empty wishlist rail, not a page that should 500.
+ */
 export async function getProductsBySlugs(
   slugs: string[]
 ): Promise<ProductDTO[]> {
@@ -146,6 +243,7 @@ export async function getProductsBySlugs(
   try {
     const products = await prisma.product.findMany({
       where: { slug: { in: slugs }, isActive: true },
+      ...GALLERY_INCLUDE,
     });
     const bySlug = new Map(products.map((p) => [p.slug, toDTO(p)]));
     return slugs
@@ -161,23 +259,36 @@ export async function getRelated(
   category: string,
   excludeId: string,
   limit = 4,
-  secondaryCategory?: string | null
+  secondaryCategory?: string | null,
+  subcategoryId?: string | null
 ): Promise<ProductDTO[]> {
   try {
     const cats = [category, secondaryCategory].filter(Boolean) as string[];
-    const products = await prisma.product.findMany({
+
+    // Siblings in the same group come first — the closest match to what the
+    // shopper is looking at is another design of the same thing.
+    const siblings = subcategoryId
+      ? await prisma.product.findMany({
+          where: { isActive: true, id: { not: excludeId }, subcategoryId },
+          take: limit,
+          orderBy: { createdAt: "desc" },
+          ...GALLERY_INCLUDE,
+        })
+      : [];
+    if (siblings.length >= limit) return siblings.slice(0, limit).map(toDTO);
+
+    const seen = new Set([excludeId, ...siblings.map((p) => p.id)]);
+    const rest = await prisma.product.findMany({
       where: {
         isActive: true,
-        id: { not: excludeId },
-        OR: [
-          { category: { in: cats } },
-          { secondaryCategory: { in: cats } },
-        ],
+        id: { notIn: [...seen] },
+        OR: [{ category: { in: cats } }, { secondaryCategory: { in: cats } }],
       },
-      take: limit,
+      take: limit - siblings.length,
       orderBy: { createdAt: "desc" },
+      ...GALLERY_INCLUDE,
     });
-    return products.map(toDTO);
+    return [...siblings, ...rest].map(toDTO);
   } catch {
     return [];
   }

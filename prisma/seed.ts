@@ -618,10 +618,27 @@ async function main() {
 
   // -----------------------------------------------------------------------
   // Products: reset the catalogue to Level7 Clothing's real product list.
-  // (Removes any old demo/sample products so the store shows only real items.)
-  // NOTE: this replaces ALL products — once you start editing products in the
-  // admin panel, don't re-run the seed or it will reset them to this list.
+  //
+  // This DELETES EVERY PRODUCT first. On a live database that also orphans the
+  // reviews and the ProductImage/Media links attached to them, and it cannot be
+  // undone. So it refuses to run whenever the database looks live — i.e. it
+  // already holds real orders — unless you opt in explicitly:
+  //
+  //   SEED_ALLOW_DESTRUCTIVE=1 npm run db:seed
+  //
+  // To change shipping or settings on live data, use a targeted script in
+  // scripts/ instead. Never reach for the seed.
   // -----------------------------------------------------------------------
+  const orderCount = await prisma.order.count();
+  if (orderCount > 0 && process.env.SEED_ALLOW_DESTRUCTIVE !== "1") {
+    console.error(
+      `\n✗ Refusing to seed: this database has ${orderCount} real order(s).\n` +
+        `  db:seed deletes every product and would orphan their reviews and photos.\n` +
+        `  If you are certain, re-run with SEED_ALLOW_DESTRUCTIVE=1.\n`
+    );
+    process.exit(1);
+  }
+
   await prisma.product.deleteMany({});
   for (const p of products) {
     const slug = slugify(p.name);

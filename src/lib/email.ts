@@ -4,6 +4,8 @@ import type { SettingsDTO } from "./types";
 import { formatINR } from "./utils";
 
 const apiKey = process.env.RESEND_API_KEY;
+// Resend rejects a sender on a domain you have not verified, so the fallback
+// stays on their shared testing domain rather than guessing a brand address.
 const FROM = process.env.EMAIL_FROM || "Level7 Clothing <onboarding@resend.dev>";
 
 const resend = apiKey ? new Resend(apiKey) : null;
@@ -21,10 +23,22 @@ async function send(opts: {
   }
   try {
     const res = await resend.emails.send({ from: FROM, ...opts });
-    if (res.error) console.error("[email] send error:", res.error);
+    if (res.error) {
+      // By far the most common cause is EMAIL_FROM using a domain that isn't
+      // verified in Resend (a gmail.com / outlook.com address can never be),
+      // which rejects every send while the app carries on as if it worked.
+      console.error(
+        `[email] REJECTED "${opts.subject}" to ${opts.to} — from="${FROM}".`,
+        `Is that domain verified in Resend? →`,
+        res.error
+      );
+    }
     return res;
   } catch (err) {
-    console.error("[email] send threw:", err);
+    console.error(
+      `[email] THREW sending "${opts.subject}" to ${opts.to} — from="${FROM}":`,
+      err
+    );
     return { error: err };
   }
 }

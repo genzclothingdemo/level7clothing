@@ -14,18 +14,25 @@ export function OrderTimeline({
   history,
   deliveryStatus,
   note,
+  // Who the admin's note is attributed to. Callers that can read site settings
+  // pass the live brand name; the fallback keeps this component brand-agnostic
+  // rather than baking a store name into shared UI.
+  brandName,
 }: {
   status: string;
   history?: StatusEntry[];
   deliveryStatus?: string | null;
   note?: string | null;
+  brandName?: string;
 }) {
+  const sellerName = brandName?.trim() || "the store";
+
   // ── Payment Failed status view ──
   if (status === "payment_failed") {
     const at = history?.find((h) => h.status === "payment_failed")?.at;
     return (
       <div className="space-y-3">
-        <div className="flex items-start gap-3 rounded-lg border border-danger/30 bg-danger/5 p-4">
+        <div className="flex items-start gap-3 rounded-2xl border border-danger/30 bg-danger/5 p-4">
           <AlertTriangle className="h-6 w-6 shrink-0 text-danger mt-0.5" />
           <div>
             <p className="font-medium text-danger">Payment Failed</p>
@@ -37,9 +44,9 @@ export function OrderTimeline({
         </div>
 
         {note && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs">
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs">
             <p className="font-medium text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-              <MessageSquare className="h-3.5 w-3.5" /> Note from Level7 Clothing:
+              <MessageSquare className="h-3.5 w-3.5" /> Note from {sellerName}:
             </p>
             <p className="mt-1 text-foreground/80">{note}</p>
           </div>
@@ -53,7 +60,7 @@ export function OrderTimeline({
     const at = history?.find((h) => h.status === "cancelled")?.at;
     return (
       <div className="space-y-3">
-        <div className="flex items-center gap-3 rounded-lg border border-danger/30 bg-danger/5 p-4">
+        <div className="flex items-center gap-3 rounded-2xl border border-danger/30 bg-danger/5 p-4">
           <XCircle className="h-6 w-6 shrink-0 text-danger" />
           <div>
             <p className="font-medium text-danger">Order cancelled</p>
@@ -66,9 +73,9 @@ export function OrderTimeline({
         </div>
 
         {note && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs">
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs">
             <p className="font-medium text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-              <MessageSquare className="h-3.5 w-3.5" /> Note from Level7 Clothing:
+              <MessageSquare className="h-3.5 w-3.5" /> Note from {sellerName}:
             </p>
             <p className="mt-1 text-foreground/80">{note}</p>
           </div>
@@ -149,9 +156,9 @@ export function OrderTimeline({
 
       {/* ── Admin Note / Comment display ── */}
       {note && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs">
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs">
           <p className="font-medium text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-            <MessageSquare className="h-3.5 w-3.5" /> Note from Level7 Clothing:
+            <MessageSquare className="h-3.5 w-3.5" /> Note from {sellerName}:
           </p>
           <p className="mt-1 text-foreground/90 leading-relaxed">{note}</p>
         </div>

@@ -3,20 +3,35 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Plus, Trash2, Edit2, Check, X, Loader2, Image as ImageIcon } from "lucide-react";
+import { Plus, Trash2, Edit2, Check, X, Loader2, Image as ImageIcon, Layers, ChevronRight, Search } from "lucide-react";
 import Image from "next/image";
+import Link from "next/link";
 import { createCategory, updateCategory, deleteCategory } from "@/app/actions/admin";
+import { PhotoPicker } from "@/components/admin/photo-picker";
 
 type Category = {
   id: string;
   name: string;
   slug: string;
   imageUrl: string | null;
+  subcategories: { id: string; name: string }[];
 };
 
 export function CategoryManager({ initialCategories }: { initialCategories: Category[] }) {
   const router = useRouter();
   const [pending, start] = useTransition();
+
+  // Filter matches a category by its own name OR by any subcategory inside it,
+  // so searching "tee" finds the category that holds it.
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const categories = needle
+    ? initialCategories.filter(
+        (c) =>
+          c.name.toLowerCase().includes(needle) ||
+          c.subcategories.some((s) => s.name.toLowerCase().includes(needle))
+      )
+    : initialCategories;
 
   // Create form state
   const [showAddForm, setShowAddForm] = useState(false);
@@ -96,8 +111,9 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
       <div className="flex items-center justify-between">
         <div>
           <h1 className="font-serif text-3xl">Categories</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Manage product categories dynamically
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            Plain text names, top of the shelf. Open a category to manage the
+            subcategories inside it — that&apos;s where products actually live.
           </p>
         </div>
         <button
@@ -119,7 +135,7 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
               </label>
               <input
                 type="text"
-                placeholder="e.g. Premium Hoodies"
+                placeholder="e.g. Premium Oversized T-Shirts"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 className="input h-10"
@@ -128,17 +144,23 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
             </div>
             <div>
               <label className="block text-xs uppercase tracking-wider text-muted-foreground mb-1.5">
-                Cover Image URL (Optional)
+                Cover Image (Optional)
               </label>
               <input
                 type="text"
-                placeholder="/products/level7/..."
+                placeholder="/products/gallery/..."
                 value={newImageUrl}
                 onChange={(e) => setNewImageUrl(e.target.value)}
                 className="input h-10"
               />
             </div>
           </div>
+          <PhotoPicker
+            selected={newImageUrl ? [newImageUrl] : []}
+            onChange={(urls) => setNewImageUrl(urls[0] ?? "")}
+            max={1}
+            label="Pick from photo library"
+          />
           <div className="flex justify-end gap-2">
             <button
               type="submit"
@@ -152,6 +174,32 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
         </form>
       )}
 
+      <div className="relative max-w-md">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter categories or subcategories…"
+          className="input h-10 pl-9 pr-9"
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={() => setQuery("")}
+            className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 cursor-pointer place-items-center rounded-full text-muted-foreground hover:bg-muted"
+            aria-label="Clear filter"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+      {needle && (
+        <p className="-mt-3 text-xs text-muted-foreground">
+          {categories.length} of {initialCategories.length} categories match
+          “{query.trim()}”
+        </p>
+      )}
+
       <div className="overflow-hidden rounded-2xl border border-border bg-card">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -159,19 +207,22 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
               <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
                 <th className="px-5 py-4 font-medium w-16">Image</th>
                 <th className="px-5 py-4 font-medium">Name</th>
+                <th className="px-5 py-4 font-medium">Subcategories</th>
                 <th className="px-5 py-4 font-medium">Slug</th>
                 <th className="px-5 py-4 font-medium text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {initialCategories.length === 0 ? (
+              {categories.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className="px-5 py-8 text-center text-muted-foreground">
-                    No categories found. Add your first category using the button above.
+                  <td colSpan={5} className="px-5 py-8 text-center text-muted-foreground">
+                    {needle
+                      ? `Nothing matches “${query.trim()}”.`
+                      : "No categories found. Add your first category using the button above."}
                   </td>
                 </tr>
               ) : (
-                initialCategories.map((cat) => {
+                categories.map((cat) => {
                   const isEditing = editingId === cat.id;
 
                   return (
@@ -202,6 +253,28 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
                         ) : (
                           cat.name
                         )}
+                      </td>
+                      <td className="px-5 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {cat.subcategories.map((s) => (
+                            <span
+                              key={s.id}
+                              className="rounded-full bg-accent/10 px-2.5 py-1 text-xs"
+                            >
+                              {s.name}
+                            </span>
+                          ))}
+                          <Link
+                            href={`/admin/categories/${cat.id}`}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                          >
+                            <Layers className="h-3.5 w-3.5" />
+                            {cat.subcategories.length === 0
+                              ? "Add subcategories"
+                              : "Manage"}
+                            <ChevronRight className="h-3.5 w-3.5" />
+                          </Link>
+                        </div>
                       </td>
                       <td className="px-5 py-3 text-muted-foreground">
                         {isEditing ? (
@@ -275,9 +348,15 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
               value={editImageUrl}
               onChange={(e) => setEditImageUrl(e.target.value)}
               className="input h-10"
-              placeholder="/products/level7/..."
+              placeholder="/products/gallery/..."
             />
           </div>
+          <PhotoPicker
+            selected={editImageUrl ? [editImageUrl] : []}
+            onChange={(urls) => setEditImageUrl(urls[0] ?? "")}
+            max={1}
+            label="Pick from photo library"
+          />
           <div className="flex justify-end">
             <button
               onClick={() => handleUpdate(editingId)}

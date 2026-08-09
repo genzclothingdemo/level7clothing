@@ -23,16 +23,19 @@
 # misc
 .DS_Store
 *.pem
+.claude/
+
+# Scratch scripts and database snapshots. The backups contain order PII and
+# password hashes — this whole folder must never be committed. It was
+# previously narrowed to backup-catalog-*.json, which let a full DB snapshot
+# through as an untracked file ready to be pushed.
+scripts/tmp/
 
 # debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
-.env*
-!.env.example
 
 # vercel
 .vercel
@@ -41,10 +44,8 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# local-only project context / notes for AI + developer (not for the repo)
-PROJECT-CONTEXT.md
-
-.vercel
+# Env files. ORDER MATTERS: git applies the last matching pattern, so the
+# `!.env.example` negation must stay AFTER every `.env*` rule or the template
+# stops being tracked. Keep these two lines together and last.
 .env*
-# ...but the placeholder template must travel with the repo (no real secrets in it).
 !.env.example

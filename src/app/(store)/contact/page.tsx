@@ -45,7 +45,7 @@ export default function ContactPage() {
         </p>
         <h1 className="mt-3 font-serif text-5xl">Get in touch</h1>
         <p className="mx-auto mt-4 max-w-xl text-muted-foreground">
-          Questions, custom orders or bulk orders — we&apos;d love to hear
+          Questions, custom commissions or bulk orders — we&apos;d love to hear
           from you.
         </p>
       </div>
@@ -68,14 +68,14 @@ export default function ContactPage() {
           {s.address && (
             <InfoCard
               icon={<MapPin className="h-5 w-5" />}
-              label="Address"
+              label="Studio"
               value={s.address}
             />
           )}
         </div>
 
         {/* Form */}
-        <div className="rounded-lg border border-border bg-card p-6 md:p-8">
+        <div className="rounded-3xl border border-border bg-card p-6 md:p-8">
           {done ? (
             <div className="flex flex-col items-center py-12 text-center">
               <CheckCircle2 className="h-12 w-12 text-success" />
@@ -182,7 +182,7 @@ function InfoCard({
   href?: string;
 }) {
   const inner = (
-    <div className="flex items-start gap-4 rounded-lg border border-border bg-card p-5 transition-colors hover:border-accent">
+    <div className="flex items-start gap-4 rounded-2xl border border-border bg-card p-5 transition-colors hover:border-accent">
       <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-muted gold-text">
         {icon}
       </span>

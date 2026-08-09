@@ -70,21 +70,28 @@ must trigger a new deploy after adding it.
 ## 3. NimbusPost (delivery)
 
 ### Important: how the API logs in
-NimbusPost's API authenticates with your **account email + password** (the same login
-you use at ship.nimbuspost.com). The **API key / secret** shown in the dashboard are
-**not** accepted by this API (verified against their live endpoints). So you must set
-the email and password, not the key/secret.
+The store uses the **NimbusPost Partner API v2** (`https://api-v2.nimbuspost.com`), which
+authenticates with an **API key pair** — two headers, `x-api-key` and `x-api-secret`.
+It is **not** a Bearer token and **not** your email + password.
+
+> The older v1 API (`api.nimbuspost.com/v1`) did use email + password. Accounts created
+> on the new platform do not exist there at all — v1 login returns
+> *"Invalid email or password"* even when the password is correct. If you hit that error,
+> you're on the wrong API, not the wrong password.
 
 ### One‑time setup in the NimbusPost dashboard
 1. Create your account and complete KYC.
 2. Add a **Pickup Warehouse** (Settings → Warehouse). Note its **exact name** — you'll
    put it in `NIMBUSPOST_WAREHOUSE_NAME`.
+3. Go to **Settings → API Keys** and create a key with the **`admin`** role (a `viewer`
+   key gets 401 on anything that creates or books). The secret is shown **exactly once** —
+   copy it immediately.
 
 ### Turn it on
 1. Environment variables:
    ```
-   NIMBUSPOST_EMAIL=you@example.com
-   NIMBUSPOST_PASSWORD=your-nimbuspost-password
+   NIMBUSPOST_API_KEY=npk_xxxxxxxxxxxxxxxx
+   NIMBUSPOST_API_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
    NIMBUSPOST_WAREHOUSE_NAME=Exact Warehouse Name From Dashboard
    # Default parcel size, used when a product doesn't specify its own (grams / cm):
    NIMBUSPOST_DEFAULT_WEIGHT=500
@@ -105,13 +112,26 @@ product for shipping = setting its **weight & dimensions**:
 - For a multi‑item order, the store **adds up item weights** and takes the **largest**
   dimensions.
 
-### The dispatch flow
+### The dispatch flow — draft first, always
+
+**Nothing is ever booked in one click.** An order must exist in NimbusPost as an
+unbooked draft before a courier can be allocated, so a human can review it — either
+in the NimbusPost dashboard or here — before any wallet charge.
+
 1. When an order is **confirmed** (auto for prepaid, or when you click *Confirm order*
-   for COD), the store creates a **draft order** in NimbusPost — no courier yet.
-2. In **Admin → Orders**, open the order and click **"Dispatch (generate AWB)"**. This
-   assigns the cheapest serviceable courier, generates the AWB, and saves the tracking
-   number + link (also shown in the customer's account).
-3. For COD / partial orders, the remaining balance is automatically set as the COD
+   for COD), the store creates a **draft order** in NimbusPost — no courier, no AWB,
+   no charge.
+2. If that draft didn't get staged (shipping was off, NimbusPost wasn't configured,
+   or it errored), the button in **Admin → Orders** reads **"Send draft to NimbusPost"**.
+   Clicking it stages the draft **and stops** — it will not book.
+3. Once a draft exists the button becomes **"Book & generate AWB"**. That allocates
+   the cheapest serviceable courier, generates the AWB, deducts the wallet, and saves
+   the tracking number + link (also shown in the customer's account).
+4. **Or book it in the NimbusPost dashboard** after reviewing it there. Then press
+   **"Sync from NimbusPost"** in the order panel to pull the AWB, courier and tracking
+   link back into the store and email the customer. Without this step the store has no
+   AWB, so the status webhook (which matches on AWB) can never find the order.
+5. For COD / partial orders, the remaining balance is automatically set as the COD
    amount the courier collects.
 
 If NimbusPost isn't configured yet, confirming still works — the draft step is just
@@ -153,7 +173,7 @@ live badge on the order's "Shipped" step (in the customer's account and on the o
 1. Make sure `NIMBUSPOST_WEBHOOK_SECRET` is set (already in your env).
 2. In the NimbusPost dashboard → **Settings → Webhook**, set the URL to:
    ```
-   https://YOUR-DOMAIN/api/webhooks/nimbuspost?secret=level7clothing-nimbus-wh-secret-2024
+   https://YOUR-DOMAIN/api/webhooks/nimbuspost?secret=YOUR-NIMBUSPOST-WEBHOOK-SECRET
    ```
    (Replace the domain with your live site. The `?secret=` must match
    `NIMBUSPOST_WEBHOOK_SECRET`.)
@@ -180,6 +200,10 @@ only works after you've dispatched (generated the AWB) for that order.
 |--------|--------------|-----|
 | "Pay online" missing on live site | Razorpay keys not in Vercel | Add all 3 keys to Vercel, redeploy (§4) |
 | "Pay online" missing everywhere | Razorpay toggle off, or product has no Prepaid mode | Admin → Settings; product Checkout modes |
-| Dispatch says "NimbusPost login failed" | Wrong email/password, or you used the API key/secret | Use account email + password |
-| Dispatch says "Set NIMBUSPOST_WAREHOUSE_NAME…" | Warehouse name missing/mismatched | Copy the exact name from the dashboard |
+| `NimbusPost UNAUTHORIZED` | Key pair missing/wrong, key expired, or an IP allowlist is blocking you | Re-check `NIMBUSPOST_API_KEY` / `NIMBUSPOST_API_SECRET`; rotate the key if unsure |
+| `UNAUTHORIZED` only on dispatch, reads work fine | The key has the **`viewer`** role | Mint a new key with the **`admin`** role |
+| "Invalid email or password" | Legacy v1 API — no longer used by this store | Make sure the key pair vars are set; email/password are ignored now |
+| Dispatch says "No pickup warehouse found" | No warehouse in the dashboard | Add one under Settings → Warehouse |
+| Shipping shows "not available for this pincode" | Genuinely unserviceable, or wallet empty | Check the pincode; top up the wallet |
+| "B2C orders cannot exceed 32 kg chargeable weight" | Product weights add up past NimbusPost's 32 kg cap | Check the product weights are in **grams** in Admin → Products |
 | Order stuck "pending" | It's COD/Direct awaiting you | Click **Confirm order** |

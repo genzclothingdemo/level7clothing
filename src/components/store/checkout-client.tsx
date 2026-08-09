@@ -75,25 +75,7 @@ export type CheckoutUser = {
   pincode?: string | null;
 };
 
-export type CheckoutSavedAddress = {
-  id: string;
-  label: string;
-  fullName: string;
-  phone: string;
-  address: string;
-  city: string;
-  state: string;
-  pincode: string;
-  isDefault: boolean;
-};
-
-export function CheckoutClient({
-  user,
-  savedAddresses = [],
-}: {
-  user: CheckoutUser;
-  savedAddresses?: CheckoutSavedAddress[];
-}) {
+export function CheckoutClient({ user }: { user: CheckoutUser }) {
   const { items, subtotal, clear } = useCart();
   const s = useSettings();
   const router = useRouter();
@@ -432,60 +414,6 @@ export function CheckoutClient({
         className="mt-10 grid gap-10 lg:grid-cols-[1fr_380px]"
       >
         <div className="space-y-8">
-          {savedAddresses.length > 0 && (
-            <section>
-              <h2 className="font-serif text-xl">Deliver to</h2>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                {savedAddresses.map((a) => {
-                  const selected =
-                    form.address === a.address &&
-                    form.pincode === a.pincode &&
-                    form.customerName === a.fullName;
-                  return (
-                    <button
-                      key={a.id}
-                      type="button"
-                      onClick={() =>
-                        setForm((f) => ({
-                          ...f,
-                          customerName: a.fullName,
-                          phone: a.phone,
-                          address: a.address,
-                          city: a.city,
-                          state: a.state,
-                          pincode: a.pincode,
-                        }))
-                      }
-                      className={`rounded-lg border p-4 text-left text-sm transition-colors ${
-                        selected
-                          ? "border-accent bg-accent/10"
-                          : "border-border hover:border-foreground/40"
-                      }`}
-                    >
-                      <span className="flex items-center gap-2">
-                        <span className="font-medium">{a.label}</span>
-                        {a.isDefault && (
-                          <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] text-accent">
-                            Default
-                          </span>
-                        )}
-                      </span>
-                      <span className="mt-1.5 block font-medium">{a.fullName}</span>
-                      <span className="block text-muted-foreground">{a.phone}</span>
-                      <span className="mt-0.5 block text-muted-foreground">
-                        {a.address}, {a.city}, {a.state} – {a.pincode}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="mt-3 text-xs text-muted-foreground">
-                Pick a saved address to fill the form below, or edit the fields
-                manually for a one-off delivery.
-              </p>
-            </section>
-          )}
-
           <section>
             <h2 className="font-serif text-xl">Contact details</h2>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -568,7 +496,7 @@ export function CheckoutClient({
           <section>
             <h2 className="font-serif text-xl">Payment</h2>
             {!ctx ? (
-              <div className="mt-4 flex items-center gap-2 rounded-lg border border-border p-4 text-sm text-muted-foreground">
+              <div className="mt-4 flex items-center gap-2 rounded-2xl border border-border p-4 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" /> Loading payment
                 options…
               </div>
@@ -579,7 +507,7 @@ export function CheckoutClient({
                   return (
                     <label
                       key={m}
-                      className={`flex items-center gap-3 rounded-lg border p-4 cursor-pointer transition-colors ${
+                      className={`flex items-center gap-3 rounded-2xl border p-4 cursor-pointer transition-colors ${
                         method === m
                           ? "border-foreground bg-muted/40"
                           : "border-border"
@@ -607,14 +535,12 @@ export function CheckoutClient({
           </section>
         </div>
 
-        <aside className="h-fit rounded-lg border border-border bg-card p-6 lg:sticky lg:top-24">
+        <aside className="h-fit rounded-2xl border border-border bg-card p-6 lg:sticky lg:top-24">
           <h2 className="font-serif text-xl">Your order</h2>
           <ul className="mt-4 space-y-3">
             {items.map((i) => (
-              // Key on lineId, not productId — the same style in two sizes is
-              // two distinct lines and productId would collide.
-              <li key={i.lineId} className="flex gap-3">
-                <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-lg bg-muted">
+              <li key={i.productId} className="flex gap-3">
+                <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-xl bg-muted">
                   {i.image && (
                     <Image
                       src={i.image}
@@ -710,7 +636,7 @@ export function CheckoutClient({
 
             {/* Payment split — shown for partial (advance) and any COD balance. */}
             {method === "partial" && (
-              <div className="mt-1 space-y-1 rounded-lg bg-muted/50 p-3 text-xs">
+              <div className="mt-1 space-y-1 rounded-xl bg-muted/50 p-3 text-xs">
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Pay now (advance)</span>
                   <span className="font-medium">{formatINR(advance)}</span>

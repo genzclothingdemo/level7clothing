@@ -1,6 +1,7 @@
 import { ShoppingCart } from "lucide-react";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { getSettings } from "@/lib/settings";
 import { OrdersTable, type AdminOrder } from "@/components/admin/orders-table";
 import { OrderFilters } from "@/components/admin/order-filters";
 
@@ -79,12 +80,44 @@ export default async function AdminOrders({
   const where = buildWhere(sp);
   const hasFilters = Object.keys(where).length > 0;
 
-  const [raw, totalCount] = await Promise.all([
+  const [raw, totalCount, settings] = await Promise.all([
     prisma.order
-      .findMany({ where, orderBy: { createdAt: "desc" } })
+      .findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        // Return count per order so the list can show "1 return" without the
+        // admin opening each card to find out.
+        include: { _count: { select: { returnRequests: true } } },
+      })
       .catch(() => []),
     prisma.order.count().catch(() => 0),
+    getSettings(),
   ]);
+
+  // Line items store the productId but not the slug, so resolve the storefront
+  // slug for every product these orders reference — that's what turns a line
+  // item into a clickable product link. A product deleted since the order was
+  // placed simply has no slug, and renders without a link.
+  const productIds = [
+    ...new Set(
+      raw.flatMap((o) =>
+        (Array.isArray(o.items) ? (o.items as { productId?: string }[]) : [])
+          .map((i) => i.productId)
+          .filter((id): id is string => !!id)
+      )
+    ),
+  ];
+  const slugById = new Map(
+    (productIds.length
+      ? await prisma.product
+          .findMany({
+            where: { id: { in: productIds } },
+            select: { id: true, slug: true },
+          })
+          .catch(() => [])
+      : []
+    ).map((p) => [p.id, p.slug])
+  );
 
   const orders: AdminOrder[] = raw.map((o) => ({
     id: o.id,
@@ -96,7 +129,12 @@ export default async function AdminOrders({
     city: o.city,
     state: o.state,
     pincode: o.pincode,
-    items: o.items as AdminOrder["items"],
+    items: (Array.isArray(o.items) ? (o.items as AdminOrder["items"]) : []).map(
+      (it) => ({
+        ...it,
+        slug: it.productId ? (slugById.get(it.productId) ?? null) : null,
+      })
+    ),
     subtotal: o.subtotal,
     shipping: o.shipping,
     discountTotal: o.discountTotal,
@@ -111,8 +149,15 @@ export default async function AdminOrders({
     trackingNumber: o.trackingNumber,
     trackingUrl: o.trackingUrl,
     nimbusShipmentId: o.nimbusShipmentId,
+    nimbusCourierId: o.nimbusCourierId,
+    nimbusCourierName: o.nimbusCourierName,
+    deliveryStatus: o.deliveryStatus,
+    deliveryLocation: o.deliveryLocation,
+    deliveryStatusAt: o.deliveryStatusAt?.toISOString() ?? null,
+    lastSyncedAt: o.lastSyncedAt?.toISOString() ?? null,
     note: o.note,
     createdAt: o.createdAt.toISOString(),
+    returnCount: o._count.returnRequests,
   }));
 
   return (
@@ -142,7 +187,10 @@ export default async function AdminOrders({
         </div>
       ) : (
         <div className="mt-6">
-          <OrdersTable orders={orders} />
+          <OrdersTable
+            orders={orders}
+            returnWindowDays={settings.returnsEnabled ? settings.returnWindowDays : null}
+          />
         </div>
       )}
     </div>

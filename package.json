@@ -4,14 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && next build",
+    "build": "prisma generate && node scripts/build-media-manifest.mjs && next build",
+    "media:manifest": "node scripts/build-media-manifest.mjs",
     "start": "next start",
     "lint": "eslint",
     "postinstall": "prisma generate",
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
-    "setup": "prisma db push && tsx prisma/seed.ts",
+    "db:backup": "tsx scripts/backup-db.ts",
     "shipping:free": "tsx scripts/set-free-shipping.ts"
   },
   "prisma": {

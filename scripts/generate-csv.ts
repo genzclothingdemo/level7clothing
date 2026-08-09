@@ -2,7 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import * as fs from "fs";
 import * as path from "path";
 import { allCombinations, comboKey } from "../src/lib/options";
-import type { ProductOption, Variant, VariantPrice } from "../src/lib/types";
+import type { Attribute, Variant, VariantPrice, SellableVariant } from "../src/lib/types";
 
 const prisma = new PrismaClient();
 
@@ -50,18 +50,24 @@ async function main() {
   const rows: string[][] = [headers];
 
   for (const p of products) {
-    const optionsRaw = (p.options as unknown as ProductOption[]) || [];
+    const optionsRaw = (p.options as unknown as any[]) || [];
+    const attributesRaw = (p.attributes as unknown as Attribute[]) || [];
+    const sellableVariantsRaw = (p.sellableVariants as unknown as SellableVariant[]) || [];
     const variantsRaw = (p.variants as unknown as Variant[]) || [];
     const variantPricesRaw = (p.variantPrices as unknown as VariantPrice[]) || [];
 
     // 1. Tags
     const tagsStr = (p.tags || []).join(", ");
 
-    // 2. Options summary string
+    // 2. Options summary string (support new attributes or old options)
     let optionsStr = "";
-    if (optionsRaw.length > 0) {
+    if (attributesRaw.length > 0) {
+      optionsStr = attributesRaw
+        .map((attr) => `${attr.name}: ${attr.values.join(", ")}`)
+        .join(" | ");
+    } else if (optionsRaw.length > 0) {
       optionsStr = optionsRaw
-        .map((opt) => `${opt.name}: ${opt.choices.map((c) => c.label).join(", ")}`)
+        .map((opt: any) => `${opt.name}: ${(opt.choices || []).map((c: any) => c.label).join(", ")}`)
         .join(" | ");
     } else {
       optionsStr = "None";
@@ -69,7 +75,8 @@ async function main() {
 
     // 3. Variants matrix string
     let variantsDetailsStr = "";
-    const generatedCombos = allCombinations(optionsRaw);
+    const allAttrs = attributesRaw.length > 0 ? attributesRaw : optionsRaw.map((o: any) => ({ name: o.name, values: (o.choices || []).map((c: any) => c.label) }));
+    const generatedCombos = allCombinations(allAttrs);
 
     if (generatedCombos.length > 0) {
       const details: string[] = [];
@@ -105,8 +112,8 @@ async function main() {
           let price = vpMatch ? vpMatch.price : p.price;
           if (!vpMatch) {
             for (const [gName, choiceVal] of Object.entries(combo)) {
-              const grp = optionsRaw.find((o) => o.name === gName);
-              const ch = grp?.choices.find((c) => c.label === choiceVal);
+              const grp = optionsRaw.find((o: any) => o.name === gName);
+              const ch = grp?.choices?.find((c: any) => c.label === choiceVal);
               if (ch) price += ch.priceDelta || 0;
             }
           }

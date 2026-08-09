@@ -3,16 +3,14 @@
 import { ThemeProvider } from "next-themes";
 import { Toaster } from "sonner";
 import { CartProvider } from "@/context/cart";
-import { SettingsProvider } from "@/context/settings";
-import { WishlistProvider } from "@/context/wishlist";
-import type { SettingsDTO } from "@/lib/types";
+import { SettingsProvider, type ClientSettings } from "@/context/settings";
 
 export function Providers({
   settings,
   initialLead,
   children,
 }: {
-  settings: SettingsDTO;
+  settings: ClientSettings;
   initialLead?: { name: string; phone: string } | null;
   children: React.ReactNode;
 }) {
@@ -25,19 +23,17 @@ export function Providers({
     >
       <SettingsProvider value={settings}>
         <CartProvider initialLead={initialLead}>
-          <WishlistProvider>
-            {children}
-            <Toaster
-              position="bottom-right"
-              toastOptions={{
-                style: {
-                  background: "var(--card)",
-                  color: "var(--foreground)",
-                  border: "1px solid var(--border)",
-                },
-              }}
-            />
-          </WishlistProvider>
+          {children}
+          <Toaster
+            position="bottom-right"
+            toastOptions={{
+              style: {
+                background: "var(--card)",
+                color: "var(--foreground)",
+                border: "1px solid var(--border)",
+              },
+            }}
+          />
         </CartProvider>
       </SettingsProvider>
     </ThemeProvider>

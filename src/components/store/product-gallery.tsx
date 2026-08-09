@@ -1,332 +1,206 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import Image from "next/image";
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronLeft, ChevronRight, ZoomIn, X } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { ChevronLeft, ChevronRight, Play } from "lucide-react";
 import { useProductView } from "@/context/product-view";
-import { unionImages, variantForImage } from "@/lib/variants";
-import type { ProductDTO, Variant } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import type { ProductDTO, MediaDTO } from "@/lib/types";
+import { galleryForSelection } from "@/lib/variants";
+import { comboKey } from "@/lib/options";
 
 export function ProductGallery({
   product,
-  variants,
-  name,
+  media,
 }: {
   product: ProductDTO;
-  variants: Variant[];
-  name: string;
+  media: MediaDTO[];
 }) {
-  const { selection, setSelection } = useProductView();
+  const { selection } = useProductView();
 
-  const list = unionImages(product, selection, product.images).filter(Boolean);
-  const safe = list.length ? list : [""];
+  // Resolve the gallery for the current selection from the relational media
+  // rows (source of truth), de-duplicated (the same photo can legitimately be
+  // picked into more than one source).
+  const selKey = comboKey(selection);
+  const activeImages = useMemo(
+    () => Array.from(new Set(galleryForSelection(product, selection))),
+    [product, selection]
+  );
 
-  const [activeUrl, setActiveUrl] = useState<string>(safe[0]);
-  const [zoomed, setZoomed] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [direction, setDirection] = useState(0);
 
-  // Horizontal thumbnail strip: one shared rail for mobile + desktop.
-  const stripRef = useRef<HTMLDivElement | null>(null);
-  const thumbRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  const [canLeft, setCanLeft] = useState(false);
-  const [canRight, setCanRight] = useState(false);
-
-  if (safe.length && !safe.includes(activeUrl)) {
-    setActiveUrl(safe[0]);
-  }
-  const current = Math.max(0, safe.indexOf(activeUrl));
-  const many = safe.length > 1;
-
-  // Track which strip arrows apply (i.e. the rail is wider than its viewport).
+  // Snap back to the first photo only when the selected variant actually changes.
+  // (Keying the reset on the array reference re-fired on every render as soon as
+  // the source returned a fresh array — breaking next/prev navigation.)
   useEffect(() => {
-    const el = stripRef.current;
-    if (!el) return;
-    // Ignore a trivially small overflow: 8 thumbs overrun a 563px rail by ~5px,
-    // and an arrow that scrolls 5px is worse than no arrow at all.
-    const EDGE = 10;
-    const sync = () => {
-      setCanLeft(el.scrollLeft > EDGE);
-      setCanRight(el.scrollLeft + el.clientWidth < el.scrollWidth - EDGE);
-    };
-    sync();
-    el.addEventListener("scroll", sync, { passive: true });
-    // Observe the children too, not just the rail: the rail's own box never
-    // changes as layout settles, so container-only observation can miss a
-    // narrow overflow (8 thumbs overflow a 563px rail by just 5px) and leave
-    // the arrows wrongly hidden.
-    const ro = new ResizeObserver(sync);
-    ro.observe(el);
-    for (const child of el.children) ro.observe(child);
-    const raf = requestAnimationFrame(sync);
-    return () => {
-      el.removeEventListener("scroll", sync);
-      ro.disconnect();
-      cancelAnimationFrame(raf);
-    };
-  }, [safe.length]);
+    setActiveIndex(0);
+  }, [selKey]);
 
-  /**
-   * Centre a thumb inside the strip. Deliberately not scrollIntoView() — that
-   * also scrolls the page vertically, which yanked the photo out of view.
-   */
-  function revealThumb(index: number) {
-    const strip = stripRef.current;
-    const thumb = thumbRefs.current[index];
-    if (!strip || !thumb) return;
-    strip.scrollTo({
-      left: thumb.offsetLeft - strip.clientWidth / 2 + thumb.clientWidth / 2,
-      behavior: "smooth",
+  if (!activeImages.length) {
+    return (
+      <div className="aspect-[4/5] w-full rounded-2xl bg-muted flex items-center justify-center">
+        <span className="text-muted-foreground text-sm font-medium tracking-wide">
+          NO IMAGES
+        </span>
+      </div>
+    );
+  }
+
+  const currentUrl = activeImages[Math.min(activeIndex, activeImages.length - 1)];
+  const isVideo = currentUrl?.match(/\.(mp4|webm|mov)$/i);
+
+  function paginate(newDirection: number) {
+    setDirection(newDirection);
+    setActiveIndex((prev) => {
+      let next = prev + newDirection;
+      if (next < 0) next = activeImages.length - 1;
+      if (next >= activeImages.length) next = 0;
+      return next;
     });
   }
 
-  function nudgeStrip(dir: 1 | -1) {
-    const strip = stripRef.current;
-    if (!strip) return;
-    strip.scrollBy({ left: dir * strip.clientWidth * 0.8, behavior: "smooth" });
-  }
-
-  function goTo(index: number) {
-    const wrapped = (index + safe.length) % safe.length;
-    setActiveUrl(safe[wrapped]);
-    revealThumb(wrapped);
-  }
-
-  function pickPhoto(img: string, index: number) {
-    setActiveUrl(img);
-    const v = variantForImage(variants, img);
-    if (v) setSelection({ ...v.combo });
-    revealThumb(index);
-  }
-
   return (
-    <>
-      <div className="relative">
-        {/* ── MAIN PHOTO — true 1:1 at every width, never cropped ── */}
-        <div className="group relative aspect-[4/5] w-full overflow-hidden rounded-lg bg-muted ring-1 ring-border/70">
-          <AnimatePresence initial={false} mode="popLayout">
-            <motion.div
-              key={activeUrl || "empty"}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.22, ease: "easeInOut" }}
-              drag={many ? "x" : false}
-              dragConstraints={{ left: 0, right: 0 }}
-              dragElastic={0.15}
-              onDragEnd={(_e, info) => {
-                if (info.offset.x < -60) goTo(current + 1);
-                else if (info.offset.x > 60) goTo(current - 1);
-              }}
-              className="absolute inset-0 touch-pan-y"
-              style={{ cursor: many ? "grab" : "default" }}
-            >
-              {safe[current] ? (
-                <Image
-                  src={safe[current]}
-                  alt={name}
-                  fill
-                  className="pointer-events-none select-none object-contain"
-                  sizes="(max-width:768px) 100vw, 45vw"
-                  priority
-                  draggable={false}
-                />
-              ) : (
-                <div className="grid h-full place-items-center text-sm text-muted-foreground">
-                  No image
-                </div>
-              )}
-            </motion.div>
-          </AnimatePresence>
-
-          {many && (
-            <>
-              <button
-                type="button"
-                onClick={() => goTo(current - 1)}
-                aria-label="Previous photo"
-                className="absolute left-2 top-1/2 z-10 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-full bg-background/80 text-foreground shadow-md backdrop-blur transition-all hover:scale-110 hover:bg-background md:opacity-0 md:group-hover:opacity-100"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => goTo(current + 1)}
-                aria-label="Next photo"
-                className="absolute right-2 top-1/2 z-10 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-full bg-background/80 text-foreground shadow-md backdrop-blur transition-all hover:scale-110 hover:bg-background md:opacity-0 md:group-hover:opacity-100"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </button>
-
-              <div className="absolute bottom-2.5 left-1/2 z-10 -translate-x-1/2 rounded-full bg-background/75 px-3 py-0.5 backdrop-blur">
-                <span className="text-[11px] font-medium tabular-nums text-foreground/70">
-                  {current + 1} / {safe.length}
-                </span>
-              </div>
-            </>
-          )}
-
-          {safe[current] && (
+    <div className="sticky top-24 flex flex-col gap-3">
+      <div className="relative aspect-[4/5] w-full overflow-hidden rounded-2xl bg-muted">
+        {/* Directional crossfade: the incoming photo slides in from the side
+            being paginated towards while the old one fades under it. */}
+        <AnimatePresence initial={false} custom={direction} mode="popLayout">
+          <motion.div
+            key={currentUrl}
+            custom={direction}
+            drag={activeImages.length > 1 ? "x" : false}
+            dragConstraints={{ left: 0, right: 0 }}
+            dragElastic={0.12}
+            onDragEnd={(_, info) => {
+              // Swipe past ~60px (or a fast flick) advances the gallery — the
+              // gesture mobile shoppers reach for before the arrows.
+              if (info.offset.x < -60 || info.velocity.x < -450) paginate(1);
+              else if (info.offset.x > 60 || info.velocity.x > 450) paginate(-1);
+            }}
+            variants={{
+              enter: (dir: number) => ({
+                opacity: 0,
+                x: dir * 48,
+                scale: 1.02,
+              }),
+              center: { opacity: 1, x: 0, scale: 1 },
+              exit: (dir: number) => ({
+                opacity: 0,
+                x: dir * -32,
+                scale: 0.99,
+              }),
+            }}
+            initial="enter"
+            animate="center"
+            exit="exit"
+            transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+            className={cn(
+              "absolute inset-0",
+              activeImages.length > 1 && "cursor-grab active:cursor-grabbing"
+            )}
+          >
+            {isVideo ? (
+              <video
+                src={currentUrl}
+                autoPlay
+                loop
+                muted
+                playsInline
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <Image
+                src={currentUrl || ""}
+                alt={product.name}
+                fill
+                className="object-cover"
+                priority
+                sizes="(max-width: 768px) 100vw, 50vw"
+              />
+            )}
+          </motion.div>
+        </AnimatePresence>
+        
+        {activeImages.length > 1 && (
+          <>
             <button
-              type="button"
-              onClick={() => setZoomed(true)}
-              aria-label="Zoom image"
-              className="absolute right-2 top-2 z-10 grid h-9 w-9 place-items-center rounded-full bg-background/80 text-foreground shadow-md backdrop-blur transition-all hover:scale-110 hover:bg-background md:opacity-0 md:group-hover:opacity-100"
+              onClick={() => paginate(-1)}
+              className="absolute left-4 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/80 p-2 text-black shadow-md backdrop-blur transition-all duration-300 hover:scale-110 hover:bg-white active:scale-95"
             >
-              <ZoomIn className="h-4 w-4" />
+              <ChevronLeft className="h-5 w-5" />
             </button>
-          )}
-        </div>
-
-        {/* ════════════════════════════════════════════════════════════════
-            THUMBNAIL STRIP — horizontal scroll, identical on mobile + desktop.
-
-            Mini fixed-size thumbs (shrink-0) so 3 images or 30 lay out the
-            same and the strip never reflows the page. Active state is a ring,
-            not a transform: a scaled child inside a scroll container forces
-            the cross-axis overflow to `auto`, which is what produced the
-            stray scrollbar next to the old vertical rail.
-        ════════════════════════════════════════════════════════════════ */}
-        {many && (
-          <div className="relative mt-3">
-            {/* Desktop-only strip arrows, shown only when there's overflow */}
-            {canLeft && (
-              <button
-                type="button"
-                onClick={() => nudgeStrip(-1)}
-                aria-label="Scroll thumbnails left"
-                className="absolute -left-1 top-1/2 z-20 hidden h-7 w-7 -translate-y-1/2 place-items-center rounded-full bg-background/90 text-foreground shadow-md ring-1 ring-border backdrop-blur transition hover:bg-background md:grid"
-              >
-                <ChevronLeft className="h-3.5 w-3.5" />
-              </button>
-            )}
-            {canRight && (
-              <button
-                type="button"
-                onClick={() => nudgeStrip(1)}
-                aria-label="Scroll thumbnails right"
-                className="absolute -right-1 top-1/2 z-20 hidden h-7 w-7 -translate-y-1/2 place-items-center rounded-full bg-background/90 text-foreground shadow-md ring-1 ring-border backdrop-blur transition hover:bg-background md:grid"
-              >
-                <ChevronRight className="h-3.5 w-3.5" />
-              </button>
-            )}
-
-            {/* Edge fades hint that more photos exist off-screen */}
-            {canLeft && (
-              <div className="pointer-events-none absolute inset-y-0 left-0 z-10 w-8 bg-gradient-to-r from-background to-transparent" />
-            )}
-            {canRight && (
-              <div className="pointer-events-none absolute inset-y-0 right-0 z-10 w-8 bg-gradient-to-l from-background to-transparent" />
-            )}
-
-            <div
-              ref={stripRef}
-              // No scroll-snap here on purpose: mandatory snapping fights a
-              // small overflow (it springs the last few px back to the nearest
-              // thumb), which made the arrow visible but unable to scroll.
-              className="no-scrollbar flex gap-2 overflow-x-auto scroll-smooth py-1"
+            <button
+              onClick={() => paginate(1)}
+              className="absolute right-4 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/80 p-2 text-black shadow-md backdrop-blur transition-all duration-300 hover:scale-110 hover:bg-white active:scale-95"
             >
-              {safe.map((img, i) => {
-                const isActive = current === i;
-                return (
-                  <button
-                    key={`t-${i}`}
-                    ref={(el) => {
-                      thumbRefs.current[i] = el;
-                    }}
-                    type="button"
-                    onClick={() => pickPhoto(img, i)}
-                    aria-label={`View photo ${i + 1}`}
-                    aria-pressed={isActive}
+              <ChevronRight className="h-5 w-5" />
+            </button>
+            {/* Dots for a handful of photos; a counter once a strip of dots
+                stops being readable. */}
+            {activeImages.length <= 8 ? (
+              <div className="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 gap-1.5">
+                {activeImages.map((_, i) => (
+                  <div
+                    key={i}
                     className={cn(
-                      "relative aspect-[4/5] h-16 w-[52px] shrink-0 overflow-hidden rounded-md md:h-20 md:w-16",
-                      "cursor-pointer transition-all duration-200",
-                      isActive
-                        ? "ring-2 ring-accent ring-offset-1 ring-offset-background"
-                        : "opacity-60 ring-1 ring-border/50 hover:opacity-100 hover:ring-border"
+                      "h-1.5 rounded-full transition-all duration-300",
+                      i === activeIndex ? "w-4 bg-white" : "w-1.5 bg-white/50"
                     )}
-                  >
-                    {img && (
-                      <Image
-                        src={img}
-                        alt={`${name} view ${i + 1}`}
-                        fill
-                        sizes="64px"
-                        className="object-cover"
-                        loading={i <= 5 ? "eager" : "lazy"}
-                      />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="absolute bottom-3 right-3 z-10 rounded-full bg-black/55 px-2 py-0.5 text-[11px] font-medium text-white backdrop-blur">
+                {activeIndex + 1} / {activeImages.length}
+              </div>
+            )}
+          </>
         )}
       </div>
 
-      {/* ════════════════════════════════════════════════════════════════
-          FULLSCREEN ZOOM LIGHTBOX
-      ════════════════════════════════════════════════════════════════ */}
-      {zoomed && safe[current] && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/95 backdrop-blur-sm"
-          onClick={() => setZoomed(false)}
-        >
-          <button
-            type="button"
-            onClick={() => setZoomed(false)}
-            aria-label="Close zoom"
-            className="absolute right-4 top-4 z-10 grid h-10 w-10 place-items-center rounded-full bg-white/20 text-white hover:bg-white/30"
-          >
-            <X className="h-5 w-5" />
-          </button>
-
-          {many && (
-            <>
+      {/* Thumbnail strip — a scrolling row rather than a 6-up grid, so a variant
+          with 12 photos doesn't turn into two cramped rows of 40px squares. */}
+      {activeImages.length > 1 && (
+        <div className="-mx-5 sm:mx-0">
+          <div className="no-scrollbar flex gap-2 overflow-x-auto px-5 pb-1 sm:px-0">
+          {activeImages.map((url, i) => {
+            const thumbIsVideo = url.match(/\.(mp4|webm|mov)$/i);
+            return (
               <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  goTo(current - 1);
+                key={url + i}
+                onClick={() => {
+                  setDirection(i > activeIndex ? 1 : -1);
+                  setActiveIndex(i);
                 }}
-                aria-label="Previous photo"
-                className="absolute left-3 top-1/2 z-10 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full bg-white/20 text-white hover:bg-white/30"
+                aria-label={`View image ${i + 1}`}
+                className={cn(
+                  "relative h-[68px] w-[68px] shrink-0 overflow-hidden rounded-lg bg-muted transition-all duration-300 hover:-translate-y-0.5 md:h-[76px] md:w-[76px]",
+                  i === activeIndex
+                    ? "ring-2 ring-primary ring-offset-1"
+                    : "opacity-70 hover:opacity-100 hover:shadow-md"
+                )}
               >
-                <ChevronLeft className="h-5 w-5" />
+                {thumbIsVideo ? (
+                  <div className="flex h-full w-full items-center justify-center bg-black/10">
+                    <Play className="h-4 w-4 text-foreground/50" />
+                  </div>
+                ) : (
+                  <Image
+                    src={url}
+                    alt=""
+                    fill
+                    className="object-cover"
+                    sizes="100px"
+                  />
+                )}
               </button>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  goTo(current + 1);
-                }}
-                aria-label="Next photo"
-                className="absolute right-3 top-1/2 z-10 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full bg-white/20 text-white hover:bg-white/30"
-              >
-                <ChevronRight className="h-5 w-5" />
-              </button>
-            </>
-          )}
-
-          <div
-            className="relative h-[85vmin] w-[85vmin] max-h-[90dvh] max-w-[90dvw]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <Image
-              src={safe[current]}
-              alt={name}
-              fill
-              sizes="90vw"
-              className="object-contain"
-              priority
-            />
+            );
+          })}
           </div>
-
-          <span className="absolute bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap text-sm text-white/60">
-            {current + 1}&nbsp;/&nbsp;{safe.length}&nbsp;·&nbsp;Tap outside to close
-          </span>
         </div>
       )}
-    </>
+    </div>
   );
 }

@@ -2,7 +2,7 @@ import Fuse from "fuse.js";
 import type { ProductDTO } from "./types";
 
 // Typo-tolerant fuzzy search over the product catalogue.
-// Fuse ranks by relevance and forgives misspellings ("poja thali" → Pooja Thali),
+// Fuse ranks by relevance and forgives misspellings ("hoodei" → Hoodie),
 // partial words and word order — which a plain regex/ILIKE cannot do.
 const FUSE_OPTIONS: import("fuse.js").IFuseOptions<ProductDTO> = {
   includeScore: true,

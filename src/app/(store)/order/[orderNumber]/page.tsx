@@ -7,6 +7,13 @@ import {
   OrderTimeline,
   type StatusEntry,
 } from "@/components/store/order-timeline";
+import {
+  ReturnRequest,
+  type ExistingRequest,
+  type ReturnableLine,
+} from "@/components/store/return-request";
+import { resolveReturnPolicy, returnWindow, isReturnStatus } from "@/lib/returns";
+import { prisma as db } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Order confirmed" };
@@ -26,7 +33,10 @@ export default async function OrderPage({
   const { orderNumber } = await params;
 
   const order = await prisma.order
-    .findUnique({ where: { orderNumber } })
+    .findUnique({
+      where: { orderNumber },
+      include: { returnRequests: { orderBy: { createdAt: "desc" } } },
+    })
     .catch(() => null);
 
   if (!order) {
@@ -45,11 +55,62 @@ export default async function OrderPage({
   }
 
   const items = order.items as unknown as Item[];
+
+  // ---- Returns ----
+  // Eligibility is resolved per line: the store switch, then the product's own
+  // returnable flag, then the delivery window. The action re-checks all three.
+  const settings = await getSettings();
+  const productIds = items
+    .map((i) => (i as Item & { productId?: string }).productId)
+    .filter(Boolean) as string[];
+  const returnFlags = productIds.length
+    ? await db.product
+        .findMany({
+          where: { id: { in: productIds } },
+          select: { id: true, returnable: true, returnsInfo: true },
+        })
+        .catch(() => [])
+    : [];
+  const flagById = new Map(returnFlags.map((p) => [p.id, p]));
+
+  const win = returnWindow(order, settings.returnWindowDays, new Date());
+  const closedReason = !settings.returnsEnabled
+    ? ("store_disabled" as const)
+    : !win.deliveredAt
+      ? ("not_delivered" as const)
+      : !win.open
+        ? ("window_closed" as const)
+        : null;
+
+  const returnLines: ReturnableLine[] = items.map((it, index) => {
+    const pid = (it as Item & { productId?: string }).productId;
+    const policy = resolveReturnPolicy(
+      (pid ? flagById.get(pid) : undefined) ?? {},
+      settings
+    );
+    return {
+      index,
+      name: it.name,
+      quantity: it.quantity,
+      price: it.price,
+      variantLabel:
+        (it.options ?? []).map((o) => `${o.name}: ${o.value}`).join(" · ") || null,
+      eligible: policy.returnable,
+    };
+  });
+
+  const existingReturns: ExistingRequest[] = order.returnRequests.map((r) => ({
+    requestNumber: r.requestNumber,
+    productName: r.productName,
+    status: isReturnStatus(r.status) ? r.status : "pending",
+    reason: r.reason,
+    adminNote: r.adminNote,
+    createdAt: r.createdAt.toISOString(),
+  }));
   const history = (
     Array.isArray(order.statusHistory) ? order.statusHistory : []
   ) as unknown as StatusEntry[];
 
-  const settings = await getSettings();
   const waMessage = [
     `Hi ${settings.brandName}, I just placed an order! 🧡`,
     ``,
@@ -90,7 +151,7 @@ export default async function OrderPage({
         </p>
       </div>
 
-      <div className="mt-10 rounded-lg border border-border bg-card p-6">
+      <div className="mt-10 rounded-2xl border border-border bg-card p-6">
         <div className="flex items-center justify-between">
           <h2 className="font-serif text-xl">Order summary</h2>
           <span className="rounded-full bg-muted px-3 py-1 text-xs capitalize text-muted-foreground">
@@ -135,7 +196,7 @@ export default async function OrderPage({
           )}
         </div>
 
-        <div className="mt-6 rounded-lg bg-muted p-4 text-sm">
+        <div className="mt-6 rounded-xl bg-muted p-4 text-sm">
           <p className="font-medium">{order.customerName}</p>
           <p className="mt-1 text-muted-foreground">
             {order.address}, {order.city}, {order.state} - {order.pincode}
@@ -144,7 +205,7 @@ export default async function OrderPage({
         </div>
       </div>
 
-      <div className="mt-6 rounded-lg border border-border bg-card p-6">
+      <div className="mt-6 rounded-2xl border border-border bg-card p-6">
         <h2 className="font-serif text-xl">Order status</h2>
         <div className="mt-5">
           <OrderTimeline
@@ -152,6 +213,7 @@ export default async function OrderPage({
             history={history}
             deliveryStatus={order.deliveryStatus}
             note={order.note}
+            brandName={settings.brandName}
           />
         </div>
         <p className="mt-4 text-sm text-muted-foreground">
@@ -163,12 +225,22 @@ export default async function OrderPage({
         </p>
       </div>
 
+      <ReturnRequest
+        orderNumber={order.orderNumber}
+        lines={returnLines}
+        existing={existingReturns}
+        windowOpen={win.open && settings.returnsEnabled}
+        daysLeft={win.daysLeft}
+        windowDays={settings.returnWindowDays}
+        closedReason={closedReason}
+      />
+
       {waHref && (
         <a
           href={waHref}
           target="_blank"
           rel="noreferrer"
-          className="mt-6 flex items-center justify-center gap-2 rounded-lg bg-[#25D366] px-5 py-3.5 text-sm font-medium text-white transition-opacity hover:opacity-90"
+          className="mt-6 flex items-center justify-center gap-2 rounded-2xl bg-[#25D366] px-5 py-3.5 text-sm font-medium text-white transition-opacity hover:opacity-90"
         >
           <MessageCircle className="h-5 w-5" />
           Send order details to us on WhatsApp

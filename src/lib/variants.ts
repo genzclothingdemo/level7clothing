@@ -1,299 +1,342 @@
-import type {
-  ProductOption,
-  SelectedOption,
-  Variant,
-  VariantPrice,
-} from "./types";
-import { allCombinations, comboKey } from "./options";
+import type { Attribute, MediaDTO, PropertyDependencies, SellableVariant } from "./types";
+import { comboKey } from "./options";
 
-/** The subset of a product this module needs — works for DTOs and Prisma rows. */
-export type VariantSource = {
-  price: number;
-  options: ProductOption[];
-  variants?: Variant[];
-  variantPrices?: VariantPrice[];
-  images?: string[];
-};
-
-/** A selection as a plain map, e.g. { Size: "4 inch", Vatki: "1" }. */
 export type Selection = Record<string, string>;
 
-export function toSelection(options?: SelectedOption[]): Selection {
-  const s: Selection = {};
-  for (const o of options ?? []) s[o.name] = o.value;
-  return s;
-}
-
-export function toSelectedOptions(sel: Selection): SelectedOption[] {
-  return Object.entries(sel).map(([name, value]) => ({ name, value }));
-}
-
-/**
- * Return default selection for a product: pre-selects the first choice of each option group.
- */
-export function getDefaultSelection(
-  options: ProductOption[],
-  variants?: Variant[]
-): Selection {
-  const selection: Selection = {};
-  if (!options || !options.length) return selection;
-
-  for (const group of options) {
-    if (!group.name || !group.choices || !group.choices.length) continue;
-    const norm = variants ?? [];
-    const firstChoice = group.choices.find((c) =>
-      norm.length
-        ? isChoiceEnabled(norm, options, group.name, c.label, selection)
-        : true
-    ) ?? group.choices[0];
-
-    if (firstChoice) {
-      selection[group.name] = firstChoice.label;
+/** Default selection = the first available choice of every attribute. */
+export function defaultSelection(attributes: Attribute[]): Selection {
+  const result: Selection = {};
+  for (const attr of attributes) {
+    if (attr.values.length > 0) {
+      result[attr.name] = attr.values[0];
     }
   }
-  return selection;
+  return result;
 }
 
 /**
- * Return the product's variant matrix, synthesising one for older products
- * (from options + legacy variantPrices + per-choice images) so every product
- * behaves the same. Returns [] when the product has no options at all.
+ * Bridge the admin authoring model (`options` + `variants`) to the storefront/
+ * checkout read model (`attributes` + `sellableVariants`). Single source of truth,
+ * used both when saving a product (server action) and as a read-time fallback for
+ * products saved before the two halves were connected. Pure — no DB/server deps.
  */
-export function normalizeVariants(p: VariantSource): Variant[] {
-  if (p.variants && p.variants.length) return p.variants;
+export function deriveVariantModel(input: {
+  options?: unknown;
+  variants?: unknown;
+  price: number;
+  stock: number;
+}): { attributes: Attribute[]; sellableVariants: SellableVariant[] } {
+  const options = Array.isArray(input.options) ? (input.options as any[]) : [];
+  const attributes: Attribute[] = options
+    .map((o) => ({
+      name: String(o?.name ?? "").trim(),
+      values: Array.isArray(o?.choices)
+        ? (o.choices as any[]).map((c) => String(c?.label ?? "").trim()).filter(Boolean)
+        : [],
+    }))
+    .filter((a) => a.name && a.values.length > 0);
 
-  const combos = allCombinations(p.options);
-  if (!combos.length) return [];
+  const variants = Array.isArray(input.variants) ? (input.variants as any[]) : [];
+  const basePrice = Number(input.price) || 0;
+  const baseStock = Number(input.stock) || 0;
+  const sellableVariants: SellableVariant[] = variants
+    .filter((v) => v && typeof v.combo === "object" && v.combo)
+    .map((v) => {
+      const combo = v.combo as Record<string, string>;
+      const priceRaw = v.price;
+      const price =
+        priceRaw === "" || priceRaw == null ? basePrice : Number(priceRaw) || basePrice;
+      const images = Array.isArray(v.images) ? (v.images as any[]).filter(Boolean) : [];
+      const stockRaw = v.stock;
+      const stock =
+        stockRaw === "" || stockRaw == null || !Number.isFinite(Number(stockRaw))
+          ? baseStock // no per-variant stock set → inherit the product's stock
+          : Number(stockRaw);
+      return {
+        id: comboKey(combo),
+        combo,
+        price,
+        images,
+        stock,
+        weight: 0,
+        available: v.available !== false,
+      };
+    });
 
-  const priceByKey = new Map(
-    (p.variantPrices ?? []).map((v) => [comboKey(v.combo), v.price])
-  );
-
-  return combos.map((combo) => {
-    const key = comboKey(combo);
-    let price = priceByKey.get(key);
-    const images: string[] = [];
-    if (price == null) {
-      // Fall back to base price + additive per-choice deltas.
-      price = p.price;
-      for (const [g, val] of Object.entries(combo)) {
-        const group = p.options.find((o) => o.name === g);
-        const choice = group?.choices.find((c) => c.label === val);
-        if (choice) price += choice.priceDelta || 0;
-      }
-    }
-    // Carry any per-choice images (legacy single-image-per-choice feature).
-    for (const [g, val] of Object.entries(combo)) {
-      const group = p.options.find((o) => o.name === g);
-      const choice = group?.choices.find((c) => c.label === val);
-      if (choice?.image && !images.includes(choice.image)) {
-        images.push(choice.image);
-      }
-    }
-    return { combo, price, available: true, images };
-  });
+  return { attributes, sellableVariants };
 }
 
 /**
- * Is `choice` in `groupName` selectable, given the current selection? Uses a
- * hierarchical rule (Flipkart-style): a choice is enabled when at least one
- * AVAILABLE variant matches it plus every selection made in the option groups
- * listed *before* this one. So the first option (e.g. Size) is the primary
- * attribute and later ones (e.g. Vatki) depend on it.
+ * The selection to show on first load: the combo of the first *available* sellable
+ * variant (so the customer lands on something orderable), falling back to the first
+ * choice of each attribute. Empty for products with no options.
+ */
+export function firstAvailableSelection(product: {
+  attributes?: Attribute[];
+  sellableVariants?: SellableVariant[];
+}): Selection {
+  const attributes = product.attributes ?? [];
+  if (attributes.length === 0) return {};
+  const variants = product.sellableVariants ?? [];
+  const firstAvailable = variants.find((v) => v.available);
+  if (firstAvailable) return { ...firstAvailable.combo };
+  const anyVariant = variants[0];
+  if (anyVariant) return { ...anyVariant.combo };
+  return defaultSelection(attributes);
+}
+
+/** 
+ * Returns the effective price for a selection.
+ */
+export function priceForSelection(
+  product: { price: number; sellableVariants?: any },
+  selected: Selection
+): number {
+  const variants = (product.sellableVariants || []) as SellableVariant[];
+  const key = comboKey(selected);
+  const match = variants.find(v => v.id === key);
+  return match?.price ?? product.price;
+}
+
+export function imagesForSelection(
+  product: { images: string[]; sellableVariants?: any },
+  selected: Selection
+): string[] {
+  const variants = (product.sellableVariants || []) as SellableVariant[];
+  const key = comboKey(selected);
+  const match = variants.find(v => v.id === key);
+  
+  if (match && match.images && match.images.length > 0) {
+    return match.images;
+  }
+
+  return product.images || [];
+}
+
+/**
+ * The name of the "visual" attribute — the one whose value swaps the gallery.
+ * Authored in admin as the image-driving option and persisted as
+ * `propertyModules.images = [name]`; falls back to the first attribute for
+ * products saved before that contract existed. Returns null when the product
+ * has no options at all. Nothing about the storefront hardcodes "Design" — the
+ * label the customer sees is whatever this returns.
+ */
+export function visualAttributeName(product: {
+  attributes?: Attribute[];
+  propertyModules?: PropertyDependencies;
+}): string | null {
+  const pmImages = product.propertyModules?.images;
+  const declared = Array.isArray(pmImages) ? pmImages[0] : undefined;
+  const attributes = product.attributes ?? [];
+  // Only honour a declared name that is still a real attribute (the admin may
+  // have renamed or deleted the option since).
+  if (declared && attributes.some((a) => a.name === declared)) return declared;
+  return attributes[0]?.name ?? null;
+}
+
+/**
+ * The single thumbnail that represents one value of the visual attribute (e.g.
+ * the olive tee shot for Colour = "Olive"), used by the visual variant picker.
+ * Priority: the admin's manual pick (ProductImage slot="preview"), then that
+ * value's first gallery photo, then the first common photo, then the product's
+ * flat image list. Videos are skipped — a picker card needs a still.
+ */
+export function previewImageForValue(
+  product: { images: string[]; media?: MediaDTO[] },
+  value: string
+): string | null {
+  const own = ownPreviewForValue(product.media ?? [], value);
+  if (own) return own;
+  // Unlike a listing card, a picker card must render something for every value.
+  return coverStill(product);
+}
+
+/** Is this url a still image (the gallery treats videos by extension)? */
+function isStill(url: string | undefined | null): url is string {
+  return !!url && !/\.(mp4|webm|mov)$/i.test(url);
+}
+
+const bySortOrder = (a: MediaDTO, b: MediaDTO) =>
+  (a.sortOrder ?? 0) - (b.sortOrder ?? 0);
+
+/**
+ * The ONE photo that stands for a value, using only that value's own media —
+ * no common-photo fallback. Distinct from `previewImageForValue`, which does
+ * fall back: a picker card on the product page must render something for every
+ * value, whereas a listing card must not claim a packaging shot is a design.
+ */
+function ownPreviewForValue(
+  media: MediaDTO[],
+  value: string
+): string | null {
+  const rows = media.filter((m) => m.variantValue === value).sort(bySortOrder);
+  const manual = rows.find((m) => m.slot === "preview" && isStill(m.url));
+  if (manual) return manual.url;
+  return rows.find((m) => isStill(m.url))?.url ?? null;
+}
+
+/** A single representative still: first common photo, else the flat list. */
+function coverStill(product: { images: string[]; media?: MediaDTO[] }): string | null {
+  const common = (product.media ?? [])
+    .filter((m) => m.variantValue == null)
+    .sort(bySortOrder)
+    .find((m) => isStill(m.url));
+  if (common) return common.url;
+  return (product.images ?? []).find(isStill) ?? null;
+}
+
+/**
+ * The gallery a *listing card* swipes through: exactly one preview per value of
+ * the visual attribute — the same thumbnails the product page's picker shows.
+ *
+ * Deliberately NOT `product.images`, which is the union of every gallery and so
+ * made a 2-design product swipe through 20 photos. Common photos (packaging,
+ * dimensions, care card) and the rest of each value's gallery are excluded: a
+ * card answers "which designs exist", not "show me everything".
+ *
+ * Values with no photos of their own are skipped rather than falling back to a
+ * common shot — otherwise four untagged designs render as four identical
+ * packaging photos. Products with no options (or no per-value photos at all)
+ * fall back to a single cover still. Pure — no DB/server deps.
+ */
+export function variantPreviewImages(
+  product: {
+    images: string[];
+    media?: MediaDTO[];
+    attributes?: Attribute[];
+    propertyModules?: PropertyDependencies;
+  },
+  limit = 6
+): string[] {
+  const media = product.media ?? [];
+  const visualName = visualAttributeName(product);
+  const values =
+    (visualName
+      ? product.attributes?.find((a) => a.name === visualName)?.values
+      : undefined) ?? [];
+
+  const out: string[] = [];
+  for (const val of values) {
+    const url = ownPreviewForValue(media, val);
+    // De-dupe: the admin may legitimately point two values at the same photo.
+    if (url && !out.includes(url)) out.push(url);
+    if (out.length >= limit) break;
+  }
+  if (out.length > 0) return out;
+
+  const cover = coverStill(product);
+  return cover ? [cover] : [];
+}
+
+/**
+ * Resolves the storefront gallery for a selection from the relational
+ * ProductImage rows (`product.media`) — the intended source of truth.
+ *
+ * The "visual variant" attribute is dynamic: it's the first attribute driving
+ * images (`propertyModules.images[0]`), falling back to the first attribute
+ * (`attributes[0]`) when no image dependencies are declared. Its selected value
+ * scopes the gallery. Result = media tagged with that value (ordered by
+ * sortOrder) followed by the common media (`variantValue == null`, ordered by
+ * sortOrder), de-duplicated by url. Falls back to `imagesForSelection` (the
+ * legacy sellableVariants JSON → `product.images`) when there are no media rows
+ * or the computed list is empty. Videos are returned like images (the gallery
+ * detects them by extension). Pure — no DB/server deps.
+ */
+export function galleryForSelection(
+  product: {
+    images: string[];
+    media?: MediaDTO[];
+    attributes?: Attribute[];
+    propertyModules?: PropertyDependencies;
+    sellableVariants?: any;
+  },
+  selected: Selection
+): string[] {
+  const media = product.media ?? [];
+  if (media.length > 0) {
+    // Visual attribute is dynamic — see visualAttributeName().
+    const visualName = visualAttributeName(product);
+    const visualVal = visualName ? selected[visualName] : undefined;
+
+    // Defensive: the query already orders by sortOrder, but never trust the
+    // input array's order here.
+    const bySort = (a: MediaDTO, b: MediaDTO) =>
+      (a.sortOrder ?? 0) - (b.sortOrder ?? 0);
+
+    const variantRows =
+      visualVal != null
+        ? media.filter((m) => m.variantValue === visualVal).sort(bySort)
+        : [];
+    const commonRows = media
+      .filter((m) => m.variantValue == null)
+      .sort(bySort);
+
+    const urls = [...variantRows, ...commonRows]
+      .map((m) => m.url)
+      .filter(Boolean);
+    const deduped = Array.from(new Set(urls));
+    if (deduped.length > 0) return deduped;
+  }
+
+  return imagesForSelection(product, selected);
+}
+
+/** 
+ * Returns the min and max possible price for a product.
+ */
+export function priceRange(product: { price: number; sellableVariants?: any }): { min: number; max: number } {
+  const variants = (product.sellableVariants || []) as SellableVariant[];
+  if (variants.length === 0) return { min: product.price, max: product.price };
+  
+  const prices = variants.filter(v => v.available).map(v => v.price);
+  if (prices.length === 0) return { min: product.price, max: product.price };
+  
+  return { min: Math.min(...prices), max: Math.max(...prices) };
+}
+
+/**
+ * Is the given choice currently in stock/available?
+ * (Simplest check: does a sellable variant exist with this choice that is available?)
  */
 export function isChoiceEnabled(
-  variants: Variant[],
-  options: ProductOption[],
   groupName: string,
-  choice: string,
-  selected: Selection
+  choiceLabel: string,
+  product: { sellableVariants?: any }
 ): boolean {
-  if (!variants.length) return true; // simple product, no constraints
-  // Hierarchical: the first option (e.g. Size) is primary and always
-  // selectable; later options (e.g. Vatki) are constrained only by the
-  // options listed BEFORE them. Switching a primary option never dead-ends —
-  // conflicting sub-selections are dropped instead (see pruneSelection).
-  const order = options.map((o) => o.name);
-  const gi = order.indexOf(groupName);
-  const prior = order.slice(0, gi);
-  return variants.some(
-    (v) =>
-      v.available &&
-      v.combo[groupName] === choice &&
-      prior.every((g) => selected[g] == null || v.combo[g] === selected[g])
-  );
+  const variants = (product.sellableVariants || []) as SellableVariant[];
+  if (variants.length === 0) return true; // If no variants generated, assume enabled
+  
+  // Find any variant that has this choice and is available
+  return variants.some(v => v.combo[groupName] === choiceLabel && v.available);
 }
 
 /**
- * Drop any selection that has become inconsistent with the options chosen
- * before it (keeps earlier picks, removes conflicting later ones). Used after
- * a change so switching e.g. Size clears an incompatible Vatki instead of
- * blocking.
- */
-export function pruneSelection(
-  variants: Variant[],
-  options: ProductOption[],
-  selected: Selection
-): Selection {
-  if (!variants.length) return { ...selected };
-  const order = options.map((o) => o.name);
-  const result: Selection = { ...selected };
-  for (let i = 0; i < order.length; i++) {
-    const g = order[i];
-    if (result[g] == null) continue;
-    const ok = variants.some(
-      (v) =>
-        v.available &&
-        v.combo[g] === result[g] &&
-        order
-          .slice(0, i)
-          .every((pg) => result[pg] == null || v.combo[pg] === result[pg])
-    );
-    if (!ok) delete result[g];
-  }
-  return result;
-}
-
-/** All created (available) variants consistent with a partial selection. */
-export function matchingVariants(
-  variants: Variant[],
-  selected: Selection
-): Variant[] {
-  return variants.filter(
-    (v) =>
-      v.available &&
-      Object.entries(selected).every(([g, val]) => v.combo[g] === val)
-  );
-}
-
-/**
- * The single variant a selection points to, if it can be pinned down — either
- * the selection names every attribute, or only one created variant is left.
- */
-export function effectiveVariant(
-  p: VariantSource,
-  selected: Selection
-): Variant | null {
-  const variants = normalizeVariants(p);
-  if (!variants.length) return null;
-  const matched = matchingVariants(variants, selected);
-  if (matched.length === 1) return matched[0];
-  const full = p.options.every((o) => selected[o.name] != null);
-  return full ? resolveVariant(variants, selected) : null;
-}
-
-/** Lowest price among the variants a (partial) selection still allows. */
-export function minMatchingPrice(p: VariantSource, selected: Selection): number {
-  const variants = normalizeVariants(p);
-  const matched = matchingVariants(variants, selected);
-  if (!matched.length) return p.price;
-  return Math.min(...matched.map((v) => v.price));
-}
-
-/** Union of photos across the variants a (partial) selection allows. */
-export function unionImages(
-  p: VariantSource,
-  selected: Selection,
-  fallback: string[]
-): string[] {
-  const variants = normalizeVariants(p);
-  if (!variants.length) return fallback;
-  const matched = matchingVariants(variants, selected);
-  const out: string[] = [];
-  for (const v of matched) {
-    for (const img of v.images) if (!out.includes(img)) out.push(img);
-  }
-  return out.length ? out : fallback;
-}
-
-/** The one created variant a photo uniquely belongs to (null if 0 or many). */
-export function variantForImage(
-  variants: Variant[],
-  img: string
-): Variant | null {
-  const owners = variants.filter((v) => v.available && v.images.includes(img));
-  return owners.length === 1 ? owners[0] : null;
-}
-
-/**
- * After a change, walk the option groups in order and fix any downstream
- * selection that is no longer valid, snapping it to the first enabled choice.
+ * Ensures a partial or outdated selection is still valid, filling in missing choices.
  */
 export function repairSelection(
-  variants: Variant[],
-  options: ProductOption[],
+  attributes: Attribute[],
   selected: Selection
 ): Selection {
-  if (!variants.length) return { ...selected };
-  const order = options.map((o) => o.name);
-  const result: Selection = { ...selected };
-  for (let i = 0; i < order.length; i++) {
-    const g = order[i];
-    const choices = options[i].choices.map((c) => c.label);
-    const ok = (val: string) =>
-      variants.some(
-        (v) =>
-          v.available &&
-          v.combo[g] === val &&
-          order.slice(0, i).every((pg) => v.combo[pg] === result[pg])
-      );
-    if (result[g] == null || !ok(result[g])) {
-      const first = choices.find(ok);
-      if (first != null) result[g] = first;
-      else delete result[g];
+  const current = { ...selected };
+  let modified = false;
+
+  for (const attr of attributes) {
+    if (attr.values.length === 0) continue;
+    const val = current[attr.name];
+    if (!val || !attr.values.includes(val)) {
+      current[attr.name] = attr.values[0];
+      modified = true;
     }
   }
-  return result;
-}
 
-/** A sensible starting selection: the first available variant, then repaired. */
-export function initialSelection(
-  variants: Variant[],
-  options: ProductOption[]
-): Selection {
-  if (!variants.length) return {};
-  const first = variants.find((v) => v.available) ?? variants[0];
-  return repairSelection(variants, options, first ? { ...first.combo } : {});
-}
+  // Remove keys that aren't attributes anymore
+  const names = new Set(attributes.map(g => g.name));
+  for (const k of Object.keys(current)) {
+    if (!names.has(k)) {
+      delete current[k];
+      modified = true;
+    }
+  }
 
-/** The available variant that exactly matches a full selection, if any. */
-export function resolveVariant(
-  variants: Variant[],
-  selected: Selection
-): Variant | null {
-  return (
-    variants.find(
-      (v) =>
-        v.available &&
-        Object.keys(v.combo).length === Object.keys(selected).length &&
-        Object.entries(v.combo).every(([g, val]) => selected[g] === val)
-    ) ?? null
-  );
-}
-
-/** Images to display for a selection — the variant's own, else the product's. */
-export function imagesForSelection(
-  p: VariantSource,
-  selected: Selection
-): string[] {
-  const variants = normalizeVariants(p);
-  const v = variants.length ? resolveVariant(variants, selected) : null;
-  if (v && v.images.length) return v.images;
-  return p.images ?? [];
-}
-
-/** The unit price for a selection (falls back to the base price). */
-export function priceForSelection(p: VariantSource, selected: Selection): number {
-  const variants = normalizeVariants(p);
-  if (!variants.length) return p.price;
-  const v = resolveVariant(variants, selected);
-  return v ? v.price : p.price;
-}
-
-/** Min–max price across all available variants (for a header price range). */
-export function priceRange(p: VariantSource): { min: number; max: number } {
-  const variants = normalizeVariants(p).filter((v) => v.available);
-  if (!variants.length) return { min: p.price, max: p.price };
-  const prices = variants.map((v) => v.price);
-  return { min: Math.min(...prices), max: Math.max(...prices) };
+  return current;
 }

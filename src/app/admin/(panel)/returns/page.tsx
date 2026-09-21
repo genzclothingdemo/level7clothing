@@ -8,6 +8,8 @@ import { formatINR } from "@/lib/utils";
 import { InfoTip } from "@/components/store/info-tip";
 import { ExpandableText } from "@/components/store/expandable-text";
 import { ReturnPolicyForm } from "@/components/admin/return-defaults";
+import { ReturnableBulk } from "@/components/admin/returnable-bulk";
+import { returnableBreakdown } from "@/app/actions/returns";
 import { ReturnFilters } from "@/components/admin/return-filters";
 import { ReturnActions } from "@/components/admin/return-actions";
 import {
@@ -125,6 +127,12 @@ export default async function AdminReturns({
   const now = await readClock();
 
   const policy = await readPolicy();
+  // Only needed by the policy tab; the requests tab never renders the bulk
+  // control, so three COUNT queries are not worth running for it.
+  const returnable =
+    tab === "policy"
+      ? await returnableBreakdown()
+      : { inherit: 0, yes: 0, no: 0, total: 0 };
 
   // Composed as AND parts rather than assigned onto one object: the search and
   // the "our fault" filter both need their own OR, and the last writer would
@@ -303,6 +311,13 @@ export default async function AdminReturns({
             }}
             todayISO={new Date(now).toISOString()}
           />
+
+          {/* Catalogue-wide override. Sits below the policy form because it
+              acts on products rather than on the policy itself, and because it
+              only makes sense once the store default above has been decided. */}
+          <div className="mt-6">
+            <ReturnableBulk breakdown={returnable} />
+          </div>
         </div>
       ) : (
         <div className="mt-4">

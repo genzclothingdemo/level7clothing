@@ -64,7 +64,10 @@ and falls back to defaults, so the build says "Completed" and the site 500s at
 runtime. The canary is the sitemap: `/sitemap.xml` should have **31 URLs including
 19 products**; if it drops to 9 (static only), the DB is unreachable.
 
-Also required in Vercel: `NEXT_PUBLIC_SITE_URL=https://www.level7clothing.shop`,
+Also required in Vercel: `NEXT_PUBLIC_SITE_URL=https://clothingdemoshop.vercel.app`
+(the `www.level7clothing.shop` value this line used to name is a **disabled
+domain** — pointing canonicals and OG tags at it is worse than localhost,
+because it resolves for nobody),
 or sitemap/canonical/OG tags emit localhost.
 
 ## Design system — names lie, read this
@@ -142,6 +145,24 @@ Product column, add it to `productSchema` AND to both writers**, and collapse
 The same shape of trap: `resolveReturnPolicy(product, settings)` takes
 `isCustomisable` as an *optional* field, so a Prisma `select` that omits it still
 typechecks and silently treats made-to-order pieces as returnable.
+
+## `vercel env pull` poisons local production builds
+
+`vercel env pull` writes **`.env.production.local`**, and for any variable marked
+*Sensitive* in Vercel the value it writes is the literal string `[SENSITIVE]` —
+the real value is unreadable by design. Next.js loads `.env.production.local`
+**ahead of** `.env`, but only for `next build` / `next start`.
+
+So after a pull, local production builds silently run with
+`DATABASE_URL="[SENSITIVE]"`: they compile fine, and emit a **9-URL static-only
+sitemap** — the exact signal this file names as the production-outage canary.
+`npm run dev` is unaffected (it reads `.env.development.local`/`.env`), and real
+production is unaffected (Vercel injects the true values), so it only ever
+misleads you locally.
+
+**Delete `.env.production.local` after any `vercel env pull`.** It is gitignored,
+so it is not a leak — just a trap. If a local build's sitemap drops to 9 URLs,
+check for this file before believing the database is down.
 
 ## Turbopack workspace root
 

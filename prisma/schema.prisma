@@ -341,6 +341,31 @@ model SiteSettings {
   returnReasons         String[] @default(["Wrong size", "Damaged or defective", "Wrong item delivered", "Not as described", "Changed my mind"])
   // Shown above the return form — the plain-English policy the customer agrees to.
   returnPolicyNote      String   @default("Items must be unworn, unwashed and returned with their original tags.\nRaise the request within the return window shown on your order.\nCustomised pieces cannot be returned unless they arrived damaged.")
+  // ---- Order confirmation pipeline ----
+  //
+  // How a freshly placed order reaches "confirmed":
+  //   "manual"    — everything lands in pending; a human confirms. Safest.
+  //   "byPayment" — decided per payment method by the three flags below, so a
+  //                 paid order can skip the queue while COD still gets a call.
+  //   "auto"      — everything confirms itself. Fastest, and the only mode
+  //                 where a fake COD order can reach a courier untouched.
+  orderConfirmMode     String  @default("manual")
+  autoConfirmPrepaid   Boolean @default(true)
+  autoConfirmPartial   Boolean @default(true)
+  autoConfirmCod       Boolean @default(false)
+
+  // ---- Shipment pipeline ----
+  //
+  // OFF (default): confirming an order stages an unbooked NimbusPost draft and
+  // stops, so a human picks the courier and sees the cost before the wallet is
+  // charged. ON: the draft is booked immediately with `autoShipCourier`.
+  //
+  // Deliberately default-off. CLAUDE.md records the draft-first review gate as
+  // intentional, and booking spends real money.
+  autoShipOnConfirm    Boolean @default(false)
+  // "cheapest" | "fastest" — how the courier is picked when auto-shipping.
+  autoShipCourier      String  @default("cheapest")
+
   // ---- Refunds ----
   // What the store keeps when it refunds. Applied to prepaid and COD orders;
   // both can be set and are summed. Zero = full refund.
@@ -559,6 +584,36 @@ model WishlistItem {
 
   @@unique([userId, slug])
   @@index([userId])
+}
+
+/// An offer, sale or announcement the store is running.
+///
+/// One row drives both surfaces — the slim banner and the first-visit popup —
+/// so the copy can never say two different things. `kind` decides where it
+/// shows. Scheduling is on the row rather than done by switching rows on and
+/// off by hand, because a sale that ends at midnight should stop by itself.
+model Promotion {
+  id         String   @id @default(cuid())
+  title      String
+  body       String
+  ctaLabel   String?
+  ctaHref    String?
+  /// "banner" | "popup" | "both"
+  kind       String   @default("banner")
+  isActive   Boolean  @default(true)
+  startsAt   DateTime?
+  endsAt     DateTime?
+  /// Highest priority wins when several are live. Ties break on most recent.
+  priority   Int      @default(0)
+  /// Days a dismissal sticks for. 0 = only for this browsing session.
+  /// A popup that reappears on every page load is the fastest way to make
+  /// someone leave, so dismissal is respected client-side and this sets how
+  /// long for.
+  dismissDays Int     @default(7)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([isActive, priority])
 }
 
 /// A browser that has granted push permission for this store.

@@ -21,6 +21,8 @@ import {
   Star,
   PackageX,
   UserRound,
+  LineChart,
+  Megaphone,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { logout } from "@/app/actions/auth";
@@ -28,6 +30,10 @@ import { cn } from "@/lib/utils";
 
 const nav = [
   { href: "/admin", label: "Dashboard", icon: LayoutDashboard, exact: true },
+  // Finance sits directly under the dashboard: the dashboard answers "what
+  // happened just now", this answers "what is happening over time". Both are
+  // read-only, so they belong above the screens where work gets done.
+  { href: "/admin/finance", label: "Finance", icon: LineChart },
   { href: "/admin/products", label: "Products", icon: Package },
   { href: "/admin/categories", label: "Categories", icon: Tag },
   { href: "/admin/orders", label: "Orders", icon: ShoppingCart },
@@ -37,6 +43,9 @@ const nav = [
   { href: "/admin/returns", label: "Returns", icon: PackageX },
   { href: "/admin/reviews", label: "Reviews", icon: Star },
   { href: "/admin/coupons", label: "Coupons", icon: Ticket },
+  // Next to Coupons: both are "things that change what the shopper is
+  // offered". A coupon waits to be typed in, a promotion goes looking.
+  { href: "/admin/promotions", label: "Promotions", icon: Megaphone },
   { href: "/admin/media", label: "Media Library", icon: Images },
   { href: "/admin/leads", label: "Interested customers", icon: Users },
   { href: "/admin/messages", label: "Inquiries", icon: MessageSquare },

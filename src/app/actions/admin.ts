@@ -14,9 +14,16 @@ import {
   createDraftForOrder,
   dispatchOrder,
   getCourierOptionsForOrder,
+  runConfirmationPipeline,
   syncAllOpenOrders,
   syncOrderFromNimbus,
+  type ConfirmationPipelineResult,
 } from "@/lib/fulfilment";
+import { normalisePipelineSettings } from "@/lib/orders-pipeline";
+import {
+  BULK_ORDER_ACTIONS,
+  type BulkRowResult,
+} from "@/components/admin/order-types";
 
 async function requireAdmin() {
   const session = await getAdminSession();
@@ -889,14 +896,28 @@ export async function setCustomerNote(id: string, note: string) {
   return { ok: true as const };
 }
 
-// Admin accepts a (COD/Direct) order: move pending → confirmed, email the
-// customer, and stage a NimbusPost draft shipment for one-click dispatch.
-export async function confirmOrder(id: string) {
-  await requireAdmin();
+/**
+ * Admin accepts an order: pending → confirmed, email the customer, then hand
+ * over to the shipment pipeline.
+ *
+ * The pipeline half is `runConfirmationPipeline`, shared with checkout and
+ * payment verification, so a human pressing Confirm and an order confirming
+ * itself produce the same shipment outcome — a staged draft by default, a
+ * booked AWB when the admin has switched auto-ship on.
+ *
+ * Internal (no `requireAdmin`, no revalidate) so the bulk action can reuse it
+ * without re-authorising and re-revalidating once per row.
+ */
+async function confirmOneOrder(
+  id: string
+): Promise<
+  | { ok: false; error: string }
+  | { ok: true; orderNumber: string; shipment: ConfirmationPipelineResult }
+> {
   const order = await prisma.order.findUnique({ where: { id } });
-  if (!order) return { ok: false as const, error: "Order not found" };
+  if (!order) return { ok: false, error: "Order not found" };
   if (order.status !== "pending") {
-    return { ok: false as const, error: `Order is already ${order.status}.` };
+    return { ok: false, error: `Order is already ${order.status}.` };
   }
 
   const history = Array.isArray(order.statusHistory)
@@ -929,15 +950,31 @@ export async function confirmOrder(id: string) {
     console.error("[admin] confirm email failed:", err);
   }
 
-  // Stage a draft shipment (best-effort; needs NimbusPost configured).
-  const draft = await createDraftForOrder(id).catch((err) => {
-    console.error("[admin] draft shipment failed:", err);
-    return { ok: false as const, error: String(err?.message ?? err) };
-  });
+  // Best-effort: the order IS confirmed and the customer has been told. A
+  // courier problem must not undo that, so it is reported, never thrown.
+  let shipment: ConfirmationPipelineResult;
+  try {
+    shipment = await runConfirmationPipeline(id);
+  } catch (err) {
+    console.error("[admin] confirmation pipeline failed:", err);
+    shipment = {
+      outcome: "failed",
+      drafted: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  return { ok: true, orderNumber: order.orderNumber, shipment };
+}
+
+export async function confirmOrder(id: string) {
+  await requireAdmin();
+  const result = await confirmOneOrder(id);
+  if (!result.ok) return { ok: false as const, error: result.error };
 
   revalidatePath("/admin/orders");
   revalidatePath("/admin");
-  return { ok: true as const, draft };
+  return { ok: true as const, shipment: result.shipment };
 }
 
 // -------- Shipping (NimbusPost) --------
@@ -1089,17 +1126,19 @@ export async function syncOrderFromNimbusAction(id: string) {
 }
 
 // -------- Cancel abandoned order & restore stock --------
-export async function cancelAndRestoreStock(id: string) {
-  await requireAdmin();
 
+/** Internal half of {@link cancelAndRestoreStock}, reused by the bulk action. */
+async function cancelOneOrder(
+  id: string
+): Promise<{ ok: false; error: string } | { ok: true; orderNumber: string }> {
   const order = await prisma.order.findUnique({ where: { id } });
-  if (!order) return { ok: false as const, error: "Order not found" };
+  if (!order) return { ok: false, error: "Order not found" };
   if (order.status === "cancelled") {
-    return { ok: false as const, error: "Order is already cancelled" };
+    return { ok: false, error: "Order is already cancelled" };
   }
   if (order.paymentStatus === "paid") {
     return {
-      ok: false as const,
+      ok: false,
       error: "Cannot cancel a fully paid order here. Change status manually.",
     };
   }
@@ -1138,9 +1177,225 @@ export async function cancelAndRestoreStock(id: string) {
     });
   });
 
+  return { ok: true, orderNumber: order.orderNumber };
+}
+
+export async function cancelAndRestoreStock(id: string) {
+  await requireAdmin();
+  const result = await cancelOneOrder(id);
+  if (!result.ok) return { ok: false as const, error: result.error };
+
   revalidatePath("/admin/orders");
   revalidatePath("/admin");
   return { ok: true as const };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Bulk order actions                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How many orders one call may touch.
+ *
+ * Deliberately low. Each row is at least one database round trip to Mumbai,
+ * and Book/Sync/Draft each add a NimbusPost call on top; a serverless function
+ * has a wall clock. Fifty is comfortably inside it and still means one press
+ * for a normal day's orders.
+ */
+const BULK_LIMIT = 50;
+
+const bulkSchema = z.object({
+  ids: z
+    .array(z.string().min(1))
+    .min(1, "Select at least one order")
+    .max(BULK_LIMIT, `Too many orders selected — ${BULK_LIMIT} at a time.`),
+  action: z.enum(BULK_ORDER_ACTIONS),
+});
+
+/**
+ * Run one action over a selection of orders.
+ *
+ * **Every row reports its own outcome.** A bulk action that says "done" while
+ * three rows silently failed is worse than no bulk action at all — the
+ * operator moves on believing the work is finished. So this never aborts on
+ * the first failure and never returns a bare count: it returns a line per
+ * order, and the caller renders all of them.
+ *
+ * Rows run in sequence, not `Promise.all`. `DATABASE_URL` pins
+ * `connection_limit=1` (see CLAUDE.md), so parallel queries serialise anyway,
+ * and firing fifty simultaneous booking calls at NimbusPost is a good way to
+ * be rate-limited halfway through a charge.
+ */
+export async function bulkOrderAction(ids: string[], action: string) {
+  await requireAdmin();
+
+  const parsed = bulkSchema.safeParse({ ids: [...new Set(ids)], action });
+  if (!parsed.success) {
+    return { ok: false as const, error: parsed.error.issues[0].message };
+  }
+  const { ids: unique, action: verb } = parsed.data;
+
+  // One lookup for the numbers, so a failing row can still be named. An id
+  // with no order still gets a row rather than vanishing from the report.
+  const found = await prisma.order.findMany({
+    where: { id: { in: unique } },
+    select: { id: true, orderNumber: true },
+  });
+  const numberById = new Map(found.map((o) => [o.id, o.orderNumber]));
+
+  const results: BulkRowResult[] = [];
+
+  for (const id of unique) {
+    const orderNumber = numberById.get(id) ?? id.slice(-6);
+    const row = (ok: boolean, message: string) =>
+      results.push({ id, orderNumber, ok, message });
+
+    if (!numberById.has(id)) {
+      row(false, "Order not found — it may have been deleted.");
+      continue;
+    }
+
+    try {
+      switch (verb) {
+        case "confirm": {
+          const res = await confirmOneOrder(id);
+          if (!res.ok) row(false, res.error);
+          else row(true, describeShipment(res.shipment));
+          break;
+        }
+
+        case "cancel": {
+          const res = await cancelOneOrder(id);
+          row(res.ok, res.ok ? "Cancelled — stock restored." : res.error);
+          break;
+        }
+
+        case "draft": {
+          // Stage only. Never books, whatever the auto-ship setting says —
+          // the button is labelled "Send draft" and must do exactly that.
+          const res = await createDraftForOrder(id);
+          if (res.ok) {
+            row(
+              true,
+              res.skipped === "already staged"
+                ? "Already staged in NimbusPost."
+                : "Draft staged in NimbusPost."
+            );
+          } else {
+            row(false, res.error ?? `Skipped (${res.skipped ?? "unknown reason"}).`);
+          }
+          break;
+        }
+
+        case "book": {
+          const res = await dispatchOrder(id);
+          if (!res.ok) row(false, res.error);
+          else if (res.outcome === "drafted") {
+            // The draft-first gate, honoured in bulk too: an order with no
+            // draft gets one and stops. Say so rather than claiming success.
+            row(true, "No draft existed — one was staged. Press Book again to generate the AWB.");
+          } else {
+            row(
+              true,
+              `Booked — AWB ${res.awb}${res.courier ? ` (${res.courier})` : ""}.${
+                res.courierMismatch ? ` ${res.courierMismatch}` : ""
+              }`
+            );
+          }
+          break;
+        }
+
+        case "sync": {
+          const res = await syncOrderFromNimbus(id);
+          if (!res.ok) row(false, res.error);
+          else if (res.outcome === "not-booked") {
+            row(true, `Not booked in NimbusPost yet (${res.orderStatus}).`);
+          } else if (res.outcome === "tracked") {
+            row(true, res.deliveryStatus ? `Courier says: ${res.deliveryStatus}.` : "No new scan yet.");
+          } else {
+            row(true, `Synced — AWB ${res.awb}${res.courier ? ` (${res.courier})` : ""}.`);
+          }
+          break;
+        }
+      }
+    } catch (err) {
+      // A thrown row must not take the other forty-nine with it.
+      console.error(`[admin] bulk ${verb} failed for ${orderNumber}:`, err);
+      row(false, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  revalidatePath("/admin/orders");
+  revalidatePath("/admin");
+
+  return {
+    ok: true as const,
+    action: verb,
+    results,
+    succeeded: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+  };
+}
+
+/** Turn a pipeline outcome into one sentence for the bulk report. */
+function describeShipment(shipment: ConfirmationPipelineResult): string {
+  switch (shipment.outcome) {
+    case "booked":
+      return `Confirmed and booked — AWB ${shipment.awb}${shipment.courier ? ` (${shipment.courier})` : ""}.${shipment.caveat ? ` ${shipment.caveat}` : ""}`;
+    case "drafted":
+      return "Confirmed — draft staged in NimbusPost.";
+    case "skipped":
+      return `Confirmed. ${shipment.message}`;
+    case "failed":
+      // The order IS confirmed; only the shipment is not. Saying so is the
+      // difference between an operator who books it by hand and one who
+      // assumes it went out.
+      return `Confirmed, but the shipment did not go through: ${shipment.error}`;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Order pipeline settings                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The six pipeline columns on `SiteSettings`, edited from the Orders screen
+ * rather than Admin → Settings — they are operational, not branding, and this
+ * is where they are used.
+ *
+ * Scoped to exactly these fields so it can never overwrite anything the
+ * general settings form owns.
+ */
+const pipelineSchema = z.object({
+  orderConfirmMode: z.enum(["manual", "byPayment", "auto"]),
+  autoConfirmPrepaid: z.boolean(),
+  autoConfirmPartial: z.boolean(),
+  autoConfirmCod: z.boolean(),
+  autoShipOnConfirm: z.boolean(),
+  autoShipCourier: z.enum(["cheapest", "fastest"]),
+});
+
+export type PipelineSettingsInput = z.input<typeof pipelineSchema>;
+
+export async function updateOrderPipelineSettings(input: PipelineSettingsInput) {
+  await requireAdmin();
+  const parsed = pipelineSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false as const, error: parsed.error.issues[0].message };
+  }
+  const data = parsed.data;
+
+  await prisma.siteSettings.upsert({
+    where: { id: "main" },
+    update: data,
+    create: { id: "main", ...data },
+  });
+
+  revalidatePath("/admin/orders");
+  revalidatePath("/admin");
+  // The saved shape goes back so the form can rebase its "unsaved" comparison
+  // on what the database actually holds, not on what was typed.
+  return { ok: true as const, settings: normalisePipelineSettings(data) };
 }
 
 // -------- Messages --------

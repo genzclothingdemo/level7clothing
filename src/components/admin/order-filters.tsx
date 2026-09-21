@@ -92,7 +92,14 @@ export function OrderFilters() {
     setF((prev) => ({ ...prev, [key]: value }));
   }
 
-  /** Push a given state to the URL — the page reads its filters from there. */
+  /**
+   * Push a given state to the URL — the page reads its filters from there.
+   *
+   * The query string is rebuilt from scratch, which is also what drops
+   * `?page=`. That is deliberate: a new filter means a new result set, and
+   * landing on page 4 of it (or on an empty page 4 that reads as "no orders
+   * match") is the classic way a filtered list lies to you.
+   */
   function applyWith(state: FilterState) {
     const next = new URLSearchParams();
     if (state.q) next.set("q", state.q.trim());

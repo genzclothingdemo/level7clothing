@@ -30,32 +30,14 @@ import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
 import { sendOrderStatusEmail } from "@/lib/email";
 import { revalidatePath } from "next/cache";
+import { mapNimbusStatus, NOTIFY_STATUSES } from "@/lib/nimbus-status";
 
 // ---------------------------------------------------------------------------
-// Map NimbusPost status strings → your internal order statuses.
-// Normalise to lowercase before lookup.
+// The status table and the "worth emailing about" set both live in
+// lib/nimbus-status.ts. They used to be declared here AND in fulfilment.ts,
+// and had drifted — see that file for what that cost.
 // ---------------------------------------------------------------------------
-const NIMBUS_TO_STATUS: Record<string, string> = {
-  // Pickup
-  "pickup scheduled": "confirmed",
-  "pickup done": "confirmed",
-  "pickup cancelled": "pending",
-  "manifest created": "confirmed",
-  // In transit
-  "in transit": "shipped",
-  "reached destination": "shipped",
-  "out for delivery": "shipped",
-  // Delivered
-  delivered: "delivered",
-  // Failed / return
-  "delivery failed": "shipped", // still shipped, just attempted
-  "rto initiated": "shipped",
-  "rto in transit": "shipped",
-  "rto delivered": "cancelled",
-};
-
-// Statuses where we email the customer (the interesting milestones).
-const EMAIL_STATUSES = new Set(["shipped", "delivered", "cancelled"]);
+const EMAIL_STATUSES = NOTIFY_STATUSES;
 
 type StatusEntry = { status: string; note?: string; at: string };
 
@@ -121,7 +103,7 @@ export async function POST(req: NextRequest) {
   }
 
   // ---- 4. Map to internal status ------------------------------------------
-  const newStatus = NIMBUS_TO_STATUS[nimbusStatus] ?? null;
+  const newStatus = mapNimbusStatus(nimbusStatus);
 
   // Don't downgrade a delivered order.
   if (order.status === "delivered" && newStatus !== "delivered") {

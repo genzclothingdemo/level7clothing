@@ -1065,6 +1065,58 @@ export async function updateReturnDefaults(input: ReturnDefaultsInput) {
   return { ok: true as const, returnReasons: data.returnReasons };
 }
 
+/**
+ * How the catalogue currently answers "is this returnable?".
+ *
+ * Three states, not two: a product can say yes, say no, or say nothing and
+ * inherit `defaultReturnable`. The admin needs to see the split before a bulk
+ * write, because "make everything returnable" and "let everything inherit"
+ * look identical on screen until the store default is later flipped.
+ */
+export async function returnableBreakdown() {
+  await requireAdmin();
+  const [inherit, yes, no] = await Promise.all([
+    prisma.product.count({ where: { returnable: null } }),
+    prisma.product.count({ where: { returnable: true } }),
+    prisma.product.count({ where: { returnable: false } }),
+  ]).catch(() => [0, 0, 0]);
+  return { inherit, yes, no, total: inherit + yes + no };
+}
+
+/**
+ * Bulk-set `Product.returnable` across the whole catalogue.
+ *
+ * The per-product control is the normal way to do this; here for the cases
+ * where it isn't practical — turning returns off across a sale, or undoing a
+ * one-by-one mess.
+ *
+ * `"inherit"` writes NULL, which is the important one: it hands control back
+ * to `defaultReturnable` instead of freezing today's answer onto every row.
+ * Setting every product to an explicit true/false would mean a later change to
+ * the store default silently did nothing, which is the trap this option exists
+ * to avoid.
+ */
+export async function bulkSetReturnable(mode: "yes" | "no" | "inherit") {
+  await requireAdmin();
+  if (mode !== "yes" && mode !== "no" && mode !== "inherit") {
+    return { ok: false as const, error: "Unknown option" };
+  }
+
+  const returnable = mode === "inherit" ? null : mode === "yes";
+
+  try {
+    const res = await prisma.product.updateMany({ data: { returnable } });
+    // Product pages render the returns block, so the whole layout is stale.
+    revalidatePath("/", "layout");
+    revalidatePath("/admin/returns");
+    revalidatePath("/admin/products");
+    return { ok: true as const, updated: res.count };
+  } catch (err) {
+    console.error("[returns] bulkSetReturnable failed:", err);
+    return { ok: false as const, error: "Could not update the catalogue — please try again." };
+  }
+}
+
 /** Exposed for the admin filter tabs so the list and the UI can't drift. */
 export async function returnStatusCounts() {
   await requireAdmin();

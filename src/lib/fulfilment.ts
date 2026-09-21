@@ -1,5 +1,16 @@
+import { cache } from "react";
 import { prisma } from "./prisma";
 import { getSettings } from "./settings";
+import { mapNimbusStatus, NOTIFY_STATUSES } from "./nimbus-status";
+import {
+  normalisePipelineSettings,
+  pickCourier,
+  resolveCollection,
+  shouldAutoConfirm,
+  PIPELINE_DEFAULTS,
+  type Collection,
+  type PipelineSettings,
+} from "./orders-pipeline";
 import {
   isNimbusPostConfigured,
   createDraftOrder,
@@ -16,7 +27,46 @@ import {
  * Order fulfilment glue between the order/admin actions and the NimbusPost
  * client. Kept out of the "use server" action files so it can export plain
  * (non-action) helpers used by both.
+ *
+ * The *decisions* this file acts on live in `lib/orders-pipeline.ts` and are
+ * pure — this file only does the I/O.
  */
+
+/* ------------------------------------------------------------------ */
+/*  Pipeline settings                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The six pipeline columns off `SiteSettings`.
+ *
+ * Read directly rather than through `getSettings()` because `SettingsDTO` is
+ * the storefront's branding shape and does not carry them. Wrapped in React
+ * `cache()` for per-request dedup, exactly like `getSettings` — a bulk action
+ * over thirty orders must not be thirty round trips to Mumbai for the same
+ * six booleans (see the region note in CLAUDE.md).
+ *
+ * Any read failure degrades to {@link PIPELINE_DEFAULTS}, i.e. "a human
+ * confirms and nothing books itself". A database blip must never be the thing
+ * that starts spending the courier wallet.
+ */
+export const getPipelineSettings = cache(async (): Promise<PipelineSettings> => {
+  try {
+    const row = await prisma.siteSettings.findUnique({
+      where: { id: "main" },
+      select: {
+        orderConfirmMode: true,
+        autoConfirmPrepaid: true,
+        autoConfirmPartial: true,
+        autoConfirmCod: true,
+        autoShipOnConfirm: true,
+        autoShipCourier: true,
+      },
+    });
+    return normalisePipelineSettings(row);
+  } catch {
+    return PIPELINE_DEFAULTS;
+  }
+});
 
 type OrderItem = {
   productId?: string;
@@ -26,7 +76,9 @@ type OrderItem = {
 };
 
 /** Build the parcel + consignee payload for an order, incl. per-product size. */
-async function buildShipmentInput(orderId: string): Promise<ShipmentInput | null> {
+async function buildShipmentInput(
+  orderId: string
+): Promise<{ input: ShipmentInput; collection: Collection } | null> {
   const order = await prisma.order.findUnique({ where: { id: orderId } });
   if (!order) return null;
 
@@ -55,27 +107,37 @@ async function buildShipmentInput(orderId: string): Promise<ShipmentInput | null
     if (p?.heightCm) height = Math.max(height, p.heightCm);
   }
 
-  // Remaining COD to collect (balanceDue); zero → prepaid shipment.
-  const cod = order.balanceDue > 0;
+  // What the courier is told to collect. ONE rule, in lib/orders-pipeline.ts —
+  // this used to be an inline `order.balanceDue > 0`, which was right for COD
+  // and prepaid but silently wrong for a *customised* order paid straight to
+  // the owner (balanceDue stays at the full total, so the courier would have
+  // asked the customer to pay all over again).
+  const collection = resolveCollection(order);
 
   return {
-    orderNumber: order.orderNumber,
-    paymentType: cod ? "cod" : "prepaid",
-    orderAmount: cod ? order.balanceDue : order.total,
-    consignee: {
-      name: order.customerName,
-      address: order.address,
-      city: order.city,
-      state: order.state,
-      pincode: order.pincode,
-      phone: order.phone,
-    },
-    items: items.map((i) => ({ name: i.name, qty: i.quantity, price: i.price })),
-    parcel: {
-      weight: weight || undefined,
-      length: length || undefined,
-      breadth: breadth || undefined,
-      height: height || undefined,
+    collection,
+    input: {
+      orderNumber: order.orderNumber,
+      paymentType: collection.paymentType,
+      // COD → exactly the collectable. Prepaid → the declared value of the
+      // goods, which is never sent as `order_collectable_amount`.
+      orderAmount:
+        collection.paymentType === "cod" ? collection.collectAmount : order.total,
+      consignee: {
+        name: order.customerName,
+        address: order.address,
+        city: order.city,
+        state: order.state,
+        pincode: order.pincode,
+        phone: order.phone,
+      },
+      items: items.map((i) => ({ name: i.name, qty: i.quantity, price: i.price })),
+      parcel: {
+        weight: weight || undefined,
+        length: length || undefined,
+        breadth: breadth || undefined,
+        height: height || undefined,
+      },
     },
   };
 }
@@ -98,17 +160,20 @@ export async function createDraftForOrder(
     return { ok: true, skipped: "already staged", nimbusOrderId: order.nimbusShipmentId ?? undefined };
   }
 
-  const input = await buildShipmentInput(orderId);
-  if (!input) return { ok: false, error: "Order not found" };
+  const built = await buildShipmentInput(orderId);
+  if (!built) return { ok: false, error: "Order not found" };
 
   try {
-    const nimbusOrderId = await createDraftOrder(input);
+    const nimbusOrderId = await createDraftOrder(built.input);
     const history = Array.isArray(order.statusHistory)
       ? (order.statusHistory as unknown as { status: string; note?: string; at: string }[])
       : [];
     history.push({
       status: order.status,
-      note: "Draft shipment created in NimbusPost — ready to dispatch",
+      // The collection line matters here: it is the only place a human can
+      // check, before any money moves, that the courier will be asked for the
+      // right amount.
+      note: `Draft shipment created in NimbusPost — ready to dispatch. ${built.collection.reason}`,
       at: new Date().toISOString(),
     });
     await prisma.order.update({
@@ -231,8 +296,9 @@ export async function getCourierOptionsForOrder(
   if (!isNimbusPostConfigured()) {
     return { ok: false, error: "NimbusPost isn't configured." };
   }
-  const input = await buildShipmentInput(orderId);
-  if (!input) return { ok: false, error: "Order not found" };
+  const built = await buildShipmentInput(orderId);
+  if (!built) return { ok: false, error: "Order not found" };
+  const { input } = built;
 
   const p = input.parcel ?? {};
   const options = await listCourierOptions({
@@ -373,6 +439,263 @@ export async function dispatchOrder(orderId: string): Promise<DispatchResult> {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/*  Confirmation → shipment                                            */
+/* ------------------------------------------------------------------ */
+
+/** Append one entry to an order's history without clobbering the rest. */
+async function appendHistory(orderId: string, status: string, note: string) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { statusHistory: true },
+  });
+  const history = Array.isArray(order?.statusHistory)
+    ? (order.statusHistory as unknown as { status: string; note?: string; at: string }[])
+    : [];
+  history.push({ status, note, at: new Date().toISOString() });
+  await prisma.order
+    .update({
+      where: { id: orderId },
+      data: { statusHistory: history as unknown as object[] },
+    })
+    .catch(() => {});
+}
+
+export type ConfirmationPipelineResult =
+  /** The documented default: an unbooked draft is waiting for a human. */
+  | { outcome: "drafted"; nimbusOrderId: string; message: string }
+  | {
+      outcome: "booked";
+      awb: string;
+      courier: string | null;
+      /** Filled when the quote could not be taken, or the carrier was overridden. */
+      caveat?: string;
+      message: string;
+    }
+  /** Nothing to do — shipping is off, unconfigured, or already staged/booked. */
+  | { outcome: "skipped"; message: string }
+  /** The draft is intact; the booking is not. The order is NOT marked shipped. */
+  | { outcome: "failed"; error: string; drafted: boolean };
+
+/**
+ * Everything that happens to a shipment the moment an order becomes confirmed.
+ *
+ * One entry point, used by checkout, by payment verification and by every
+ * admin confirm (single and bulk), so "what happens on confirm" cannot differ
+ * depending on who did the confirming.
+ *
+ * **Draft-first stays the default.** With `autoShipOnConfirm` off this stages
+ * an unbooked NimbusPost draft and stops — no courier, no AWB, no wallet
+ * charge — which is the review gate CLAUDE.md records as deliberate. Turning
+ * the setting on is the only way past it.
+ *
+ * A booking that fails leaves the draft exactly where it was and reports the
+ * error. It never writes `status: "shipped"`, and it records the failure in
+ * the order's history, because an order that claims to have shipped and has
+ * not is the one state an operator cannot recover from — they stop looking.
+ */
+export async function runConfirmationPipeline(
+  orderId: string
+): Promise<ConfirmationPipelineResult> {
+  const pipeline = await getPipelineSettings();
+
+  // Step 1 — always stage a draft. Free, idempotent, and the prerequisite for
+  // booking either way.
+  let staged: Awaited<ReturnType<typeof createDraftForOrder>>;
+  try {
+    staged = await createDraftForOrder(orderId);
+  } catch (err) {
+    staged = { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
+  if (!staged.ok) {
+    // "shipping disabled" / "not configured" is a settings state, not a fault.
+    if (staged.skipped) {
+      return { outcome: "skipped", message: `No shipment staged (${staged.skipped}).` };
+    }
+    return {
+      outcome: "failed",
+      drafted: false,
+      error: staged.error || "Could not stage a draft shipment in NimbusPost.",
+    };
+  }
+
+  const alreadyStaged = staged.skipped === "already staged";
+  const nimbusOrderId = staged.nimbusOrderId ?? null;
+
+  // An order that already carries an AWB is finished with this pipeline.
+  // Falling through would hand `dispatchOrder` an order it refuses, turning a
+  // no-op into a red "auto-ship failed" entry on a perfectly shipped parcel.
+  const current = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { trackingNumber: true },
+  });
+  if (current?.trackingNumber) {
+    return {
+      outcome: "skipped",
+      message: `Already booked — AWB ${current.trackingNumber}.`,
+    };
+  }
+
+  // Step 2 — stop here unless the admin explicitly opted into unattended
+  // booking. This is the default, and the whole review gate.
+  if (!pipeline.autoShipOnConfirm) {
+    if (!nimbusOrderId) {
+      return { outcome: "skipped", message: "A shipment is already staged for this order." };
+    }
+    return {
+      outcome: "drafted",
+      nimbusOrderId,
+      message: alreadyStaged
+        ? "A draft was already staged in NimbusPost."
+        : "Draft staged in NimbusPost — review it, then book to generate the AWB.",
+    };
+  }
+
+  // Step 3 — auto-ship is on. Choose the courier the admin asked for.
+  //
+  // A quote failure does NOT abort the booking. Serviceability is a separate,
+  // frequently flaky endpoint, and the admin has opted into unattended
+  // shipping; letting NimbusPost allocate is better than silently leaving a
+  // parcel unshipped. The caveat is reported so the choice is visible.
+  let caveat: string | undefined;
+  const quote = await getCourierOptionsForOrder(orderId).catch(() => ({
+    ok: false as const,
+    error: "Courier rates could not be fetched.",
+  }));
+
+  if (quote.ok) {
+    const chosen = pickCourier(quote.options, pipeline.autoShipCourier);
+    if (chosen) {
+      await chooseCourierForOrder(orderId, chosen.courierId, chosen.name).catch(() => {});
+    }
+  } else {
+    caveat = `Could not price the couriers (${quote.error}), so NimbusPost allocated one instead of the ${pipeline.autoShipCourier} option.`;
+  }
+
+  // Step 4 — book. This is the call that spends the wallet.
+  const booked = await dispatchOrder(orderId).catch((err) => ({
+    ok: false as const,
+    error: err instanceof Error ? err.message : String(err),
+  }));
+
+  if (!booked.ok) {
+    // The draft survives — `dispatchOrder` only writes on success. Record the
+    // failure so it is visible on the order rather than only in a toast that
+    // has already gone.
+    await appendHistory(
+      orderId,
+      "confirmed",
+      `Auto-ship failed — the draft is still waiting in NimbusPost. ${booked.error}`
+    );
+    return { outcome: "failed", drafted: true, error: booked.error };
+  }
+
+  // `dispatchOrder` stages-and-stops when nothing was drafted yet. It cannot
+  // happen here (step 1 just staged one), but the type says it can.
+  if (booked.outcome === "drafted") {
+    return {
+      outcome: "drafted",
+      nimbusOrderId: booked.nimbusOrderId,
+      message: "Draft staged in NimbusPost — book it to generate the AWB.",
+    };
+  }
+
+  // Tell the customer it shipped. Nothing else on this path will: the manual
+  // route emails from `shipOrderViaNimbus` in the admin action, and there is
+  // no admin here. Without this an auto-booked parcel arrives unannounced,
+  // with tracking the customer was never sent.
+  await notifyStatus(orderId, "shipped").catch((err) =>
+    console.error("[fulfilment] auto-ship email failed:", err)
+  );
+
+  const mismatch = booked.courierMismatch;
+  return {
+    outcome: "booked",
+    awb: booked.awb,
+    courier: booked.courier,
+    caveat: [caveat, mismatch].filter(Boolean).join(" ") || undefined,
+    message: `Booked automatically — AWB ${booked.awb}${booked.courier ? ` (${booked.courier})` : ""}.`,
+  };
+}
+
+export type AutoConfirmResult = {
+  confirmed: boolean;
+  /** Plain English — the same sentence written into the order's history. */
+  reason: string;
+  /** Only present when the order actually confirmed. */
+  shipment: ConfirmationPipelineResult | null;
+};
+
+/**
+ * Confirm an order if — and only if — the pipeline settings say so, then run
+ * the shipment step.
+ *
+ * Called from checkout (COD / customised) and from payment verification
+ * (prepaid / partial), so a prepaid order that abandons its Razorpay window
+ * and a COD order placed at 3am go through exactly the same gate.
+ *
+ * **Deliberately sends no email.** Both call sites have already sent the order
+ * confirmation to the customer; a second "your order is confirmed" message
+ * seconds later reads as a duplicate. The admin's manual confirm still emails,
+ * because there the status change is news.
+ */
+export async function autoConfirmOrder(orderId: string): Promise<AutoConfirmResult> {
+  const [pipeline, order] = await Promise.all([
+    getPipelineSettings(),
+    prisma.order.findUnique({
+      where: { id: orderId },
+      select: {
+        status: true,
+        paymentMethod: true,
+        paymentStatus: true,
+        statusHistory: true,
+      },
+    }),
+  ]);
+
+  if (!order) return { confirmed: false, reason: "Order not found.", shipment: null };
+  if (order.status !== "pending") {
+    return {
+      confirmed: false,
+      reason: `Order is already ${order.status}.`,
+      shipment: null,
+    };
+  }
+
+  const decision = shouldAutoConfirm(order, pipeline);
+  if (!decision.confirm) {
+    return { confirmed: false, reason: decision.reason, shipment: null };
+  }
+
+  const history = Array.isArray(order.statusHistory)
+    ? (order.statusHistory as unknown as { status: string; note?: string; at: string }[])
+    : [];
+  history.push({
+    status: "confirmed",
+    note: `Confirmed automatically — ${decision.reason}`,
+    at: new Date().toISOString(),
+  });
+
+  await prisma.order.update({
+    where: { id: orderId },
+    data: { status: "confirmed", statusHistory: history as unknown as object[] },
+  });
+
+  let shipment: ConfirmationPipelineResult;
+  try {
+    shipment = await runConfirmationPipeline(orderId);
+  } catch (err) {
+    shipment = {
+      outcome: "failed",
+      drafted: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  return { confirmed: true, reason: decision.reason, shipment };
+}
+
 export type SyncResult =
   | { ok: true; outcome: "synced"; awb: string; courier: string | null }
   | { ok: true; outcome: "not-booked"; orderStatus: string }
@@ -445,21 +768,14 @@ export async function syncOrderFromNimbus(orderId: string): Promise<SyncResult> 
   }
 }
 
-/** NimbusPost tracking statuses → our order statuses. Same table the webhook uses. */
-const TRACKING_TO_STATUS: Record<string, string> = {
-  "pickup scheduled": "confirmed",
-  "pickup done": "shipped",
-  "picked up": "shipped",
-  "manifest created": "confirmed",
-  "in transit": "shipped",
-  "reached destination": "shipped",
-  "out for delivery": "shipped",
-  delivered: "delivered",
-  "delivery failed": "shipped",
-  "rto initiated": "shipped",
-  "rto in transit": "shipped",
-  "rto delivered": "cancelled",
-};
+/*
+ * The status table lives in lib/nimbus-status.ts.
+ *
+ * It was duplicated here, under a comment claiming it was "the same table the
+ * webhook uses" — it wasn't. `pickup done` mapped to `shipped` here and
+ * `confirmed` there, so the same courier event produced a different order
+ * status depending on whether the webhook or this poller saw it first.
+ */
 
 type TrackingPayload = {
   status?: string;
@@ -517,7 +833,7 @@ export async function refreshTracking(
       };
     }
 
-    const mapped = TRACKING_TO_STATUS[rawStatus.toLowerCase()] ?? null;
+    const mapped = mapNimbusStatus(rawStatus);
     // Never walk a delivered order backwards on a late or duplicate scan.
     const nextStatus =
       order.status === "delivered" ? "delivered" : (mapped ?? order.status);
@@ -572,7 +888,7 @@ export async function refreshTracking(
   }
 }
 
-const NOTIFY_STATUSES = new Set(["shipped", "delivered", "cancelled"]);
+// NOTIFY_STATUSES is imported from ./nimbus-status — same reason as the map.
 
 async function notifyStatus(orderId: string, status: string) {
   if (!NOTIFY_STATUSES.has(status)) return;

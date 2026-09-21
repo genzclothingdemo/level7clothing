@@ -24,10 +24,19 @@ export function slugify(text: string): string {
 }
 
 export function orderNumber(): string {
-  // AV-<base36 time><2 random chars> — human friendly, hard to collide
+  // L7-<base36 time><2 random chars> — human friendly, hard to collide.
+  //
+  // The prefix was `AV-` (Artvelle, the unrelated resin store this codebase
+  // was copied from) — an upstream regression that CLAUDE.md explicitly rules
+  // out. Orders placed while it was wrong keep their `AV-` numbers: a customer
+  // has that reference in their confirmation email, so rewriting history would
+  // break the one string they can quote at support.
+  //
+  // Nothing parses the prefix — it is display and search only — so the two
+  // coexist safely.
   const t = Date.now().toString(36).toUpperCase();
   const r = Math.random().toString(36).slice(2, 4).toUpperCase();
-  return `AV-${t}${r}`;
+  return `L7-${t}${r}`;
 }
 
 /**

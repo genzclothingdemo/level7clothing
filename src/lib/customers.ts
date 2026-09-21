@@ -1036,7 +1036,7 @@ export async function getCustomerProducts(
 
 /**
  * Typo-tolerant search over the whole record — name, every email and phone the
- * person has used, and their order numbers, so "AV-XYZ" finds the buyer.
+ * person has used, and their order numbers, so "L7-XYZ" (or a legacy "AV-XYZ") finds the buyer.
  */
 export function searchCustomers(
   customers: CustomerRecord[],

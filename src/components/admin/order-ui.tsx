@@ -1,6 +1,14 @@
 "use client";
 
-import type { LucideIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  CircleDashed,
+  Clock,
+  PackageCheck,
+  Truck,
+  type LucideIcon,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -98,6 +106,60 @@ export function Badge({
     >
       {children}
     </span>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Order status                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One status, one colour, one icon, one word.
+ *
+ * The icon is not decoration. Roughly one man in twelve cannot separate the
+ * warn-orange of `pending` from the success-green of `delivered`, and this is
+ * a screen people scan down a column of. Every status therefore carries a
+ * distinct glyph *and* its label, so the colour is the third signal rather
+ * than the only one.
+ */
+export const ORDER_STATUS_META: Record<
+  string,
+  { label: string; tone: BadgeTone; icon: LucideIcon }
+> = {
+  pending: { label: "Pending", tone: "warn", icon: Clock },
+  confirmed: { label: "Confirmed", tone: "info", icon: CheckCircle2 },
+  shipped: { label: "Shipped", tone: "accent", icon: Truck },
+  delivered: { label: "Delivered", tone: "success", icon: PackageCheck },
+  cancelled: { label: "Cancelled", tone: "danger", icon: AlertTriangle },
+  payment_failed: { label: "Payment failed", tone: "danger", icon: AlertTriangle },
+};
+
+export function statusMeta(status: string) {
+  return (
+    ORDER_STATUS_META[status] ?? {
+      label: status.replace(/_/g, " "),
+      tone: "neutral" as BadgeTone,
+      icon: CircleDashed,
+    }
+  );
+}
+
+export function StatusPill({
+  status,
+  title,
+  className,
+}: {
+  status: string;
+  title?: string;
+  className?: string;
+}) {
+  const meta = statusMeta(status);
+  const Icon = meta.icon;
+  return (
+    <Badge tone={meta.tone} title={title} className={className}>
+      <Icon className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
+      {meta.label}
+    </Badge>
   );
 }
 

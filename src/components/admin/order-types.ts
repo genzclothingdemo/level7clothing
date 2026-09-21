@@ -91,3 +91,84 @@ export type CourierOption = {
   cod: number;
   surcharges: number;
 };
+
+/* ------------------------------------------------------------------ */
+/*  Bulk actions                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The bulk verbs, declared HERE rather than in `app/actions/admin.ts`.
+ *
+ * That file carries `"use server"`, and a `"use server"` module may only
+ * export async functions — a plain `const` array exported from it fails the
+ * build with no type error to warn you first. This module has no directive,
+ * so the server action and the table can share one list.
+ */
+export const BULK_ORDER_ACTIONS = [
+  "confirm",
+  "cancel",
+  "draft",
+  "book",
+  "sync",
+] as const;
+
+export type BulkOrderAction = (typeof BULK_ORDER_ACTIONS)[number];
+
+/** One row's outcome from a bulk run. Every selected order gets exactly one. */
+export type BulkRowResult = {
+  id: string;
+  orderNumber: string;
+  ok: boolean;
+  /** Shown verbatim — it says what happened, not just "error". */
+  message: string;
+};
+
+export type BulkRunResult = {
+  action: BulkOrderAction;
+  results: BulkRowResult[];
+  succeeded: number;
+  failed: number;
+};
+
+/**
+ * What each verb does and how loudly to warn about it. `danger` marks the two
+ * that cannot be undone from this screen; `accent` marks the one that spends
+ * money.
+ */
+export const BULK_ACTION_META: Record<
+  BulkOrderAction,
+  { label: string; verb: string; tone: "solid" | "accent" | "danger"; confirm: string | null }
+> = {
+  confirm: {
+    label: "Confirm",
+    verb: "Confirming",
+    tone: "solid",
+    confirm: "Confirm the selected orders? Each customer is emailed and a NimbusPost draft is staged.",
+  },
+  cancel: {
+    label: "Cancel",
+    verb: "Cancelling",
+    tone: "danger",
+    confirm: "Cancel the selected orders and restore their stock? This cannot be undone.",
+  },
+  draft: {
+    label: "Send draft",
+    verb: "Staging drafts for",
+    tone: "solid",
+    // Free and reversible in the NimbusPost dashboard — no prompt.
+    confirm: null,
+  },
+  book: {
+    label: "Book AWB",
+    verb: "Booking",
+    tone: "accent",
+    confirm:
+      "Book the selected orders with NimbusPost? This allocates couriers, generates AWBs and charges your NimbusPost wallet.",
+  },
+  sync: {
+    label: "Sync",
+    verb: "Syncing",
+    tone: "solid",
+    confirm: null,
+  },
+};

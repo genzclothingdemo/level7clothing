@@ -17,7 +17,12 @@ import {
   razorpayPublicKey,
   verifyRazorpaySignature,
 } from "@/lib/razorpay";
-import { createDraftForOrder } from "@/lib/fulfilment";
+import {
+  autoConfirmOrder,
+  getPipelineSettings,
+  runConfirmationPipeline,
+} from "@/lib/fulfilment";
+import { shouldAutoConfirm } from "@/lib/orders-pipeline";
 import { calculateShippingRate } from "@/lib/nimbuspost";
 import { isCouponClaimError, redeemCoupon, validateCoupon } from "@/lib/coupons";
 
@@ -481,7 +486,13 @@ export async function placeOrder(input: PlaceOrderInput) {
     }
   }
 
-  // ---- COD / Direct: confirm immediately + email. ----
+  // ---- COD / Direct: email, then let the pipeline decide. ----
+  //
+  // Nothing is confirmed here by hand. `autoConfirmOrder` applies the store's
+  // `orderConfirmMode` (see lib/orders-pipeline.ts) and, when it does confirm,
+  // stages the NimbusPost draft — or books it, if the admin has switched
+  // auto-ship on. On the shipped defaults (`manual`) this leaves the order
+  // pending for a human, which is what the Orders screen is for.
   try {
     await sendOrderEmails(settings, {
       orderNumber: order.orderNumber,
@@ -502,6 +513,12 @@ export async function placeOrder(input: PlaceOrderInput) {
   } catch (err) {
     console.error("[orders] email failed:", err);
   }
+
+  // Best-effort: a pipeline problem must never fail an order the customer has
+  // already placed. Anything that goes wrong is recorded on the order.
+  await autoConfirmOrder(order.id).catch((err) =>
+    console.error("[orders] auto-confirm failed:", err)
+  );
 
   return { ok: true as const, orderNumber: order.orderNumber };
 }
@@ -590,34 +607,56 @@ export async function verifyRazorpayPayment(input: VerifyPaymentInput) {
   // this was a partial (advance) payment.
   const amountPaid = Math.max(0, order.total - order.balanceDue);
   const isPartial = order.balanceDue > 0;
+  const paymentStatus = isPartial ? "partial" : "paid";
+
+  // Whether a verified payment also *confirms* the order is the store's
+  // decision, not this function's — it used to be hard-coded to "confirmed",
+  // which made Admin → Orders' confirmation mode a lie for every prepaid
+  // order. The same pure rule the checkout path uses decides it here, now
+  // that the real post-payment status is known.
+  const pipeline = await getPipelineSettings();
+  const decision = shouldAutoConfirm(
+    { paymentMethod: order.paymentMethod, paymentStatus },
+    pipeline
+  );
+
+  const paidNote = isPartial
+    ? `Advance received (Razorpay) — balance ₹${order.balanceDue} on delivery.`
+    : "Payment received (Razorpay).";
 
   const history = Array.isArray(order.statusHistory)
     ? (order.statusHistory as unknown as { status: string; note?: string; at: string }[])
     : [];
   history.push({
-    status: "confirmed",
-    note: isPartial
-      ? `Advance received (Razorpay) — balance ₹${order.balanceDue} on delivery. Order confirmed.`
-      : "Payment received (Razorpay). Order confirmed.",
+    status: decision.confirm ? "confirmed" : order.status,
+    note: decision.confirm
+      ? `${paidNote} Order confirmed automatically.`
+      : `${paidNote} ${decision.reason}`,
     at: new Date().toISOString(),
   });
 
-  // A paid online order is auto-confirmed (no manual acceptance needed).
   await prisma.order.update({
     where: { id: order.id },
     data: {
-      paymentStatus: isPartial ? "partial" : "paid",
+      paymentStatus,
       amountPaid,
-      status: "confirmed",
+      // Payment and confirmation are separate facts. The money is recorded
+      // either way; only the status waits.
+      ...(decision.confirm ? { status: "confirmed" } : {}),
       razorpayPaymentId: data.razorpayPaymentId,
       statusHistory: history as unknown as object[],
     },
   });
 
-  // Stage a NimbusPost draft shipment so admin can dispatch in one click.
-  await createDraftForOrder(order.id).catch((err) =>
-    console.error("[orders] draft shipment failed:", err)
-  );
+  // Confirmed → stage the draft (or book it, when auto-ship is on). Not
+  // confirmed → nothing is staged, because "order confirmed ⇒ draft staged"
+  // is the contract, and a draft for an order nobody has accepted is clutter
+  // the admin has to clean out of NimbusPost by hand.
+  if (decision.confirm) {
+    await runConfirmationPipeline(order.id).catch((err) =>
+      console.error("[orders] draft shipment failed:", err)
+    );
+  }
 
   // Now that the order is paid, send the confirmation emails.
   try {

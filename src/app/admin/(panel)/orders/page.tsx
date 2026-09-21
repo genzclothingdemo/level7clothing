@@ -2,9 +2,17 @@ import { ShoppingCart } from "lucide-react";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
+import { getPipelineSettings } from "@/lib/fulfilment";
+import { PIPELINE_DEFAULTS } from "@/lib/orders-pipeline";
 import { OrdersTable, type AdminOrder } from "@/components/admin/orders-table";
 import type { StatusEntry } from "@/components/admin/order-types";
 import { OrderFilters } from "@/components/admin/order-filters";
+import { OrderPipelinePanel } from "@/components/admin/order-pipeline-panel";
+import {
+  OrderPagination,
+  ORDERS_PAGE_SIZE,
+  parsePageParam,
+} from "@/components/admin/order-pagination";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Orders" };
@@ -22,6 +30,8 @@ type SP = {
   /** "1" = only orders flagged as needing customisation. */
   custom?: string;
   match?: string;
+  /** 1-based page number. Absent means page 1. */
+  page?: string;
 };
 
 function buildWhere(sp: SP): Prisma.OrderWhereInput {
@@ -88,19 +98,33 @@ export default async function AdminOrders({
   const where = buildWhere(sp);
   const hasFilters = Object.keys(where).length > 0;
 
-  const [raw, totalCount, settings] = await Promise.all([
-    prisma.order
-      .findMany({
-        where,
-        orderBy: { createdAt: "desc" },
-        // Return count per order so the list can show "1 return" without the
-        // admin opening each card to find out.
-        include: { _count: { select: { returnRequests: true } } },
-      })
-      .catch(() => []),
+  // Paged in SQL, not in memory. An orders table only grows, and every row
+  // carries its whole item list — shipping a year of orders into the RSC
+  // payload to render 25 of them is the kind of thing that turns a 0.3 s page
+  // into a 4 s one (see the region note in CLAUDE.md).
+  const [matchCount, totalCount, settings, pipeline] = await Promise.all([
+    prisma.order.count({ where }).catch(() => 0),
     prisma.order.count().catch(() => 0),
     getSettings(),
+    getPipelineSettings().catch(() => PIPELINE_DEFAULTS),
   ]);
+
+  const totalPages = Math.max(1, Math.ceil(matchCount / ORDERS_PAGE_SIZE));
+  // Clamped, so a stale `?page=9` from a wider filter lands on the last page
+  // of results rather than on a blank screen that reads as "no orders".
+  const page = Math.min(parsePageParam(sp.page), totalPages);
+
+  const raw = await prisma.order
+    .findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      skip: (page - 1) * ORDERS_PAGE_SIZE,
+      take: ORDERS_PAGE_SIZE,
+      // Return count per order so the list can show "1 return" without the
+      // admin opening each card to find out.
+      include: { _count: { select: { returnRequests: true } } },
+    })
+    .catch(() => []);
 
   // Line items store the productId but not the slug, so resolve the storefront
   // slug for every product these orders reference — that's what turns a line
@@ -189,13 +213,15 @@ export default async function AdminOrders({
   return (
     <div>
       <h1 className="font-serif text-3xl">Orders</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
+      <p className="mt-1 text-sm text-muted-foreground tabular-nums">
         {hasFilters
-          ? `${orders.length} of ${totalCount} order${totalCount === 1 ? "" : "s"} match your filters`
+          ? `${matchCount} of ${totalCount} order${totalCount === 1 ? "" : "s"} match your filters`
           : `${totalCount} order${totalCount === 1 ? "" : "s"}`}
+        {totalPages > 1 ? ` · page ${page} of ${totalPages}` : ""}
       </p>
 
-      <div className="mt-4">
+      <div className="mt-4 space-y-2">
+        <OrderPipelinePanel settings={pipeline} />
         <OrderFilters />
       </div>
 
@@ -216,6 +242,14 @@ export default async function AdminOrders({
           <OrdersTable
             orders={orders}
             returnWindowDays={settings.returnsEnabled ? settings.returnWindowDays : null}
+            totalMatching={matchCount}
+          />
+          <OrderPagination
+            page={page}
+            totalPages={totalPages}
+            total={matchCount}
+            pageSize={ORDERS_PAGE_SIZE}
+            params={sp}
           />
         </div>
       )}

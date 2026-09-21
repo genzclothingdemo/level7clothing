@@ -7,15 +7,23 @@ import { getAdminSession } from "@/lib/auth";
 import { DEFAULT_SETTINGS } from "@/lib/settings";
 import { draftReturnPickup } from "@/lib/fulfilment";
 import {
+  DEFAULT_REFUND_SETTINGS,
+  MAX_REFUND_REFERENCE_LENGTH,
   MAX_RETURN_REASONS,
   MAX_RETURN_REASON_LENGTH,
+  REFUND_METHODS,
   RETURN_STATUSES,
+  computeRefund,
   evaluateReturnEligibility,
   formatReturnDate,
   generateReturnNumber,
   isReturnStatus,
   matchReturnReason,
   normaliseReturnReasons,
+  normaliseUpiId,
+  type RefundMethod,
+  type RefundOrder,
+  type RefundSettings,
   type ReturnBlock,
 } from "@/lib/returns";
 
@@ -33,6 +41,9 @@ type ReturnSettings = {
   returnWindowDays: number;
   returnReasons: string[];
   returnPolicyNote: string;
+  /** The money rules, read from the same row in the same query. */
+  refund: RefundSettings;
+  refundPolicyNote: string;
 };
 
 /**
@@ -56,6 +67,11 @@ async function readReturnSettings(): Promise<ReturnSettings | null> {
         returnWindowDays: true,
         returnReasons: true,
         returnPolicyNote: true,
+        refundFeePercent: true,
+        refundFeeFlat: true,
+        partialAdvanceRefundable: true,
+        waiveRefundFeeOnOurFault: true,
+        refundPolicyNote: true,
       },
     });
     return {
@@ -64,12 +80,81 @@ async function readReturnSettings(): Promise<ReturnSettings | null> {
       returnWindowDays: row?.returnWindowDays ?? DEFAULT_SETTINGS.returnWindowDays,
       returnReasons: normaliseReturnReasons(row?.returnReasons),
       returnPolicyNote: (row?.returnPolicyNote ?? "").trim(),
+      // A missing row means a fresh database, so the schema defaults apply —
+      // which for the fee means zero. Never invent a deduction.
+      refund: {
+        refundFeePercent:
+          row?.refundFeePercent ?? DEFAULT_REFUND_SETTINGS.refundFeePercent,
+        refundFeeFlat: row?.refundFeeFlat ?? DEFAULT_REFUND_SETTINGS.refundFeeFlat,
+        partialAdvanceRefundable:
+          row?.partialAdvanceRefundable ??
+          DEFAULT_REFUND_SETTINGS.partialAdvanceRefundable,
+        waiveRefundFeeOnOurFault:
+          row?.waiveRefundFeeOnOurFault ??
+          DEFAULT_REFUND_SETTINGS.waiveRefundFeeOnOurFault,
+      },
+      refundPolicyNote: (row?.refundPolicyNote ?? "").trim(),
     };
   } catch (err) {
     console.error("[returns] could not read the return policy:", err);
     return null;
   }
 }
+
+/* ------------------------------------------------------------ refund maths */
+
+/**
+ * The money columns `computeRefund` needs, plus the one thing it cannot see
+ * from a single row: what earlier returns on the SAME order have already paid
+ * out. Without that, two requests against one order would each be measured
+ * against the full pot and could, between them, refund more than was collected.
+ *
+ * `siblings` is every other return on the order. Rejected and cancelled ones
+ * are skipped — no money left on those. A `refundAmount` is counted from the
+ * moment it is recorded (at approval), not only once paid, so an approved-but-
+ * unpaid refund still reserves its share of the pot.
+ */
+function refundOrderFrom(
+  order: {
+    total: number;
+    amountPaid: number;
+    balanceDue: number;
+    subtotal: number;
+    discountTotal: number;
+    status: string;
+    paymentStatus: string;
+  },
+  siblings: { id: string; status: string; refundAmount: number | null }[],
+  excludeRequestId?: string
+): RefundOrder {
+  const alreadyRefunded = siblings.reduce((sum, r) => {
+    if (r.id === excludeRequestId) return sum;
+    if (r.status === "rejected" || r.status === "cancelled") return sum;
+    return sum + (r.refundAmount ?? 0);
+  }, 0);
+
+  return {
+    total: order.total,
+    amountPaid: order.amountPaid,
+    balanceDue: order.balanceDue,
+    subtotal: order.subtotal,
+    discountTotal: order.discountTotal,
+    status: order.status,
+    paymentStatus: order.paymentStatus,
+    alreadyRefunded,
+  };
+}
+
+/** The exact shape every refund query needs. One place, so they can't drift. */
+const REFUND_ORDER_SELECT = {
+  total: true,
+  amountPaid: true,
+  balanceDue: true,
+  subtotal: true,
+  discountTotal: true,
+  status: true,
+  paymentStatus: true,
+} as const;
 
 function revalidateReturns(orderNumber?: string | null) {
   revalidatePath("/admin/returns");
@@ -260,6 +345,21 @@ export type ReturnPolicySnapshot = {
   message: string;
   /** Per-line verdict, which adds the product's own rules on top. */
   lines: ReturnLineVerdict[];
+  /**
+   * Everything the form needs to work out the refund itself, so the figure a
+   * shopper is shown before submitting comes from the same `computeRefund`
+   * the admin approves with. Sending the inputs rather than a number lets the
+   * preview update live as they change the reason (the our-fault waiver), with
+   * no extra round trip and no second implementation of the maths.
+   *
+   * Null only when the order could not be read.
+   */
+  refund: {
+    order: RefundOrder;
+    settings: RefundSettings;
+    /** The store's plain-English refund rules, shown above the preview. */
+    note: string;
+  } | null;
 };
 
 const POLICY_UNAVAILABLE: ReturnPolicySnapshot = {
@@ -273,6 +373,7 @@ const POLICY_UNAVAILABLE: ReturnPolicySnapshot = {
   code: "store_disabled",
   message: "",
   lines: [],
+  refund: null,
 };
 
 /**
@@ -303,10 +404,12 @@ export async function getReturnPolicySnapshot(
     .findUnique({
       where: { orderNumber: wanted },
       select: {
-        status: true,
+        ...REFUND_ORDER_SELECT,
         createdAt: true,
         deliveryStatusAt: true,
         items: true,
+        // Siblings, for the "already paid out on this order" cap.
+        returnRequests: { select: { id: true, status: true, refundAmount: true } },
       },
     })
     .catch(() => null);
@@ -365,6 +468,11 @@ export async function getReturnPolicySnapshot(
     code: store.code,
     message: store.message,
     lines,
+    refund: {
+      order: refundOrderFrom(order, order.returnRequests),
+      settings: settings.refund,
+      note: settings.refundPolicyNote,
+    },
   };
 }
 
@@ -375,8 +483,17 @@ const decideSchema = z.object({
   approve: z.boolean(),
   /** Shown to the customer on their order page. */
   adminNote: z.string().trim().max(1000).optional(),
-  refundAmount: z.coerce.number().int().min(0).nullable().optional(),
-  refundMethod: z.enum(["original", "upi", "bank", "replacement"]).nullable().optional(),
+  /**
+   * Replace the computed net with a hand-picked figure. Null or absent takes
+   * what `computeRefund` worked out — which is the path that should be used
+   * almost always, and the one that needs no justification.
+   */
+  refundOverride: z.coerce.number().int().min(0).nullable().optional(),
+  /** Required whenever `refundOverride` differs from the computed net. */
+  overrideReason: z.string().trim().max(300).optional(),
+  refundMethod: z.enum(REFUND_METHODS).nullable().optional(),
+  /** Where a UPI payout goes. The customer can also supply this themselves. */
+  refundUpi: z.string().trim().max(100).optional(),
   /** Book the reverse pickup with NimbusPost on approval. */
   bookPickup: z.boolean().default(true),
 });
@@ -384,7 +501,19 @@ const decideSchema = z.object({
 export type DecideReturnInput = z.input<typeof decideSchema>;
 
 /**
- * Approve or reject a return.
+ * Approve or reject a return, and fix the refund figure at the same moment.
+ *
+ * **The numbers are recomputed here, never taken from the client.** The panel
+ * shows a breakdown, but a Server Action is a POST endpoint: the only figure
+ * that is trusted is the one this function derives from the order row through
+ * `computeRefund`. The admin may override the *net*, and that is bounded too —
+ * a payout larger than the pot the customer actually paid into is refused,
+ * because the one thing this whole feature must never do is send out money
+ * that was never collected.
+ *
+ * `refundGross` / `refundFee` / `refundAmount` are **written now and never
+ * recomputed**. Raise the store's fee next month and this row still says what
+ * was decided today, which is the only way a refund history can be audited.
  *
  * On approval the reverse pickup is drafted with NimbusPost. That call is
  * allowed to fail without failing the approval — the decision is ours, the
@@ -402,7 +531,15 @@ export async function decideReturn(input: DecideReturnInput) {
 
   const existing = await prisma.returnRequest.findUnique({
     where: { id: data.id },
-    include: { order: { select: { orderNumber: true } } },
+    include: {
+      order: {
+        select: {
+          ...REFUND_ORDER_SELECT,
+          orderNumber: true,
+          returnRequests: { select: { id: true, status: true, refundAmount: true } },
+        },
+      },
+    },
   });
   if (!existing) return { ok: false as const, error: "Return request not found" };
   if (existing.status !== "pending") {
@@ -416,11 +553,106 @@ export async function decideReturn(input: DecideReturnInput) {
     return { ok: false as const, error: "Add a note explaining the rejection." };
   }
 
-  const status = data.approve ? "approved" : "rejected";
+  /* ---------------------------------------------------------- rejection */
+  if (!data.approve) {
+    const history = readHistory(existing.statusHistory);
+    history.push({
+      status: "rejected",
+      note: data.adminNote?.trim() || undefined,
+      at: new Date().toISOString(),
+      by: "admin",
+    });
+    await prisma.returnRequest.update({
+      where: { id: data.id },
+      data: {
+        status: "rejected",
+        adminNote: data.adminNote?.trim() || null,
+        // A rejected return owes nothing — clear any figure, don't keep a
+        // stale one hanging around to be paid by mistake.
+        refundGross: null,
+        refundFee: null,
+        refundAmount: null,
+        refundMethod: null,
+        resolvedAt: new Date(),
+        statusHistory: history as unknown as object[],
+      },
+    });
+    revalidateReturns(existing.order.orderNumber);
+    return {
+      ok: true as const,
+      status: "rejected",
+      refund: null,
+      pickupBooked: false,
+      pickupIssue: null,
+    };
+  }
+
+  /* ------------------------------------------------------------ approval */
+  const settings = await readReturnSettings();
+  if (!settings) {
+    return {
+      ok: false as const,
+      error: "Couldn't read the refund policy just now — try again in a moment.",
+    };
+  }
+
+  const refundOrder = refundOrderFrom(
+    existing.order,
+    existing.order.returnRequests,
+    existing.id
+  );
+  const computed = computeRefund({
+    order: refundOrder,
+    lines: [{ unitPrice: existing.unitPrice, quantity: existing.quantity }],
+    settings: settings.refund,
+    reason: existing.reason,
+  });
+
+  // The hard ceiling, independent of the line maths: what is left of the money
+  // this customer actually parted with, once the non-refundable advance and
+  // earlier refunds are subtracted. An override may go above the computed net
+  // (goodwill, return postage) but never above this.
+  const ceiling = computed.payable;
+
+  let net = computed.net;
+  let gross = computed.gross;
+  let fee = computed.fee;
+  let overrideNote: string | null = null;
+
+  const wants = data.refundOverride;
+  if (typeof wants === "number" && wants !== computed.net) {
+    if (!data.overrideReason?.trim()) {
+      return {
+        ok: false as const,
+        error: "Say why you're changing the refund amount.",
+      };
+    }
+    if (wants > ceiling) {
+      return {
+        ok: false as const,
+        error: `That's more than this order has left to refund (${ceiling}). The customer only paid in so much.`,
+      };
+    }
+    net = wants;
+    // Keep the gross honest: the store can't "keep" a negative fee, and an
+    // above-computed payout simply means no fee was taken.
+    gross = Math.max(computed.gross, net);
+    fee = Math.max(0, gross - net);
+    overrideNote = `Refund set to ${net} by hand (computed ${computed.net}): ${data.overrideReason.trim()}`;
+  }
+
+  const upi = data.refundUpi?.trim() ? normaliseUpiId(data.refundUpi) : null;
+  if (data.refundUpi?.trim() && !upi) {
+    return { ok: false as const, error: "That doesn't look like a UPI ID (name@bank)." };
+  }
+
+  const method: RefundMethod = data.refundMethod ?? computed.method;
+
   const history = readHistory(existing.statusHistory);
   history.push({
-    status,
-    note: data.adminNote?.trim() || undefined,
+    status: "approved",
+    note:
+      [data.adminNote?.trim(), overrideNote].filter(Boolean).join(" · ") || undefined,
     at: new Date().toISOString(),
     by: "admin",
   });
@@ -428,17 +660,20 @@ export async function decideReturn(input: DecideReturnInput) {
   await prisma.returnRequest.update({
     where: { id: data.id },
     data: {
-      status,
+      status: "approved",
       adminNote: data.adminNote?.trim() || null,
-      refundAmount: data.approve ? data.refundAmount ?? null : null,
-      refundMethod: data.approve ? data.refundMethod ?? null : null,
-      resolvedAt: data.approve ? null : new Date(),
+      refundGross: gross,
+      refundFee: fee,
+      refundAmount: net,
+      refundMethod: method,
+      refundUpi: upi ?? existing.refundUpi,
+      resolvedAt: null,
       statusHistory: history as unknown as object[],
     },
   });
 
   let pickup: { ok: boolean; error?: string; skipped?: string } | null = null;
-  if (data.approve && data.bookPickup) {
+  if (data.bookPickup) {
     pickup = await draftReturnPickup(data.id);
   }
 
@@ -446,17 +681,262 @@ export async function decideReturn(input: DecideReturnInput) {
 
   return {
     ok: true as const,
-    status,
+    status: "approved",
+    refund: { gross, fee, net, method },
     pickupBooked: pickup?.ok ?? false,
     pickupIssue: pickup && !pickup.ok ? pickup.error ?? pickup.skipped ?? null : null,
   };
 }
 
-/** Move an approved return along its lifecycle (picked up → received → refunded). */
+/* ------------------------------------------------------------- pay it out */
+
+const paidSchema = z.object({
+  id: z.string().min(1),
+  /** UTR / transaction reference. What the customer looks for on a statement. */
+  reference: z.string().trim().max(MAX_REFUND_REFERENCE_LENGTH).optional(),
+  method: z.enum(REFUND_METHODS).optional(),
+  upi: z.string().trim().max(100).optional(),
+  /** Optional extra line for the customer. */
+  note: z.string().trim().max(500).optional(),
+});
+
+export type MarkRefundPaidInput = z.input<typeof paidSchema>;
+
+/**
+ * Record that the money has actually gone out, and close the request.
+ *
+ * Separate from `setReturnStatus` on purpose: "refunded" is the one status
+ * that asserts money moved, and it must not be reachable by a bare status
+ * change. A reference is required whenever there is a payout, so a customer
+ * asking "where is my refund?" can always be given something to look up.
+ *
+ * Figures are NOT recomputed here. Whatever was agreed at approval is what is
+ * paid — the point of storing `refundGross`/`refundFee`/`refundAmount` then is
+ * that a settings change between approval and payout cannot move the number.
+ * The only exception is a request approved before refunds existed, which has
+ * no stored figure at all; that one is computed once, here, and then stored.
+ */
+export async function markRefundPaid(input: MarkRefundPaidInput) {
+  await requireAdmin();
+  const parsed = paidSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false as const, error: parsed.error.issues[0].message };
+  }
+  const data = parsed.data;
+
+  const existing = await prisma.returnRequest.findUnique({
+    where: { id: data.id },
+    include: {
+      order: {
+        select: {
+          ...REFUND_ORDER_SELECT,
+          orderNumber: true,
+          returnRequests: { select: { id: true, status: true, refundAmount: true } },
+        },
+      },
+    },
+  });
+  if (!existing) return { ok: false as const, error: "Return request not found" };
+  if (existing.status === "refunded") {
+    return { ok: false as const, error: "This refund is already recorded as paid." };
+  }
+  if (!["approved", "picked_up", "received"].includes(existing.status)) {
+    return {
+      ok: false as const,
+      error: "Approve the return before recording a refund.",
+    };
+  }
+
+  // Backfill for a request approved before this screen existed.
+  let gross = existing.refundGross;
+  let fee = existing.refundFee;
+  let net = existing.refundAmount;
+  if (net == null) {
+    const settings = await readReturnSettings();
+    if (!settings) {
+      return {
+        ok: false as const,
+        error: "Couldn't read the refund policy just now — try again in a moment.",
+      };
+    }
+    const computed = computeRefund({
+      order: refundOrderFrom(
+        existing.order,
+        existing.order.returnRequests,
+        existing.id
+      ),
+      lines: [{ unitPrice: existing.unitPrice, quantity: existing.quantity }],
+      settings: settings.refund,
+      reason: existing.reason,
+    });
+    gross = computed.gross;
+    fee = computed.fee;
+    net = computed.net;
+  }
+
+  const method: RefundMethod =
+    data.method ?? (existing.refundMethod as RefundMethod | null) ?? "original";
+
+  const upi = data.upi?.trim() ? normaliseUpiId(data.upi) : null;
+  if (data.upi?.trim() && !upi) {
+    return { ok: false as const, error: "That doesn't look like a UPI ID (name@bank)." };
+  }
+  const upiOnFile = upi ?? existing.refundUpi;
+  if (method === "upi" && net > 0 && !upiOnFile) {
+    return {
+      ok: false as const,
+      error: "Add the customer's UPI ID before recording a UPI payout.",
+    };
+  }
+
+  const reference = data.reference?.trim() || null;
+  // A replacement moves goods, not money, and a ₹0 payout has nothing to look
+  // up — everything else must leave a trail.
+  if (!reference && net > 0 && method !== "replacement" && method !== "none") {
+    return {
+      ok: false as const,
+      error: "Add the payment reference (UTR) so the customer can trace it.",
+    };
+  }
+
+  const now = new Date();
+  const history = readHistory(existing.statusHistory);
+  history.push({
+    status: "refunded",
+    note:
+      [
+        net > 0 ? `Refund of ${net} paid by ${method}` : "Closed with no payout",
+        reference ? `ref ${reference}` : null,
+        data.note?.trim() || null,
+      ]
+        .filter(Boolean)
+        .join(" · ") || undefined,
+    at: now.toISOString(),
+    by: "admin",
+  });
+
+  await prisma.returnRequest.update({
+    where: { id: data.id },
+    data: {
+      status: "refunded",
+      refundGross: gross,
+      refundFee: fee,
+      refundAmount: net,
+      refundMethod: method,
+      refundUpi: upiOnFile,
+      refundReference: reference,
+      refundedAt: now,
+      resolvedAt: now,
+      statusHistory: history as unknown as object[],
+    },
+  });
+
+  revalidateReturns(existing.order.orderNumber);
+  return { ok: true as const, net, reference };
+}
+
+/* --------------------------------------------------- customer's UPI handle */
+
+const upiSchema = z.object({
+  orderNumber: z.string().trim().min(1),
+  requestNumber: z.string().trim().min(1),
+  upi: z.string().trim().min(1).max(100),
+});
+
+export type SetRefundUpiInput = z.input<typeof upiSchema>;
+
+/**
+ * The customer tells us where to send a COD refund.
+ *
+ * Asked for only **after** approval, and only when the payout is by UPI: a
+ * prepaid refund goes straight back down the card rail and needs nothing from
+ * them, so asking would be collecting a payment handle for no reason.
+ *
+ * Authorised by the order number **and** the request number together, which is
+ * the same trust model the rest of this page already runs on (anyone holding
+ * the link can see the order and raise a return). It is deliberately not a
+ * one-shot write — a typo has to be fixable — and the admin sees the handle in
+ * the queue before any money moves, which is where a wrong one gets caught.
+ *
+ * A UPI VPA is all that is ever accepted here. A bank account number would be
+ * a different class of data and would need encryption and a retention policy
+ * before it could be stored at all.
+ */
+export async function setReturnRefundUpi(input: SetRefundUpiInput) {
+  const parsed = upiSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false as const, error: "Enter your UPI ID." };
+  }
+  const data = parsed.data;
+
+  const upi = normaliseUpiId(data.upi);
+  if (!upi) {
+    return {
+      ok: false as const,
+      error: "That doesn't look like a UPI ID — it should read like name@bank.",
+    };
+  }
+
+  const request = await prisma.returnRequest
+    .findUnique({
+      where: { requestNumber: data.requestNumber },
+      select: {
+        id: true,
+        status: true,
+        refundedAt: true,
+        order: { select: { orderNumber: true } },
+      },
+    })
+    .catch(() => null);
+
+  // Both halves must match. A request number alone is not enough.
+  if (!request || request.order.orderNumber !== data.orderNumber) {
+    return { ok: false as const, error: "We couldn't find that return." };
+  }
+  if (request.refundedAt) {
+    return {
+      ok: false as const,
+      error: "This refund has already been sent — message us if it went astray.",
+    };
+  }
+  if (!["approved", "picked_up", "received"].includes(request.status)) {
+    return {
+      ok: false as const,
+      error: "We'll ask for this once your return is approved.",
+    };
+  }
+
+  try {
+    await prisma.returnRequest.update({
+      where: { id: request.id },
+      data: { refundUpi: upi },
+    });
+  } catch (err) {
+    console.error("[returns] setReturnRefundUpi failed:", err);
+    return { ok: false as const, error: "Could not save that — please try again." };
+  }
+
+  revalidateReturns(data.orderNumber);
+  return { ok: true as const, upi };
+}
+
+/**
+ * Move an approved return along its lifecycle (picked up → received).
+ *
+ * "refunded" is deliberately NOT reachable from here. That status asserts the
+ * money left the account, and it must carry a reference and a timestamp —
+ * `markRefundPaid` is the only door to it.
+ */
 export async function setReturnStatus(id: string, status: string, note?: string) {
   await requireAdmin();
   if (!isReturnStatus(status)) {
     return { ok: false as const, error: "Unknown status" };
+  }
+  if (status === "refunded") {
+    return {
+      ok: false as const,
+      error: "Use “Record refund” so the payment reference is captured.",
+    };
   }
   const existing = await prisma.returnRequest.findUnique({
     where: { id },
@@ -526,6 +1006,15 @@ const defaultsSchema = z.object({
     .max(MAX_RETURN_REASONS * 4)
     .default([]),
   returnPolicyNote: z.string().max(2000).default(""),
+  // ---- Refunds ----
+  // 0–50%. Capped well below 100 on purpose: a fee that swallows the whole
+  // refund is a mis-typed setting, not a policy, and the customer-facing
+  // maths clamps it anyway.
+  refundFeePercent: z.coerce.number().int().min(0).max(50).default(0),
+  refundFeeFlat: z.coerce.number().int().min(0).max(10000).default(0),
+  partialAdvanceRefundable: z.boolean().default(false),
+  waiveRefundFeeOnOurFault: z.boolean().default(true),
+  refundPolicyNote: z.string().max(2000).default(""),
 });
 
 export type ReturnDefaultsInput = z.input<typeof defaultsSchema>;
@@ -540,6 +1029,10 @@ export type ReturnDefaultsInput = z.input<typeof defaultsSchema>;
  * Saving no reasons at all would leave the customer's dropdown empty and make
  * returns unraisable — a settings screen must not be able to do that by
  * accident.
+ *
+ * Changing a refund fee here only affects refunds decided **after** the save.
+ * Every approved request already carries its own `refundGross`/`refundFee`/
+ * `refundAmount`, so history is never rewritten by a settings change.
  */
 export async function updateReturnDefaults(input: ReturnDefaultsInput) {
   await requireAdmin();
@@ -551,6 +1044,7 @@ export async function updateReturnDefaults(input: ReturnDefaultsInput) {
     ...parsed.data,
     returnReasons: normaliseReturnReasons(parsed.data.returnReasons),
     returnPolicyNote: parsed.data.returnPolicyNote.trim(),
+    refundPolicyNote: parsed.data.refundPolicyNote.trim(),
   };
 
   try {

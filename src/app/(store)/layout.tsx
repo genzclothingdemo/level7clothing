@@ -1,7 +1,6 @@
 import { Navbar } from "@/components/store/navbar";
 import { Footer } from "@/components/store/footer";
 import { CartDrawer } from "@/components/store/cart-drawer";
-import { WhatsAppButton } from "@/components/store/whatsapp-button";
 import { AnnouncementBar } from "@/components/store/announcement-bar";
 import { BackToTop } from "@/components/store/back-to-top";
 import { ChatProvider, ChatWidget } from "@/components/store/chat-widget";
@@ -47,7 +46,13 @@ export default async function StoreLayout({
       <main className="flex-1 mobile-bottom-pad">{children}</main>
       <Footer />
       <CartDrawer />
-      <WhatsAppButton />
+      {/*
+        The floating WhatsApp button is gone: in-app chat replaced it as the
+        global "talk to us" channel, and two competing contact FABs over the
+        bottom tab bar was the clutter. WhatsApp survives where it is
+        contextual rather than ambient — the order confirmation page still
+        offers "message us about this order", and the number is in the footer.
+      */}
       <ChatWidget />
       <BackToTop />
     </ChatProvider>

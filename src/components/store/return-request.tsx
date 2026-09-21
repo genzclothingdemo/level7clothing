@@ -2,11 +2,19 @@
 
 import { useEffect, useState, useTransition } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Check, Loader2, PackageX, Clock, Info } from "lucide-react";
+import {
+  BadgeIndianRupee,
+  Check,
+  Loader2,
+  PackageX,
+  Clock,
+  Info,
+} from "lucide-react";
 import { formatINR } from "@/lib/utils";
 import {
   getReturnPolicySnapshot,
   requestReturn,
+  setReturnRefundUpi,
   type ReturnPolicySnapshot,
 } from "@/app/actions/returns";
 import { useSettings } from "@/context/settings";
@@ -15,7 +23,11 @@ import { ExpandableText } from "@/components/store/expandable-text";
 import {
   RETURN_STATUS_COLOR,
   RETURN_STATUS_LABEL,
+  computeRefund,
+  normaliseUpiId,
+  refundPreviewLine,
   returnReasonLabel,
+  type RefundBreakdown,
   type ReturnStatus,
 } from "@/lib/returns";
 
@@ -29,6 +41,24 @@ export type ReturnableLine = {
   eligible: boolean;
 };
 
+/**
+ * The refund as it was fixed at the decision — the stored figures, never a
+ * fresh calculation, so what the customer is told matches what was agreed even
+ * if the store's fee has changed since.
+ */
+export type ExistingRefund = {
+  net: number;
+  gross: number | null;
+  fee: number | null;
+  /** "original" | "upi" | "replacement" | "none". */
+  method: string | null;
+  upi: string | null;
+  /** The UTR, once the money has actually gone out. */
+  reference: string | null;
+  /** Pre-formatted on the server so the date reads the same after hydration. */
+  paidOn: string | null;
+};
+
 export type ExistingRequest = {
   requestNumber: string;
   productName: string;
@@ -36,6 +66,8 @@ export type ExistingRequest = {
   reason: string;
   adminNote: string | null;
   createdAt: string;
+  /** Null until a decision has put a figure on the request. */
+  refund: ExistingRefund | null;
 };
 
 /**
@@ -107,6 +139,24 @@ export function ReturnRequest({
 
   function verdictFor(index: number) {
     return policy?.lines.find((l) => l.index === index) ?? null;
+  }
+
+  /**
+   * What this line is worth back, worked out in the browser by the *same*
+   * `computeRefund` the admin approves with and the server re-runs on submit.
+   * The snapshot hands over the order's money and the store's rules rather
+   * than a finished number, so the figure tracks the reason the shopper picks
+   * (the our-fault waiver) without another round trip — and there is still
+   * only one implementation of the arithmetic.
+   */
+  function refundFor(line: ReturnableLine, reason: string, quantity: number) {
+    if (!policy?.refund) return null;
+    return computeRefund({
+      order: policy.refund.order,
+      lines: [{ unitPrice: line.price, quantity }],
+      settings: policy.refund.settings,
+      reason,
+    });
   }
 
   /** Lines that can still be requested — nothing already in flight for them. */
@@ -203,6 +253,12 @@ export function ReturnRequest({
                   <b>From {brandName}:</b> {e.adminNote}
                 </p>
               )}
+
+              <RefundStatus
+                orderNumber={orderNumber}
+                request={e}
+                brandName={brandName}
+              />
             </li>
           ))}
         </ul>
@@ -339,6 +395,14 @@ export function ReturnRequest({
                             </label>
                           )}
 
+                          {/* What they get back, before they commit to it.
+                              Updates as the reason changes — the our-fault
+                              waiver is the whole reason this isn't static. */}
+                          <RefundPreview
+                            refund={refundFor(line, form.reason, form.quantity)}
+                            note={policy?.refund?.note ?? ""}
+                          />
+
                           <label className="block">
                             <span className="label">Anything else we should know?</span>
                             <textarea
@@ -406,5 +470,176 @@ export function ReturnRequest({
         </>
       )}
     </section>
+  );
+}
+
+/* ------------------------------------------------------------------ refund */
+
+/**
+ * The promise, made before the shopper commits: one short line with the
+ * number in it, the working behind an (i), and the store's refund rules behind
+ * "View more". Everything that could be a paragraph is collapsed, because this
+ * sits inside a form on a phone.
+ */
+function RefundPreview({
+  refund,
+  note,
+}: {
+  refund: RefundBreakdown | null;
+  note: string;
+}) {
+  if (!refund) return null;
+  return (
+    <div className="rounded-lg border border-border bg-muted/30 p-3">
+      <p className="flex items-start gap-2 text-sm font-medium">
+        <BadgeIndianRupee className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+        <span className="min-w-0">
+          {refundPreviewLine(refund)}
+          {refund.explanation.length > 0 && (
+            <InfoTip term="How this is worked out">
+              {refund.explanation.join(" ")}
+            </InfoTip>
+          )}
+        </span>
+      </p>
+      {note && (
+        <ExpandableText
+          lines={2}
+          className="mt-2"
+          contentClassName="whitespace-pre-line text-xs leading-relaxed text-muted-foreground"
+        >
+          {note}
+        </ExpandableText>
+      )}
+    </div>
+  );
+}
+
+/**
+ * What happened to the money, on a request that has already been decided.
+ *
+ * Three states, in the order a customer meets them: agreed (a figure, no
+ * payout yet), waiting on a UPI ID, and paid with a reference they can match
+ * against their statement. The UPI box appears **only** when the store owes a
+ * UPI payout — a prepaid refund travels back down the card rail on its own, so
+ * asking for a payment handle there would be collecting it for nothing.
+ */
+function RefundStatus({
+  orderNumber,
+  request,
+  brandName,
+}: {
+  orderNumber: string;
+  request: ExistingRequest;
+  brandName: string;
+}) {
+  const refund = request.refund;
+  const [upi, setUpi] = useState(refund?.upi ?? "");
+  const [saved, setSaved] = useState<string | null>(refund?.upi ?? null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!refund || request.status === "rejected" || request.status === "cancelled") {
+    return null;
+  }
+
+  const open = ["approved", "picked_up", "received"].includes(request.status);
+  const needsUpi = open && refund.method === "upi" && refund.net > 0 && !saved;
+
+  async function save() {
+    setError(null);
+    if (!normaliseUpiId(upi)) {
+      setError("That should look like name@bank.");
+      return;
+    }
+    setBusy(true);
+    const res = await setReturnRefundUpi({
+      orderNumber,
+      requestNumber: request.requestNumber,
+      upi,
+    });
+    setBusy(false);
+    if (res.ok) {
+      setSaved(res.upi);
+      setUpi(res.upi);
+    } else {
+      setError(res.error);
+    }
+  }
+
+  return (
+    <div className="mt-1.5 rounded-lg bg-background px-3 py-2 text-xs">
+      {refund.paidOn ? (
+        <>
+          <p className="font-medium">
+            Refunded {formatINR(refund.net)} on {refund.paidOn}
+          </p>
+          {refund.reference && (
+            <p className="mt-0.5 break-all text-muted-foreground">
+              Reference <b className="font-mono">{refund.reference}</b>
+              <InfoTip term="Reference">
+                Quote this if you can&apos;t find the credit — your bank or UPI
+                app lists it against the payment. Bank refunds can take 5–7
+                working days to appear.
+              </InfoTip>
+            </p>
+          )}
+        </>
+      ) : refund.net > 0 ? (
+        <p className="text-muted-foreground">
+          <b className="text-foreground">{formatINR(refund.net)}</b> will be
+          refunded once we have the item back
+          {refund.fee ? ` — ${formatINR(refund.fee)} return fee applies` : ""}.
+        </p>
+      ) : (
+        <p className="text-muted-foreground">
+          No refund is due on this return — {brandName} will be in touch if
+          that&apos;s not what you expected.
+        </p>
+      )}
+
+      {needsUpi && (
+        <div className="mt-2 border-t border-border pt-2">
+          <label className="block">
+            <span className="label text-[11px]">
+              Your UPI ID
+              <InfoTip term="Why we need this">
+                You paid the courier in cash, so there is no card to send the
+                money back to. A UPI ID is all we need — never a full bank
+                account number.
+              </InfoTip>
+            </span>
+            <div className="flex flex-wrap gap-2">
+              <input
+                value={upi}
+                onChange={(e) => setUpi(e.target.value)}
+                placeholder="name@bank"
+                inputMode="email"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                className="input h-11 min-w-0 flex-1 basis-40 text-sm"
+              />
+              <button
+                type="button"
+                disabled={busy || !upi.trim()}
+                onClick={save}
+                className="inline-flex min-h-11 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg bg-primary px-4 text-xs font-semibold uppercase tracking-wide text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                Save
+              </button>
+            </div>
+          </label>
+          {error && <p className="mt-1 text-danger">{error}</p>}
+        </div>
+      )}
+
+      {open && saved && refund.method === "upi" && !refund.paidOn && (
+        <p className="mt-1 break-all text-muted-foreground">
+          Paying to <b className="font-mono">{saved}</b>
+        </p>
+      )}
+    </div>
   );
 }

@@ -88,6 +88,184 @@ self.addEventListener("message", (event) => {
   }
 });
 
+/* ------------------------------------------------------------------ */
+/*  Web push                                                           */
+/*                                                                     */
+/*  Entirely separate from the caching above — these handlers never     */
+/*  touch a cache and the fetch handler below is unchanged. The one     */
+/*  request made here goes to /api/push/subscribe, which the            */
+/*  NEVER_CACHE list already excludes.                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fallbacks for a push that arrives with no usable payload.
+ *
+ * Deliberately brand-neutral: the worker is a static file and cannot read
+ * `SiteSettings`, and a hardcoded brand name here would be the one string in
+ * the app that survives a rename in Admin → Settings. Every push we actually
+ * send carries its own title; this is the "something went wrong upstream"
+ * path, and the OS already labels the notification with the installed app.
+ */
+const PUSH_FALLBACK = {
+  title: "New notification",
+  body: "Open the app for the latest.",
+  url: "/",
+};
+const NOTIFICATION_ICON = "/icons/icon-192.png";
+const NOTIFICATION_BADGE = "/icons/icon-maskable-192.png";
+
+/**
+ * Read a push payload without ever throwing.
+ *
+ * A push can legitimately carry no data at all, and an encryption or encoding
+ * mismatch produces a body that is not JSON. Neither may be allowed to reject
+ * the handler: with `userVisibleOnly: true` a push that shows no notification
+ * makes the browser display its own "this site was updated in the background"
+ * message, and repeat offences cost the site its permission outright.
+ */
+function readPushData(event) {
+  let raw = null;
+  try {
+    raw = event.data ? event.data.json() : null;
+  } catch {
+    // Not JSON. A plain string is still worth showing as the body.
+    try {
+      const text = event.data ? event.data.text() : "";
+      raw = text ? { body: text } : null;
+    } catch {
+      raw = null;
+    }
+  }
+
+  const data = raw && typeof raw === "object" ? raw : {};
+  const str = (value, max) =>
+    typeof value === "string" && value.trim() ? value.trim().slice(0, max) : "";
+
+  // Only same-origin paths are followed. An absolute URL in a payload would
+  // turn the notification tray into an open redirect.
+  const path = str(data.url, 512);
+  const url = path.startsWith("/") && !path.startsWith("//") ? path : PUSH_FALLBACK.url;
+
+  return {
+    title: str(data.title, 120) || PUSH_FALLBACK.title,
+    body: str(data.body, 300) || PUSH_FALLBACK.body,
+    url,
+    tag: str(data.tag, 64) || undefined,
+  };
+}
+
+self.addEventListener("push", (event) => {
+  const data = readPushData(event);
+
+  event.waitUntil(
+    (async () => {
+      try {
+        await self.registration.showNotification(data.title, {
+          body: data.body,
+          icon: NOTIFICATION_ICON,
+          badge: NOTIFICATION_BADGE,
+          tag: data.tag,
+          // The click target rides on the notification itself, so
+          // `notificationclick` needs no state of its own.
+          data: { url: data.url },
+        });
+        return;
+      } catch {
+        /* something in the options was rejected — retry with the minimum */
+      }
+
+      try {
+        await self.registration.showNotification(PUSH_FALLBACK.title, {
+          body: PUSH_FALLBACK.body,
+        });
+      } catch {
+        // Both attempts failed, which means the platform is refusing to show
+        // anything at all. Swallow it: a rejected `waitUntil` adds an
+        // unhandled rejection on top of a notification that was never going
+        // to appear, and changes nothing the shopper can see.
+      }
+    })()
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+
+  const target = new URL(
+    (event.notification.data && event.notification.data.url) || PUSH_FALLBACK.url,
+    self.location.origin
+  );
+
+  event.waitUntil(
+    (async () => {
+      // `includeUncontrolled` matters: a tab opened before this worker took
+      // control is still the shopper's open window, and stealing focus back to
+      // it is far better than opening a second copy of the store.
+      const windows = await self.clients.matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      });
+
+      for (const client of windows) {
+        if (new URL(client.url).origin !== target.origin) continue;
+        try {
+          // Older WebKit has focus() but not navigate(); focusing the existing
+          // tab is the important half, so a failed navigate is not fatal.
+          if ("navigate" in client && client.url !== target.href) {
+            await client.navigate(target.href).catch(() => {});
+          }
+          return await client.focus();
+        } catch {
+          /* client went away between matchAll and focus — fall through */
+        }
+      }
+
+      return self.clients.openWindow(target.href);
+    })()
+  );
+});
+
+/**
+ * Browsers rotate push subscriptions on their own schedule. When that happens
+ * there is no page running to notice, so the worker has to re-register the new
+ * endpoint itself — otherwise the device goes quiet and neither the shopper
+ * nor the store ever finds out.
+ *
+ * This is also the reason `/api/push/subscribe` exists as a route handler: a
+ * service worker cannot call a Next.js server action.
+ */
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    (async () => {
+      try {
+        // Some browsers hand us the replacement; the rest expect us to make
+        // one, reusing the application server key from the old subscription.
+        let fresh = event.newSubscription || null;
+        if (!fresh) {
+          const key = event.oldSubscription?.options?.applicationServerKey;
+          if (!key) return;
+          fresh = await self.registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: key,
+          });
+        }
+        if (!fresh) return;
+
+        await fetch("/api/push/subscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // Carries the session cookie, so a subscription that belonged to a
+          // signed-in customer stays attached to their account.
+          credentials: "include",
+          body: JSON.stringify({ subscription: fresh.toJSON() }),
+        });
+      } catch {
+        /* offline or permission revoked — the next page load re-syncs */
+      }
+    })()
+  );
+});
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
 

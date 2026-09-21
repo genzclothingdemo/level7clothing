@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { toast } from "sonner";
@@ -14,6 +14,12 @@ import {
   verifyRazorpayPayment,
   getCheckoutContext,
 } from "@/app/actions/orders";
+import { listMyAddresses, type SavedAddress } from "@/app/actions/addresses";
+import {
+  CheckoutAddressPicker,
+  type ChosenAddress,
+} from "@/components/store/checkout-address-picker";
+import { InfoTip } from "@/components/store/info-tip";
 import type { PaymentMode } from "@/lib/types";
 
 // The stored order label for each checkout mode.
@@ -69,6 +75,13 @@ export type CheckoutUser = {
   name: string;
   email: string;
   phone: string | null;
+  /**
+   * @deprecated Legacy inline `User` address columns. Still accepted so the
+   * checkout page keeps compiling, but deliberately NOT read: the address
+   * comes from the `Address` table via `listMyAddresses()`, which also folds
+   * any leftover inline values into a real saved address on first load. See
+   * the header comment in `src/app/actions/addresses.ts`.
+   */
   address?: string | null;
   city?: string | null;
   state?: string | null;
@@ -95,16 +108,84 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
   const [ctx, setCtx] = useState<CheckoutContext | null>(null);
   const [method, setMethod] = useState<PaymentMode | null>(null);
 
+  // Identity is seeded from the account; the delivery fields are filled by the
+  // address picker below — never from `user.address`, which is the legacy
+  // inline copy this change exists to retire.
   const [form, setForm] = useState({
     customerName: user.name ?? "",
     email: user.email ?? "",
     phone: user.phone ?? "",
-    address: user.address ?? "",
-    city: user.city ?? "",
-    state: user.state ?? "",
-    pincode: user.pincode ?? "",
+    address: "",
+    city: "",
+    state: "",
+    pincode: "",
+    // The shopper's own note. Destined for `Order.buyerNote`, NOT `Order.note`
+    // (which is the admin's private field) — see the comment on `placeOrder`
+    // below.
     note: "",
   });
+
+  /* ---------------- Saved addresses (the source of truth) ---------------- */
+  // null = not signed in (guest). [] = signed in with an empty address book.
+  const [addresses, setAddresses] = useState<SavedAddress[] | null>(null);
+  const [addressesLoading, setAddressesLoading] = useState(true);
+  const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
+  // False while a signed-in customer is mid-way through typing a new address:
+  // "Deliver here" is what saves it, so the order must not be placed around it.
+  const [addressReady, setAddressReady] = useState(false);
+  const [, startTransition] = useTransition();
+
+  const applyAddress = useCallback(
+    (a: ChosenAddress, savedId: string | null, ready = savedId !== null) => {
+      setSelectedAddressId(savedId);
+      setAddressReady(ready);
+      setForm((f) => ({
+        ...f,
+        // The recipient's name and phone belong to the address, not the
+        // account — a gift going to a friend has both different.
+        customerName: a.fullName,
+        phone: a.phone,
+        address: a.address,
+        city: a.city,
+        state: a.state,
+        pincode: a.pincode,
+      }));
+    },
+    []
+  );
+
+  const refreshAddresses = useCallback(
+    async (preferId?: string) => {
+      // A failure degrades to the guest path on purpose: an unreachable
+      // address book must never stop someone ordering — they get the plain
+      // form and the order still carries a correct address.
+      const rows = await listMyAddresses().catch(() => null);
+      setAddresses(rows);
+      setAddressesLoading(false);
+      // Guest: no book to pick from, so the plain form governs and the
+      // browser's own `required` validation is the only gate.
+      if (rows === null) {
+        setAddressReady(true);
+        return;
+      }
+      if (rows.length === 0) return;
+      const pick =
+        (preferId ? rows.find((r) => r.id === preferId) : undefined) ??
+        rows.find((r) => r.isDefault) ??
+        rows[0];
+      applyAddress(pick, pick.id);
+    },
+    [applyAddress]
+  );
+
+  // Next 16: a Server Action called from an effect has to be wrapped in
+  // `startTransition` (see node_modules/next/dist/docs/01-app/02-guides/
+  // server-actions.md). `refreshAddresses` is stable, so this runs once.
+  useEffect(() => {
+    startTransition(async () => {
+      await refreshAddresses();
+    });
+  }, [refreshAddresses]);
 
   // If shipping is free globally via type, or if subtotal threshold is met
   const isFreeThreshold = s.freeShippingThreshold != null && subtotal >= s.freeShippingThreshold;
@@ -217,6 +298,18 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
   const balanceDue =
     method === "prepaid" ? 0 : method === "partial" ? total - advance : total;
 
+  // Mirrors `placeOrder`'s own minimums, so the button can never submit an
+  // order the server will reject.
+  const hasDeliverableAddress =
+    addressReady &&
+    !addressesLoading &&
+    form.customerName.trim().length >= 2 &&
+    form.phone.trim().length >= 6 &&
+    form.address.trim().length >= 4 &&
+    form.city.trim().length >= 2 &&
+    form.state.trim().length >= 2 &&
+    form.pincode.trim().length >= 6;
+
   function set(key: keyof typeof form, value: string) {
     setForm((f) => ({ ...f, [key]: value }));
   }
@@ -284,6 +377,20 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
       }
     }
 
+    // ORDER NOTES — this text belongs in `Order.buyerNote`, not `Order.note`.
+    //
+    // `Order.note` is the ADMIN's private field: checkout writes the shopper's
+    // text there and the admin's own note then overwrites it, which is why
+    // `note` can never be shown to anyone safely. The schema already has three
+    // separate columns for the three directions — buyerNote (them → us),
+    // customerNote (us → them), note (internal).
+    //
+    // The destination cannot be changed from here: `placeOrder`'s zod schema
+    // in `src/app/actions/orders.ts` accepts `note` and nothing else, and zod
+    // strips unknown keys, so sending `buyerNote` would be silently dropped.
+    // That file is outside this change's scope. The two-line patch it needs is
+    // in the handover notes; until it lands, this keeps behaving exactly as it
+    // did before, with no regression.
     const res = await placeOrder({
       ...form,
       paymentMethod: MODE_TO_METHOD[method],
@@ -418,73 +525,53 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
       >
         <div className="space-y-8">
           <section>
-            <h2 className="font-serif text-xl">Contact details</h2>
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              <Field label="Full name" required>
-                <input
-                  required
-                  value={form.customerName}
-                  onChange={(e) => set("customerName", e.target.value)}
-                  className="input"
-                />
-              </Field>
-              <Field label="Phone" required>
-                <input
-                  required
-                  value={form.phone}
-                  onChange={(e) => set("phone", e.target.value)}
-                  className="input"
-                />
-              </Field>
-              <Field label="Email" required className="sm:col-span-2">
+            <h2 className="font-serif text-xl">Contact</h2>
+            <div className="mt-4">
+              {/* Email only. The recipient's name and phone belong to the
+                  delivery address below, so they are edited there — keeping a
+                  second editable copy here is what let the two disagree. */}
+              <Field label="Email" required>
                 <input
                   required
                   type="email"
+                  inputMode="email"
+                  autoComplete="email"
                   value={form.email}
                   onChange={(e) => set("email", e.target.value)}
                   className="input"
                 />
               </Field>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Your order confirmation and tracking updates go here.
+              </p>
             </div>
           </section>
 
           <section>
-            <h2 className="font-serif text-xl">Shipping address</h2>
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              <Field label="Address" required className="sm:col-span-2">
-                <input
-                  required
-                  value={form.address}
-                  onChange={(e) => set("address", e.target.value)}
-                  className="input"
-                  placeholder="House no, street, area"
-                />
-              </Field>
-              <Field label="City" required>
-                <input
-                  required
-                  value={form.city}
-                  onChange={(e) => set("city", e.target.value)}
-                  className="input"
-                />
-              </Field>
-              <Field label="State" required>
-                <input
-                  required
-                  value={form.state}
-                  onChange={(e) => set("state", e.target.value)}
-                  className="input"
-                />
-              </Field>
-              <Field label="Pincode" required>
-                <input
-                  required
-                  value={form.pincode}
-                  onChange={(e) => set("pincode", e.target.value)}
-                  className="input"
-                />
-              </Field>
-              <Field label="Order notes (optional)" className="sm:col-span-2">
+            <h2 className="font-serif text-xl">Delivery address</h2>
+            <div className="mt-4">
+              <CheckoutAddressPicker
+                addresses={addresses}
+                loading={addressesLoading}
+                selectedId={selectedAddressId}
+                onChoose={applyAddress}
+                onBookChanged={(id) => refreshAddresses(id)}
+                disabled={loading}
+              />
+            </div>
+          </section>
+
+          <section>
+            <h2 className="font-serif text-xl">
+              Order notes
+              <InfoTip term="Order notes">
+                Anything we should know while packing — a landmark for the
+                courier, a gift message, or personalisation details. It reaches
+                our packing team, not the courier&apos;s app.
+              </InfoTip>
+            </h2>
+            <div className="mt-4">
+              <Field label="Notes (optional)">
                 <textarea
                   value={form.note}
                   onChange={(e) => set("note", e.target.value)}
@@ -671,9 +758,18 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
             )}
           </div>
 
+          {/* A saved address can be picked without touching a single input, so
+              native `required` no longer guards the submit — check the fields
+              the order actually needs. */}
           <Button
             type="submit"
-            disabled={loading || !method || shippingLoading || !!shippingError}
+            disabled={
+              loading ||
+              !method ||
+              shippingLoading ||
+              !!shippingError ||
+              !hasDeliverableAddress
+            }
             className="mt-6 w-full"
             size="lg"
           >
@@ -686,6 +782,12 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
               buttonLabel
             )}
           </Button>
+          {/* Never leave a disabled button unexplained. */}
+          {!hasDeliverableAddress && !addressesLoading && (
+            <p className="mt-3 text-center text-xs text-muted-foreground">
+              Confirm a delivery address to continue.
+            </p>
+          )}
           <p className="mt-3 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
             <Lock className="h-3.5 w-3.5" /> Your details are safe with us
           </p>

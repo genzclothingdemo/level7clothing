@@ -7,8 +7,14 @@
 // product is returnable no matter what it says, which is how the owner closes
 // returns during a festival rush without editing 22 products.
 //
+// The refund half lives at the bottom of this file, beside the policy it
+// depends on: `computeRefund` is the one place the money is worked out, and
+// both the admin panel and the customer's order page call it.
+//
 // This module is imported by client components, so it must stay free of
 // `prisma` and any server-only import. Everything here is pure.
+
+import { formatINR } from "@/lib/utils";
 
 export const RETURN_STATUSES = [
   "pending",
@@ -426,3 +432,375 @@ export function generateReturnNumber(): string {
   }
   return `RET-${out}`;
 }
+
+/* ================================================================= refunds */
+/*
+ * The money half of returns.
+ *
+ * `computeRefund` below is the ONLY place a refund figure is worked out. The
+ * admin's approval panel and the customer's return form both call it with the
+ * same order row, so the number the shopper is promised and the number the
+ * owner pays out are produced by one function and cannot drift apart.
+ *
+ * It is pure on purpose — no Prisma, no clock, no settings lookup. Everything
+ * it needs is passed in, which is what makes the arithmetic testable and what
+ * lets the browser recompute the preview live as the reason changes.
+ */
+
+/** How the money is sent back. Matches `ReturnRequest.refundMethod`. */
+export const REFUND_METHODS = ["original", "upi", "replacement", "none"] as const;
+
+export type RefundMethod = (typeof REFUND_METHODS)[number];
+
+export function isRefundMethod(v: string): v is RefundMethod {
+  return (REFUND_METHODS as readonly string[]).includes(v);
+}
+
+export const REFUND_METHOD_LABEL: Record<RefundMethod, string> = {
+  original: "Back to the original payment",
+  upi: "UPI transfer",
+  replacement: "Replacement instead of money",
+  none: "No money to send",
+};
+
+/**
+ * Which of the three payment shapes an order took. Derived from the money on
+ * the row rather than the `paymentMethod` label, because the label is free
+ * text set at checkout and the columns are what actually moved.
+ *
+ * - `prepaid`  — paid in full online, nothing left for the door.
+ * - `cod`      — nothing online, the whole total collected as cash.
+ * - `partial`  — an online advance AND a balance for the door.
+ * - `unpaid`   — no money was ever due or taken (a Direct request that was
+ *                never delivered, or a prepaid order whose payment failed).
+ */
+export type RefundPaymentCase = "prepaid" | "cod" | "partial" | "unpaid";
+
+export const REFUND_PAYMENT_LABEL: Record<RefundPaymentCase, string> = {
+  prepaid: "Prepaid",
+  cod: "Cash on delivery",
+  partial: "Advance + balance",
+  unpaid: "Nothing collected",
+};
+
+/** The store's refund rules. Mirrors the SiteSettings columns of the same names. */
+export type RefundSettings = {
+  /** Percent of the gross the store keeps. Summed with the flat fee. */
+  refundFeePercent: number;
+  /** Flat amount the store keeps, in whole rupees. Summed with the percent. */
+  refundFeeFlat: number;
+  /** Partial orders: is the online advance handed back, or kept? */
+  partialAdvanceRefundable: boolean;
+  /** Damaged / wrong item → charge no fee at all. */
+  waiveRefundFeeOnOurFault: boolean;
+};
+
+/**
+ * Mirrors the `@default(...)` values on SiteSettings — keep the two in step.
+ * Used when the settings row can't be read, so a DB blip charges no fee rather
+ * than inventing one.
+ */
+export const DEFAULT_REFUND_SETTINGS: RefundSettings = {
+  refundFeePercent: 0,
+  refundFeeFlat: 0,
+  partialAdvanceRefundable: false,
+  waiveRefundFeeOnOurFault: true,
+};
+
+/** Just the columns the arithmetic needs, so any caller can build one. */
+export type RefundOrder = {
+  /** Whole-order value actually charged (subtotal + shipping − discount). */
+  total: number;
+  /** Collected ONLINE: the full total for prepaid, the advance for partial. */
+  amountPaid: number;
+  /**
+   * Cash the courier was told to collect at the door. Fixed when the order is
+   * created and never decremented, so it is a *demand*, not a receipt — see
+   * `cashInHand` for when it counts as money the store holds.
+   */
+  balanceDue: number;
+  /** Order lifecycle status. Cash only counts once this reads `delivered`. */
+  status?: string | null;
+  /** `paid` also settles the cash, for an order the owner squared off by hand. */
+  paymentStatus?: string | null;
+  /** Line subtotal before shipping and discount — the discount's denominator. */
+  subtotal?: number | null;
+  /** Order-level coupon discount, shared across the lines pro rata. */
+  discountTotal?: number | null;
+  /** Net already paid out on earlier returns against this same order. */
+  alreadyRefunded?: number | null;
+};
+
+/** One returned line, captured by value exactly as `ReturnRequest` stores it. */
+export type RefundLine = { unitPrice: number; quantity: number };
+
+export type RefundBreakdown = {
+  /** Refundable value of the returned goods, after every cap below. */
+  gross: number;
+  /** What the store keeps out of the gross. Never more than the gross. */
+  fee: number;
+  /** What the customer is actually paid. `gross − fee`, never negative. */
+  net: number;
+  /** Where the money should go. The admin can still override it. */
+  method: RefundMethod;
+  /** Short, customer-safe sentences explaining every deduction. */
+  explanation: string[];
+
+  /* ---- the working, kept so a UI can show its reasoning ---- */
+  payment: RefundPaymentCase;
+  /** Sticker value of the lines: Σ unitPrice × quantity. */
+  lineValue: number;
+  /** The lines' pro-rata share of an order-level coupon discount. */
+  discountShare: number;
+  /** Money the customer actually parted with, across the whole order. */
+  collected: number;
+  /** Of that, what policy does not give back (a partial order's advance). */
+  nonRefundable: number;
+  /** The slice of the advance these particular lines forfeit. */
+  advanceForfeited: number;
+  /** Ceiling on this payout once earlier refunds are subtracted. */
+  payable: number;
+  /** Earlier net refunds on this order, already committed. */
+  alreadyRefunded: number;
+  /** The reason was our mistake and the fee was waived. */
+  feeWaived: boolean;
+  /** The fee came out bigger than the gross and was clamped to it. */
+  feeCapped: boolean;
+};
+
+/** Whole rupees, never negative, never NaN. Every input is funnelled through it. */
+function rupees(value: number | null | undefined): number {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value as number)) : 0;
+}
+
+/**
+ * Cash the store is actually holding, as opposed to cash it was owed.
+ *
+ * `balanceDue` is written once, at checkout, and is never reduced when the
+ * courier hands the money over — so reading it as "money we have" would let an
+ * undelivered order be refunded out of cash nobody ever collected. It counts
+ * only once the parcel was delivered, or the owner marked the order paid.
+ */
+export function cashInHand(order: RefundOrder): number {
+  const due = rupees(order.balanceDue);
+  if (due <= 0) return 0;
+  const delivered = (order.status ?? "").toLowerCase() === "delivered";
+  const settled = (order.paymentStatus ?? "").toLowerCase() === "paid";
+  return delivered || settled ? due : 0;
+}
+
+/**
+ * Which payment shape this order took. Uses `balanceDue` rather than the cash
+ * actually in hand, so a part-paid order that hasn't been delivered is still
+ * recognised as partial (and its advance still treated as non-refundable).
+ */
+export function refundPaymentCase(order: RefundOrder): RefundPaymentCase {
+  const online = rupees(order.amountPaid);
+  const due = rupees(order.balanceDue);
+  if (online > 0 && due > 0) return "partial";
+  if (online > 0) return "prepaid";
+  if (due > 0) return "cod";
+  return "unpaid";
+}
+
+/**
+ * Work out what a return is worth.
+ *
+ * ## The arithmetic, in order
+ *
+ * 1. **Line value** — `Σ unitPrice × quantity`, the sticker price of what is
+ *    coming back. Shipping is never part of it: the parcel was still carried.
+ *
+ * 2. **Less its share of an order discount.** A coupon comes off the *order*,
+ *    so a ₹1,000 line on an order with ₹200 off a ₹2,000 subtotal only cost
+ *    the customer ₹900. Refunding the sticker price there pays back money that
+ *    was never collected, which is the whole failure mode this guards against.
+ *
+ * 3. **What the customer actually parted with** = online money (`amountPaid`)
+ *    + cash the courier really collected (`cashInHand`, which is zero until
+ *    the parcel is delivered). Capped at the order total, so a data glitch
+ *    cannot mint money.
+ *
+ * 4. **What policy returns of that.** Only a partial order withholds anything:
+ *    its online advance, unless `partialAdvanceRefundable` is on. Prepaid and
+ *    COD give back everything that was collected.
+ *
+ * 5. **Scale.** `gross = goods value × (refundable ÷ order total)`.
+ *
+ *    One line covers all three cases. Prepaid and COD have
+ *    `refundable === total`, so the fraction is 1 and the gross is simply the
+ *    goods value. A partial order's fraction is the cash share, which spreads
+ *    the non-refundable advance across the lines **pro rata**: return one of
+ *    three items and a third of the advance is forfeited; return all three and
+ *    all of it is. Both routes total the same money, so a customer cannot
+ *    recover the advance by returning in instalments, and is not punished for
+ *    returning one item either.
+ *
+ * 6. **Cap** at the goods value and at what is left of the order's refundable
+ *    pool after earlier returns, so two requests can never pay out twice.
+ *
+ * 7. **Fee.** `percent × gross + flat`, waived entirely when the reason is our
+ *    mistake and `waiveRefundFeeOnOurFault` is on. Clamped to the gross: the
+ *    net is never negative, because a refund that *bills* the customer is a
+ *    bug, not a policy.
+ */
+export function computeRefund(input: {
+  order: RefundOrder;
+  lines: readonly RefundLine[];
+  settings: RefundSettings;
+  /** The customer's stated reason, as stored. Drives the our-fault waiver. */
+  reason: string;
+}): RefundBreakdown {
+  const { order, lines, settings, reason } = input;
+  const why: string[] = [];
+
+  const total = rupees(order.total);
+
+  /* 1 — sticker value of the returned lines. */
+  const lineValue = lines.reduce(
+    (sum, l) => sum + rupees(l.unitPrice) * Math.max(0, Math.trunc(l.quantity || 0)),
+    0
+  );
+
+  /* 2 — less this line's pro-rata share of any order-level discount. */
+  const subtotal = rupees(order.subtotal);
+  const discountTotal = rupees(order.discountTotal);
+  const discountShare =
+    discountTotal > 0 && subtotal > 0
+      ? Math.min(lineValue, Math.round((lineValue * discountTotal) / subtotal))
+      : 0;
+  const goodsValue = Math.max(0, lineValue - discountShare);
+
+  /* 3 — money the customer actually parted with, whole order. */
+  const online = rupees(order.amountPaid);
+  const cash = cashInHand(order);
+  const collected = total > 0 ? Math.min(online + cash, total) : 0;
+
+  /* 4 — of that, what the policy hands back. */
+  const payment = refundPaymentCase(order);
+  const nonRefundable =
+    payment === "partial" && !settings.partialAdvanceRefundable
+      ? Math.min(online, collected)
+      : 0;
+  const refundable = Math.max(0, collected - nonRefundable);
+
+  /* 5 — scale the goods value by the refundable fraction of the order. */
+  const scaled = total > 0 ? Math.round((goodsValue * refundable) / total) : 0;
+  const advanceForfeited = Math.max(0, Math.min(goodsValue, goodsValue - scaled));
+
+  /* 6 — cap at the goods value and at the pool earlier refunds left behind. */
+  const alreadyRefunded = rupees(order.alreadyRefunded);
+  const payable = Math.max(0, refundable - alreadyRefunded);
+  const gross = Math.max(0, Math.min(scaled, goodsValue, payable));
+  const cappedByPool = Math.min(scaled, goodsValue) > payable;
+
+  /* 7 — the fee the store keeps. */
+  const ourFault = isOurFaultReason(reason);
+  const feeWaived = ourFault && settings.waiveRefundFeeOnOurFault;
+  const percentFee = Math.round((gross * rupees(settings.refundFeePercent)) / 100);
+  const rawFee = feeWaived ? 0 : percentFee + rupees(settings.refundFeeFlat);
+  const fee = Math.min(Math.max(0, rawFee), gross);
+  const feeCapped = rawFee > gross;
+  const net = Math.max(0, gross - fee);
+
+  /* ---- the same numbers, in sentences a customer can read ---- */
+  if (collected <= 0) {
+    why.push(
+      "No money has been collected for this order yet, so there is nothing to refund."
+    );
+  } else {
+    if (discountShare > 0) {
+      why.push(
+        `${formatINR(discountShare)} of your order discount sat on this item, so its refundable value is ${formatINR(goodsValue)}.`
+      );
+    }
+    if (advanceForfeited > 0) {
+      why.push(
+        `Part-paid order: the ${formatINR(online)} online advance isn't refundable, so ${formatINR(advanceForfeited)} of this item's value is kept.`
+      );
+    } else if (payment === "partial" && settings.partialAdvanceRefundable) {
+      why.push("Your online advance is refundable on this order.");
+    }
+    if (cappedByPool) {
+      why.push(
+        `Capped at ${formatINR(payable)} — the rest of this order's refundable amount has already been paid back.`
+      );
+    }
+    if (feeWaived) {
+      why.push("This one is on us, so no return fee is charged.");
+    } else if (fee > 0) {
+      why.push(`Less a ${formatINR(fee)} return fee.`);
+    }
+    if (feeCapped) {
+      why.push(
+        "The return fee comes to more than the refund, so the payout is nil — we never charge you more than the refund itself."
+      );
+    }
+    // Only when money actually moves — "sent back to your card" under a ₹0
+    // payout would read as a promise the store isn't making.
+    if (net > 0) {
+      why.push(
+        payment === "prepaid"
+          ? "Sent back to the card or UPI you paid with, in 5–7 working days."
+          : "Paid out by UPI — we'll ask for your UPI ID once the return is approved."
+      );
+    }
+  }
+
+  return {
+    gross,
+    fee,
+    net,
+    method: gross <= 0 ? "none" : payment === "prepaid" ? "original" : "upi",
+    explanation: why,
+    payment,
+    lineValue,
+    discountShare,
+    collected,
+    nonRefundable,
+    advanceForfeited,
+    payable,
+    alreadyRefunded,
+    feeWaived,
+    feeCapped,
+  };
+}
+
+/**
+ * The one line the customer reads before they commit to a return. Deliberately
+ * short — the detail sits behind an (i) and "View more".
+ */
+export function refundPreviewLine(b: RefundBreakdown): string {
+  if (b.gross <= 0) {
+    return "No refund is payable on this item.";
+  }
+  if (b.net <= 0) {
+    return `You'll receive nothing back — the ${formatINR(b.fee)} return fee covers the whole amount.`;
+  }
+  return b.fee > 0
+    ? `You'll receive ${formatINR(b.net)} — ${formatINR(b.fee)} return fee applies`
+    : `You'll receive ${formatINR(b.net)}`;
+}
+
+/* ------------------------------------------------------------------- UPI */
+
+/**
+ * A UPI handle (`name@bank`), cleaned up or rejected.
+ *
+ * Shared by the customer's form and the server action so a value that passes
+ * validation in the browser is the same one the endpoint accepts. Only a VPA
+ * is ever taken — never a bank account number, which would be a different
+ * class of data needing encryption and a retention policy first.
+ */
+export function normaliseUpiId(input: string): string | null {
+  const value = (input ?? "").trim().replace(/\s+/g, "");
+  if (value.length < 4 || value.length > 100) return null;
+  // Handle, then '@', then the PSP. Letters only after the '@' — every Indian
+  // PSP suffix (okaxis, ybl, paytm, upi…) is alphabetic.
+  return /^[a-zA-Z0-9][a-zA-Z0-9._-]{1,63}@[a-zA-Z]{2,32}$/.test(value)
+    ? value.toLowerCase()
+    : null;
+}
+
+/** Bounds for the UTR / reference the owner records once the money is sent. */
+export const MAX_REFUND_REFERENCE_LENGTH = 64;

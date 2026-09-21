@@ -7,6 +7,7 @@ import { PwaRegister } from "@/components/store/pwa-register";
 import { RouteProgress } from "@/components/store/route-progress";
 import { UpdateWatcher } from "@/components/store/update-watcher";
 import { buildId } from "@/lib/build-id";
+import { getMyWishlist } from "@/app/actions/wishlist";
 import { getSettings } from "@/lib/settings";
 import { getUserSession } from "@/lib/user-auth";
 import { prisma } from "@/lib/prisma";
@@ -117,6 +118,12 @@ export default async function RootLayout({
   // If the shopper is logged in, hand their name/phone to the cart so the
   // add-to-cart mini sign-up never prompts them again.
   const session = await getUserSession();
+
+  // Saved products for a signed-in customer. Rendered server-side so the
+  // hearts are already filled on first paint; guests resolve theirs from
+  // localStorage inside WishlistProvider.
+  const wishlistSlugs = session ? await getMyWishlist() : [];
+
   let initialLead: { name: string; phone: string } | null = null;
   if (session) {
     const u = await prisma.user
@@ -189,7 +196,11 @@ export default async function RootLayout({
 
         {/* Server-only fields (the product-page default copy) are stripped here
             so they don't ride along in every page's client payload. */}
-        <Providers settings={clientSettings} initialLead={initialLead}>
+        <Providers
+          settings={clientSettings}
+          initialLead={initialLead}
+          wishlist={{ signedIn: !!session, slugs: wishlistSlugs }}
+        >
           {children}
         </Providers>
 

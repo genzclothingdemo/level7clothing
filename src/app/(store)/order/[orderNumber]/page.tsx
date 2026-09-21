@@ -12,7 +12,12 @@ import {
   type ExistingRequest,
   type ReturnableLine,
 } from "@/components/store/return-request";
-import { resolveReturnPolicy, returnWindow, isReturnStatus } from "@/lib/returns";
+import {
+  formatReturnDate,
+  isReturnStatus,
+  resolveReturnPolicy,
+  returnWindow,
+} from "@/lib/returns";
 import { prisma as db } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -122,6 +127,20 @@ export default async function OrderPage({
     reason: r.reason,
     adminNote: r.adminNote,
     createdAt: r.createdAt.toISOString(),
+    // The figures stored at the decision, never recomputed here: the customer
+    // is shown what was agreed, not what today's fee settings would produce.
+    refund:
+      r.refundAmount == null
+        ? null
+        : {
+            net: r.refundAmount,
+            gross: r.refundGross,
+            fee: r.refundFee,
+            method: r.refundMethod,
+            upi: r.refundUpi,
+            reference: r.refundReference,
+            paidOn: r.refundedAt ? formatReturnDate(r.refundedAt) : null,
+          },
   }));
   const history = (
     Array.isArray(order.statusHistory) ? order.statusHistory : []

@@ -5,139 +5,114 @@ import Link from "next/link";
 import { User, Package, Star, Info, Phone, MapPin } from "lucide-react";
 import { AccountProfile } from "@/components/store/account-profile";
 import { AccountOrders, type AccountOrder } from "@/components/store/account-orders";
-import { AddressBook, type SavedAddress } from "@/components/store/address-book";
+import { AddressBook } from "@/components/store/address-book";
 import { PortfolioSection, type ReviewItem } from "@/components/store/portfolio-section";
+import type { SavedAddress } from "@/app/actions/addresses";
 import { cn } from "@/lib/utils";
 
-type Tab = "profile" | "orders" | "addresses" | "portfolio";
+export type AccountTab = "profile" | "orders" | "addresses" | "portfolio";
+
+const TABS: { id: AccountTab; label: string; icon: typeof User }[] = [
+  { id: "profile", label: "Profile", icon: User },
+  { id: "orders", label: "My Orders", icon: Package },
+  { id: "addresses", label: "Addresses", icon: MapPin },
+  { id: "portfolio", label: "Portfolio", icon: Star },
+];
 
 export function AccountView({
   user,
   orders,
   reviews,
   addresses,
+  initialTab = "profile",
 }: {
-  user: {
-    name: string;
-    email: string;
-    phone: string | null;
-    address?: string | null;
-    city?: string | null;
-    state?: string | null;
-    pincode?: string | null;
-  };
+  user: { name: string; email: string; phone: string | null };
   orders: AccountOrder[];
   reviews: ReviewItem[];
+  /** Saved `Address` rows, default first. The only address data on this page. */
   addresses: SavedAddress[];
+  /** From `?tab=` so "Change address" and other links can deep-link a tab. */
+  initialTab?: AccountTab;
 }) {
-  const [activeTab, setActiveTab] = useState<Tab>("profile");
+  const [activeTab, setActiveTab] = useState<AccountTab>(initialTab);
+
+  const counts: Record<AccountTab, number | null> = {
+    profile: null,
+    orders: orders.length,
+    addresses: addresses.length,
+    portfolio: reviews.length,
+  };
+
+  // The address book guarantees exactly one default whenever it is non-empty,
+  // and the query sorts defaults first — but fall back to the first row rather
+  // than assume, so a legacy account can never render an empty summary.
+  const defaultAddress =
+    addresses.find((a) => a.isDefault) ?? addresses[0] ?? null;
 
   return (
     <div className="mt-6 space-y-6">
-      {/* ── Tab Bar & Navigation Buttons ── */}
-      <div className="flex overflow-x-auto pb-1 no-scrollbar gap-2 border-b border-border">
-        {/* Profile Tab */}
-        <button
-          type="button"
-          onClick={() => setActiveTab("profile")}
-          className={cn(
-            "flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap cursor-pointer",
-            activeTab === "profile"
-              ? "bg-accent/15 text-accent shadow-sm"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground"
-          )}
-        >
-          <User className="h-4 w-4" />
-          Profile
-        </button>
+      {/* ── Tab bar ── */}
+      <div
+        role="tablist"
+        aria-label="Account sections"
+        className="no-scrollbar flex gap-2 overflow-x-auto border-b border-border pb-1"
+      >
+        {TABS.map(({ id, label, icon: Icon }) => {
+          const active = activeTab === id;
+          const count = counts[id];
+          return (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setActiveTab(id)}
+              className={cn(
+                "flex min-h-11 shrink-0 cursor-pointer items-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-medium transition-colors",
+                active
+                  ? "bg-accent/15 text-accent"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              )}
+            >
+              <Icon className="h-4 w-4" />
+              {label}
+              {count !== null && (
+                <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                  {count}
+                </span>
+              )}
+            </button>
+          );
+        })}
 
-        {/* My Orders Tab */}
-        <button
-          type="button"
-          onClick={() => setActiveTab("orders")}
-          className={cn(
-            "flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap cursor-pointer",
-            activeTab === "orders"
-              ? "bg-accent/15 text-accent shadow-sm"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground"
-          )}
-        >
-          <Package className="h-4 w-4" />
-          My Orders
-          <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-            {orders.length}
-          </span>
-        </button>
-
-        {/* Addresses Tab — the AddressBook component existed but was rendered
-            nowhere, so saved addresses could not be managed at all. */}
-        <button
-          type="button"
-          onClick={() => setActiveTab("addresses")}
-          className={cn(
-            "flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap cursor-pointer",
-            activeTab === "addresses"
-              ? "bg-accent/15 text-accent shadow-sm"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground"
-          )}
-        >
-          <MapPin className="h-4 w-4" />
-          Addresses
-          <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-            {addresses.length}
-          </span>
-        </button>
-
-        {/* Portfolio Tab */}
-        <button
-          type="button"
-          onClick={() => setActiveTab("portfolio")}
-          className={cn(
-            "flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap cursor-pointer",
-            activeTab === "portfolio"
-              ? "bg-accent/15 text-accent shadow-sm"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground"
-          )}
-        >
-          <Star className="h-4 w-4" />
-          Portfolio
-          <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-            {reviews.length}
-          </span>
-        </button>
-
-        {/* About Us (Direct Link to Full Story) */}
         <Link
           href="/about"
-          className="flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-all whitespace-nowrap"
+          className="flex min-h-11 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
           <Info className="h-4 w-4" />
           About Us
         </Link>
-
-        {/* Contact Us (Direct Link) */}
         <Link
           href="/contact"
-          className="flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-all whitespace-nowrap"
+          className="flex min-h-11 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
           <Phone className="h-4 w-4" />
           Contact Us
         </Link>
       </div>
 
-      {/* ── Active Tab Content ── */}
+      {/* ── Active panel ── */}
       <div className="pt-2">
         {activeTab === "profile" && (
-          <div className="max-w-xl">
-            <h2 className="mb-4 font-serif text-2xl">Profile Details</h2>
+          <div className="max-w-2xl">
+            <h2 className="mb-4 font-serif text-2xl">Profile</h2>
             <AccountProfile
               name={user.name}
               email={user.email}
               phone={user.phone}
-              address={user.address}
-              city={user.city}
-              state={user.state}
-              pincode={user.pincode}
+              defaultAddress={defaultAddress}
+              addressCount={addresses.length}
+              onManageAddresses={() => setActiveTab("addresses")}
             />
           </div>
         )}
@@ -152,7 +127,7 @@ export function AccountView({
         )}
 
         {activeTab === "addresses" && (
-          <div className="max-w-2xl">
+          <div className="max-w-3xl">
             <h2 className="mb-4 font-serif text-2xl">
               Saved addresses ({addresses.length})
             </h2>

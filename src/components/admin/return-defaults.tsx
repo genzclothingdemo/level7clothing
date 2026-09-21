@@ -6,8 +6,13 @@ import { toast } from "sonner";
 import { Loader2, ShieldCheck, ShieldOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { InfoTip } from "@/components/store/info-tip";
+import { formatINR } from "@/lib/utils";
 import { updateReturnDefaults } from "@/app/actions/returns";
-import { formatReturnDate, normaliseReturnReasons } from "@/lib/returns";
+import {
+  computeRefund,
+  formatReturnDate,
+  normaliseReturnReasons,
+} from "@/lib/returns";
 import {
   ReasonListEditor,
   toReasonRows,
@@ -35,6 +40,11 @@ export function ReturnPolicyForm({
     defaultReturnsInfo: string;
     returnReasons: string[];
     returnPolicyNote: string;
+    refundFeePercent: number;
+    refundFeeFlat: number;
+    partialAdvanceRefundable: boolean;
+    waiveRefundFeeOnOurFault: boolean;
+    refundPolicyNote: string;
   };
   /**
    * Today, stamped on the server. The "closes on" preview is computed from it
@@ -51,6 +61,11 @@ export function ReturnPolicyForm({
     returnWindowDays: String(initial.returnWindowDays),
     defaultReturnsInfo: initial.defaultReturnsInfo,
     returnPolicyNote: initial.returnPolicyNote,
+    refundFeePercent: String(initial.refundFeePercent),
+    refundFeeFlat: String(initial.refundFeeFlat),
+    partialAdvanceRefundable: initial.partialAdvanceRefundable,
+    waiveRefundFeeOnOurFault: initial.waiveRefundFeeOnOurFault,
+    refundPolicyNote: initial.refundPolicyNote,
   });
   const [reasons, setReasons] = useState<ReasonRow[]>(() =>
     toReasonRows(initial.returnReasons)
@@ -63,6 +78,47 @@ export function ReturnPolicyForm({
   const rules = f.returnPolicyNote.split("\n").filter((l) => l.trim()).length;
   const bullets = f.defaultReturnsInfo.split("\n").filter((l) => l.trim()).length;
 
+  const feePercent = Math.min(50, Math.max(0, Math.trunc(Number(f.refundFeePercent) || 0)));
+  const feeFlat = Math.min(10000, Math.max(0, Math.trunc(Number(f.refundFeeFlat) || 0)));
+  const refundRules = {
+    refundFeePercent: feePercent,
+    refundFeeFlat: feeFlat,
+    partialAdvanceRefundable: f.partialAdvanceRefundable,
+    waiveRefundFeeOnOurFault: f.waiveRefundFeeOnOurFault,
+  };
+
+  // A worked example, so the owner sees the effect of a fee in rupees rather
+  // than having to do the percentage in their head. A plain prepaid ₹1,000
+  // return, and the part-paid case that behaves differently.
+  const examplePrepaid = computeRefund({
+    order: {
+      total: 1000,
+      amountPaid: 1000,
+      balanceDue: 0,
+      subtotal: 1000,
+      discountTotal: 0,
+      status: "delivered",
+      paymentStatus: "paid",
+    },
+    lines: [{ unitPrice: 1000, quantity: 1 }],
+    settings: refundRules,
+    reason: "Wrong size",
+  });
+  const examplePartial = computeRefund({
+    order: {
+      total: 1000,
+      amountPaid: 200,
+      balanceDue: 800,
+      subtotal: 1000,
+      discountTotal: 0,
+      status: "delivered",
+      paymentStatus: "partial",
+    },
+    lines: [{ unitPrice: 1000, quantity: 1 }],
+    settings: refundRules,
+    reason: "Wrong size",
+  });
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
@@ -73,6 +129,11 @@ export function ReturnPolicyForm({
       defaultReturnsInfo: f.defaultReturnsInfo,
       returnPolicyNote: f.returnPolicyNote,
       returnReasons: reasons.map((r) => r.value),
+      refundFeePercent: feePercent,
+      refundFeeFlat: feeFlat,
+      partialAdvanceRefundable: f.partialAdvanceRefundable,
+      waiveRefundFeeOnOurFault: f.waiveRefundFeeOnOurFault,
+      refundPolicyNote: f.refundPolicyNote,
     });
     setSaving(false);
     if (!res.ok) {
@@ -84,7 +145,12 @@ export function ReturnPolicyForm({
     // that back stops the form claiming an edit the database didn't keep.
     const saved = res.returnReasons ?? normaliseReturnReasons(reasons.map((r) => r.value));
     setReasons(toReasonRows(saved));
-    setF((p) => ({ ...p, returnWindowDays: String(days) }));
+    setF((p) => ({
+      ...p,
+      returnWindowDays: String(days),
+      refundFeePercent: String(feePercent),
+      refundFeeFlat: String(feeFlat),
+    }));
     toast.success("Return policy saved");
     router.refresh();
   }
@@ -170,6 +236,125 @@ export function ReturnPolicyForm({
         hint="What a customer may pick on the return form. Add, rename, reorder or remove."
       >
         <ReasonListEditor rows={reasons} onChange={setReasons} disabled={saving} />
+      </Section>
+
+      <Section
+        title="Money back"
+        hint="What a customer gets when a return is approved. Recorded on the request at that moment — changing this later never rewrites a refund that already went out."
+      >
+        <div className="flex flex-wrap gap-3">
+          <label className="block min-w-0 flex-1 basis-32">
+            <span className="label">
+              We keep %
+              <InfoTip term="Restocking percentage">
+                A slice of the refund the store holds back to cover handling
+                and the return courier. Leave it at 0 for a full refund.
+              </InfoTip>
+            </span>
+            <input
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={50}
+              value={f.refundFeePercent}
+              onChange={(e) =>
+                setF((p) => ({ ...p, refundFeePercent: e.target.value }))
+              }
+              onBlur={() =>
+                setF((p) => ({ ...p, refundFeePercent: String(feePercent) }))
+              }
+              className="input h-11"
+            />
+          </label>
+          <label className="block min-w-0 flex-1 basis-32">
+            <span className="label">
+              …plus ₹
+              <InfoTip term="Flat return fee">
+                A fixed amount kept on top of the percentage — the two are
+                added together. If they come to more than the refund itself,
+                the customer is simply paid nothing; they are never billed.
+              </InfoTip>
+            </span>
+            <input
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={10000}
+              value={f.refundFeeFlat}
+              onChange={(e) =>
+                setF((p) => ({ ...p, refundFeeFlat: e.target.value }))
+              }
+              onBlur={() => setF((p) => ({ ...p, refundFeeFlat: String(feeFlat) }))}
+              className="input h-11"
+            />
+          </label>
+        </div>
+
+        <Toggle
+          label="Never charge the fee when it's our mistake"
+          checked={f.waiveRefundFeeOnOurFault}
+          onChange={(v) => setF((p) => ({ ...p, waiveRefundFeeOnOurFault: v }))}
+        />
+        <p className="text-xs text-muted-foreground">
+          Damaged, defective, wrong item or not as described → the fee is
+          waived, whatever the two numbers above say.
+        </p>
+
+        <Toggle
+          label="Refund the online advance on part-paid orders"
+          checked={f.partialAdvanceRefundable}
+          onChange={(v) => setF((p) => ({ ...p, partialAdvanceRefundable: v }))}
+        />
+        <p className="text-xs text-muted-foreground">
+          Off (the usual setting): the advance is kept, and only the cash the
+          courier collected is returned. Cash-on-delivery refunds are always
+          paid out by UPI — the customer gives their UPI ID once you approve.
+        </p>
+
+        {/* Rupees, not percentages: the owner should never have to do the
+            arithmetic to know what this setting costs them. */}
+        <div className="space-y-1 rounded-lg border border-border bg-muted/40 p-3 text-xs">
+          <p className="font-medium">On a ₹1,000 return</p>
+          <p className="flex justify-between gap-2 text-muted-foreground">
+            <span>Paid in full online</span>
+            <span className="tabular-nums text-foreground">
+              customer gets {formatINR(examplePrepaid.net)}
+            </span>
+          </p>
+          <p className="flex justify-between gap-2 text-muted-foreground">
+            <span>₹200 advance + ₹800 on delivery</span>
+            <span className="tabular-nums text-foreground">
+              customer gets {formatINR(examplePartial.net)}
+            </span>
+          </p>
+          <p className="flex justify-between gap-2 text-muted-foreground">
+            <span>Arrived damaged</span>
+            <span className="tabular-nums text-foreground">
+              {f.waiveRefundFeeOnOurFault
+                ? "customer gets ₹1,000"
+                : `customer gets ${formatINR(examplePrepaid.net)}`}
+            </span>
+          </p>
+        </div>
+      </Section>
+
+      <Section
+        title="Refund rules on the form"
+        hint="Shown beside the refund figure the customer is quoted. One rule per line."
+      >
+        <textarea
+          rows={3}
+          value={f.refundPolicyNote}
+          onChange={(e) => setF((p) => ({ ...p, refundPolicyNote: e.target.value }))}
+          placeholder="Prepaid orders are refunded to the original payment method within 5–7 working days."
+          className="input resize-y font-mono text-xs leading-relaxed"
+          aria-label="Refund rules shown on the return form"
+        />
+        <p className="text-xs text-muted-foreground">
+          {f.refundPolicyNote.split("\n").filter((l) => l.trim()).length === 0
+            ? "Nothing shown beside the refund figure"
+            : `${f.refundPolicyNote.split("\n").filter((l) => l.trim()).length} line(s)`}
+        </p>
       </Section>
 
       <Section

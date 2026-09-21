@@ -3,14 +3,27 @@ import { LogOut } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { getUserSession } from "@/lib/user-auth";
 import { logout } from "@/app/actions/account";
-import { AccountView } from "@/components/store/account-view";
+import { listMyAddresses } from "@/app/actions/addresses";
+import { AccountView, type AccountTab } from "@/components/store/account-view";
 import type { AccountOrder } from "@/components/store/account-orders";
 import type { StatusEntry } from "@/components/store/order-timeline";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "My account" };
 
-export default async function AccountPage() {
+const TABS: readonly AccountTab[] = [
+  "profile",
+  "orders",
+  "addresses",
+  "portfolio",
+];
+
+export default async function AccountPage({
+  searchParams,
+}: {
+  // Next 16: a promise that has to be awaited.
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
   const session = await getUserSession();
   if (!session) redirect("/account/login?next=/account");
 
@@ -20,14 +33,16 @@ export default async function AccountPage() {
 
   if (!user) redirect("/account/login");
 
-  // Saved addresses. Default first, then most recently updated — the same
-  // order the checkout address picker uses.
-  const addresses = await prisma.address
-    .findMany({
-      where: { userId: user.id },
-      orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }],
-    })
-    .catch(() => []);
+  // `?tab=addresses` so anything can deep-link a panel — checkout's "Manage
+  // addresses" link, and the Change button on the profile summary.
+  const tabParam = (await searchParams).tab;
+  const initialTab = TABS.find((t) => t === tabParam) ?? "profile";
+
+  // Saved addresses, default first. Read through the action rather than
+  // Prisma directly so the one-time legacy migration runs here too: an account
+  // that still has only the inline `User.address` columns gets them folded
+  // into a real `Address` row on this load. See src/app/actions/addresses.ts.
+  const addresses = (await listMyAddresses()) ?? [];
 
   // Orders
   const raw = await prisma.order
@@ -108,22 +123,16 @@ export default async function AccountPage() {
         </form>
       </div>
 
-      {/* ── Tabbed View ── */}
+      {/* ── Tabbed View ──
+          `user` is narrowed to identity on purpose: the inline
+          `user.address / city / state / pincode` columns are legacy and must
+          not reach the UI. Addresses come from the `Address` table only. */}
       <AccountView
-        user={user}
+        user={{ name: user.name, email: user.email, phone: user.phone }}
         orders={orders}
         reviews={reviews}
-        addresses={addresses.map((a) => ({
-          id: a.id,
-          label: a.label,
-          fullName: a.fullName,
-          phone: a.phone,
-          address: a.address,
-          city: a.city,
-          state: a.state,
-          pincode: a.pincode,
-          isDefault: a.isDefault,
-        }))}
+        addresses={addresses}
+        initialTab={initialTab}
       />
     </div>
   );

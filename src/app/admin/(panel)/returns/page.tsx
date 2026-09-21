@@ -11,13 +11,18 @@ import { ReturnPolicyForm } from "@/components/admin/return-defaults";
 import { ReturnFilters } from "@/components/admin/return-filters";
 import { ReturnActions } from "@/components/admin/return-actions";
 import {
+  DEFAULT_REFUND_SETTINGS,
   OPEN_RETURN_STATUSES,
   OUR_FAULT_PATTERNS,
   OUR_FAULT_REASONS,
+  REFUND_METHOD_LABEL,
   RETURN_STATUSES,
   RETURN_STATUS_COLOR,
   RETURN_STATUS_LABEL,
+  computeRefund,
+  formatReturnDate,
   isOurFaultReason,
+  isRefundMethod,
   isReturnStatus,
   normaliseReturnReasons,
   returnReasonLabel,
@@ -68,6 +73,11 @@ async function readPolicy() {
         returnReasons: true,
         returnPolicyNote: true,
         nimbusEnabled: true,
+        refundFeePercent: true,
+        refundFeeFlat: true,
+        partialAdvanceRefundable: true,
+        waiveRefundFeeOnOurFault: true,
+        refundPolicyNote: true,
       },
     })
     .catch(() => null);
@@ -80,6 +90,20 @@ async function readPolicy() {
     returnReasons: normaliseReturnReasons(row?.returnReasons),
     returnPolicyNote: row?.returnPolicyNote ?? "",
     nimbusEnabled: row?.nimbusEnabled ?? DEFAULT_SETTINGS.nimbusEnabled,
+    // The money rules. A failed read falls back to "no fee" rather than to a
+    // guess — inventing a deduction is the one wrong answer here.
+    refund: {
+      refundFeePercent:
+        row?.refundFeePercent ?? DEFAULT_REFUND_SETTINGS.refundFeePercent,
+      refundFeeFlat: row?.refundFeeFlat ?? DEFAULT_REFUND_SETTINGS.refundFeeFlat,
+      partialAdvanceRefundable:
+        row?.partialAdvanceRefundable ??
+        DEFAULT_REFUND_SETTINGS.partialAdvanceRefundable,
+      waiveRefundFeeOnOurFault:
+        row?.waiveRefundFeeOnOurFault ??
+        DEFAULT_REFUND_SETTINGS.waiveRefundFeeOnOurFault,
+    },
+    refundPolicyNote: row?.refundPolicyNote ?? "",
   };
 }
 
@@ -173,6 +197,19 @@ export default async function AdminReturns({
                   state: true,
                   pincode: true,
                   paymentMethod: true,
+                  // The refund maths needs the money columns, plus every other
+                  // return on the same order so an earlier payout is counted
+                  // against the pot before this one is offered.
+                  total: true,
+                  amountPaid: true,
+                  balanceDue: true,
+                  subtotal: true,
+                  discountTotal: true,
+                  status: true,
+                  paymentStatus: true,
+                  returnRequests: {
+                    select: { id: true, status: true, refundAmount: true },
+                  },
                 },
               },
             },
@@ -258,6 +295,11 @@ export default async function AdminReturns({
               defaultReturnsInfo: policy.defaultReturnsInfo,
               returnReasons: policy.returnReasons,
               returnPolicyNote: policy.returnPolicyNote,
+              refundFeePercent: policy.refund.refundFeePercent,
+              refundFeeFlat: policy.refund.refundFeeFlat,
+              partialAdvanceRefundable: policy.refund.partialAdvanceRefundable,
+              waiveRefundFeeOnOurFault: policy.refund.waiveRefundFeeOnOurFault,
+              refundPolicyNote: policy.refundPolicyNote,
             }}
             todayISO={new Date(now).toISOString()}
           />
@@ -289,6 +331,34 @@ export default async function AdminReturns({
                 const waitingDays = Math.floor((now - r.createdAt.getTime()) / DAY);
                 const stale = s === "pending" && waitingDays >= 3;
                 const lineTotal = r.unitPrice * r.quantity;
+
+                // The same `computeRefund` the approval action re-runs, and
+                // the same one the customer's form previews with. Earlier
+                // refunds on this order are subtracted; this request's own
+                // figure is excluded so it isn't counted against itself.
+                const refund = computeRefund({
+                  order: {
+                    total: r.order.total,
+                    amountPaid: r.order.amountPaid,
+                    balanceDue: r.order.balanceDue,
+                    subtotal: r.order.subtotal,
+                    discountTotal: r.order.discountTotal,
+                    status: r.order.status,
+                    paymentStatus: r.order.paymentStatus,
+                    alreadyRefunded: r.order.returnRequests.reduce(
+                      (sum, o) =>
+                        o.id === r.id ||
+                        o.status === "rejected" ||
+                        o.status === "cancelled"
+                          ? sum
+                          : sum + (o.refundAmount ?? 0),
+                      0
+                    ),
+                  },
+                  lines: [{ unitPrice: r.unitPrice, quantity: r.quantity }],
+                  settings: policy.refund,
+                  reason: r.reason,
+                });
 
                 return (
                   <div
@@ -395,18 +465,63 @@ export default async function AdminReturns({
                           </p>
                         )}
 
+                        {/* The figures fixed at the decision — deliberately
+                            the stored ones, not a fresh calculation, so a
+                            later fee change can't rewrite what went out. */}
                         {r.refundAmount != null && (
-                          <p className="mt-1.5 text-xs text-muted-foreground">
-                            Refund recorded: <b>{formatINR(r.refundAmount)}</b>
-                            {r.refundMethod ? ` · ${r.refundMethod}` : ""}
-                          </p>
+                          <div className="mt-1.5 rounded-lg border border-border bg-muted/40 px-2.5 py-1.5 text-xs">
+                            <p className="flex flex-wrap items-baseline gap-x-1.5">
+                              <span className="text-muted-foreground">
+                                {r.refundedAt ? "Refunded" : "Refund agreed"}:
+                              </span>
+                              <b className="tabular-nums">
+                                {formatINR(r.refundAmount)}
+                              </b>
+                              {r.refundGross != null && r.refundFee ? (
+                                <span className="text-muted-foreground tabular-nums">
+                                  ({formatINR(r.refundGross)} − {formatINR(r.refundFee)}{" "}
+                                  fee)
+                                </span>
+                              ) : null}
+                              {r.refundMethod && isRefundMethod(r.refundMethod) && (
+                                <span className="text-muted-foreground">
+                                  · {REFUND_METHOD_LABEL[r.refundMethod]}
+                                </span>
+                              )}
+                            </p>
+                            {r.refundUpi && (
+                              <p className="break-all text-muted-foreground">
+                                UPI: <b className="font-mono">{r.refundUpi}</b>
+                              </p>
+                            )}
+                            {r.refundReference && (
+                              <p className="break-all text-muted-foreground">
+                                Ref: <b className="font-mono">{r.refundReference}</b>
+                                {r.refundedAt
+                                  ? ` · ${formatReturnDate(r.refundedAt)}`
+                                  : ""}
+                              </p>
+                            )}
+                            {!r.refundedAt && r.refundAmount > 0 && (
+                              <p className="text-muted-foreground">
+                                Not paid out yet.
+                              </p>
+                            )}
+                          </div>
                         )}
                       </div>
 
                       <ReturnActions
                         id={r.id}
                         status={s}
-                        suggestedRefund={lineTotal}
+                        refund={refund}
+                        recorded={{
+                          gross: r.refundGross,
+                          fee: r.refundFee,
+                          net: r.refundAmount,
+                          method: r.refundMethod,
+                          upi: r.refundUpi,
+                        }}
                         nimbusError={r.nimbusError}
                         nimbusOrderId={r.nimbusOrderId}
                         nimbusEnabled={policy.nimbusEnabled}

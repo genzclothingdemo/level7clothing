@@ -1,6 +1,7 @@
 "use server";
 
 import { z } from "zod";
+import type { Order } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
 import { sendOrderEmails } from "@/lib/email";
@@ -18,6 +19,7 @@ import {
 } from "@/lib/razorpay";
 import { createDraftForOrder } from "@/lib/fulfilment";
 import { calculateShippingRate } from "@/lib/nimbuspost";
+import { isCouponClaimError, redeemCoupon, validateCoupon } from "@/lib/coupons";
 
 import type {
   ProductOption,
@@ -231,27 +233,52 @@ export async function placeOrder(input: PlaceOrderInput) {
     }
   }
   
-  // Calculate discount server-side if coupon code is provided
+  // ---- Re-validate the coupon, now, against this cart. ----
+  //
+  // A discount proved when the shopper typed the code is not evidence it is
+  // still valid: the window can have closed, the last use can have been taken,
+  // and the cart itself can have changed since. So the code goes through the
+  // same `validateCoupon` the /api/store/coupons/validate route uses — same
+  // rules, same rounding, same answer — against the prices we just recomputed
+  // from the database.
+  //
+  // A refusal fails the order rather than quietly dropping the discount: the
+  // total the shopper is about to authorise would otherwise be higher than the
+  // one on screen.
   let discountTotal = 0;
-  let appliedCoupon = null;
+  let appliedCoupon: {
+    id: string;
+    code: string;
+    usageLimit: number | null;
+    perUserLimit: number | null;
+  } | null = null;
 
-  if (data.couponCode) {
-    const coupon = await prisma.coupon.findUnique({
-      where: { code: data.couponCode.toUpperCase() },
+  if (data.couponCode?.trim()) {
+    const verdict = await validateCoupon({
+      code: data.couponCode,
+      lines: validItems.map((i) => ({
+        productId: i.productId,
+        price: i.price,
+        quantity: i.quantity,
+      })),
+      userId: user.id,
+      email: data.email,
     });
-    
-    if (coupon && coupon.isActive && (coupon.usageLimit === null || coupon.usedCount < coupon.usageLimit)) {
-      const applicableItems = validItems.filter(i => coupon.productIds.includes(i.productId));
-      if (applicableItems.length > 0) {
-        appliedCoupon = coupon;
-        const applicableSubtotal = applicableItems.reduce((sum, i) => sum + (i.price * i.quantity), 0);
-        if (coupon.isPercentage) {
-          discountTotal = Math.floor((applicableSubtotal * coupon.discountAmount) / 100);
-        } else {
-          discountTotal = Math.min(coupon.discountAmount, applicableSubtotal);
-        }
-      }
+
+    if (!verdict.ok) {
+      return {
+        ok: false as const,
+        error: `${verdict.message} Please remove the code and try again.`,
+      };
     }
+
+    discountTotal = verdict.discount;
+    appliedCoupon = {
+      id: verdict.couponId,
+      code: verdict.code,
+      usageLimit: verdict.usageLimit,
+      perUserLimit: verdict.perUserLimit,
+    };
   }
 
   const total = Math.max(0, subtotal + shipping - discountTotal);
@@ -296,53 +323,70 @@ export async function placeOrder(input: PlaceOrderInput) {
     (i) => productById.get(i.productId)?.isCustomisable === true
   );
 
-  const order = await prisma.$transaction(async (tx) => {
-    const created = await tx.order.create({
-      data: {
-        orderNumber: number,
-        userId: user.id,
-        customerName: data.customerName,
-        email: data.email,
-        phone: data.phone,
-        address: data.address,
-        city: data.city,
-        state: data.state,
-        pincode: data.pincode,
-        note: data.note,
-        paymentMethod: data.paymentMethod,
-        items: validItems,
-        subtotal,
-        shipping,
-        discountTotal,
-        couponCode: appliedCoupon?.code,
-        total,
-        amountPaid: 0,
-        balanceDue,
-        needsCustomisation,
-        statusHistory: [
-          { status: "pending", note: "Order placed", at: new Date().toISOString() },
-        ],
-      },
+  // `redeemCoupon` throws when it loses the race for the last use, which rolls
+  // the whole transaction back — no order row, no decremented stock.
+  let order: Order;
+  try {
+    order = await prisma.$transaction(async (tx) => {
+      const created = await tx.order.create({
+        data: {
+          orderNumber: number,
+          userId: user.id,
+          customerName: data.customerName,
+          email: data.email,
+          phone: data.phone,
+          address: data.address,
+          city: data.city,
+          state: data.state,
+          pincode: data.pincode,
+          note: data.note,
+          paymentMethod: data.paymentMethod,
+          items: validItems,
+          subtotal,
+          shipping,
+          discountTotal,
+          couponCode: appliedCoupon?.code,
+          total,
+          amountPaid: 0,
+          balanceDue,
+          needsCustomisation,
+          statusHistory: [
+            { status: "pending", note: "Order placed", at: new Date().toISOString() },
+          ],
+        },
+      });
+
+      // Reduce stock (reserves it while an online payment is completed).
+      for (const i of validItems) {
+        await tx.product.update({
+          where: { id: i.productId },
+          data: { stock: { decrement: i.quantity } },
+        });
+      }
+
+      // Take the use and write the redemption row in this same transaction, so
+      // the global count, the per-person history and the order either all
+      // exist or none of them do.
+      if (appliedCoupon) {
+        await redeemCoupon(tx, {
+          couponId: appliedCoupon.id,
+          amount: discountTotal,
+          usageLimit: appliedCoupon.usageLimit,
+          perUserLimit: appliedCoupon.perUserLimit,
+          orderId: created.id,
+          userId: user.id,
+          email: data.email,
+        });
+      }
+
+      return created;
     });
-
-    // Reduce stock (reserves it while an online payment is completed).
-    for (const i of validItems) {
-      await tx.product.update({
-        where: { id: i.productId },
-        data: { stock: { decrement: i.quantity } },
-      });
+  } catch (err) {
+    if (isCouponClaimError(err)) {
+      return { ok: false as const, error: err.message };
     }
-
-    // Increment coupon usage count if a coupon was used
-    if (appliedCoupon) {
-      await tx.coupon.update({
-        where: { id: appliedCoupon.id },
-        data: { usedCount: { increment: 1 } },
-      });
-    }
-
-    return created;
-  });
+    throw err;
+  }
 
   // Mark this visitor's leads as ordered.
   if (data.visitorId) {
@@ -402,6 +446,12 @@ export async function placeOrder(input: PlaceOrderInput) {
       console.error("[orders] razorpay order failed:", err);
       // Roll the reserved stock back and remove the just-created order so we
       // don't leave a dangling unpaid order with depleted stock.
+      //
+      // The coupon use is given back here too. `CouponRedemption.orderId` is a
+      // plain column, not a relation, so deleting the order would otherwise
+      // leave the redemption row and the incremented `usedCount` behind — a
+      // shopper whose payment window failed to open would have burned their
+      // one allowed use on nothing.
       await prisma
         .$transaction(async (tx) => {
           for (const i of validItems) {
@@ -409,6 +459,17 @@ export async function placeOrder(input: PlaceOrderInput) {
               where: { id: i.productId },
               data: { stock: { increment: i.quantity } },
             });
+          }
+          if (appliedCoupon) {
+            const { count } = await tx.couponRedemption.deleteMany({
+              where: { couponId: appliedCoupon.id, orderId: order.id },
+            });
+            if (count > 0) {
+              await tx.coupon.update({
+                where: { id: appliedCoupon.id },
+                data: { usedCount: { decrement: count } },
+              });
+            }
           }
           await tx.order.delete({ where: { id: order.id } });
         })

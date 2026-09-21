@@ -9,10 +9,16 @@ import { SettingsProvider, type ClientSettings } from "@/context/settings";
 export function Providers({
   settings,
   initialLead,
+  wishlist,
   children,
 }: {
   settings: ClientSettings;
   initialLead?: { name: string; phone: string } | null;
+  /**
+   * Server-rendered wishlist for a signed-in customer, so their saved hearts
+   * are correct on first paint rather than popping in after a fetch.
+   */
+  wishlist?: { signedIn: boolean; slugs: string[] };
   children: React.ReactNode;
 }) {
   return (
@@ -27,7 +33,12 @@ export function Providers({
           {/* WishlistProvider was missing from the tree entirely, so every
               `useWishlist()` call threw — which took out the whole /wishlist
               page, not just the save button. */}
-          <WishlistProvider>{children}</WishlistProvider>
+          <WishlistProvider
+            signedIn={wishlist?.signedIn ?? false}
+            initialSlugs={wishlist?.slugs ?? []}
+          >
+            {children}
+          </WishlistProvider>
           <Toaster
             position="bottom-right"
             toastOptions={{

@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import { useSettings } from "@/context/settings";
+import { CURATED_POSTS, instagramHandle } from "@/lib/instagram";
 
 function Instagram({ className }: { className?: string }) {
   return (
@@ -22,20 +23,15 @@ function Instagram({ className }: { className?: string }) {
   );
 }
 
-// Lifestyle shots from the catalogue. Swap these for real Instagram posts (or
-// wire up the Instagram Basic Display API) once the account is connected.
-const POSTS = [
-  "/products/level7/Level7_Core_Style.png",
-  "/products/level7/05.10.2024-182.jpg",
-  "/products/level7/Level7_Planet_Seat.png",
-  "/products/level7/05.10.2024-128.jpg",
-  "/products/level7/Level7_Core_Walk.png",
-  "/products/level7/05.10.2024-175.jpg",
-];
+// Shared with /instagram — see lib/instagram.ts for why this is a curated
+// grid rather than a live feed, and what it would take to make it real.
+const POSTS = CURATED_POSTS.map((p) => p.src);
 
 export function InstagramSection() {
   const s = useSettings();
-  const handle = "@level7clothing";
+  // Derived from the admin-set profile URL rather than hardcoded — the brand
+  // handle is DB-driven like every other brand string.
+  const handle = instagramHandle(s.instagram);
 
   return (
     <section className="container-px mx-auto max-w-7xl pb-20">

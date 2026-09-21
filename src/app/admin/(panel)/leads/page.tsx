@@ -7,6 +7,7 @@ import { formatINR } from "@/lib/utils";
 import { LeadActions } from "@/components/admin/lead-actions";
 import { LeadFilters } from "@/components/admin/lead-filters";
 import { LEAD_STATUS_COLOR, LEAD_STATUS_LABEL, isLeadStatus } from "@/lib/leads";
+import { adminLink, customerIdForContact } from "@/lib/customers";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Interested customers" };
@@ -80,7 +81,16 @@ export default async function AdminLeads({
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {leads.map((l) => (
+                {leads.map((l) => {
+                  // A lead is one sighting of a person who may also have an
+                  // account, orders, a chat and a wishlist. `customerId` is
+                  // null only when the row has neither email nor phone, which
+                  // is exactly when there is nobody to link to.
+                  const customerId = customerIdForContact({
+                    email: l.email,
+                    phone: l.phone,
+                  });
+                  return (
                   <tr key={l.id} className="align-top hover:bg-muted/40">
                     <td className="px-4 py-3">
                       {l.name || l.email || l.phone ? (
@@ -113,6 +123,15 @@ export default async function AdminLeads({
                         <span className="text-xs text-muted-foreground">
                           Guest ({l.visitorId?.slice(0, 6) || "—"})
                         </span>
+                      )}
+                      {customerId && (
+                        <Link
+                          href={adminLink.customer(customerId)}
+                          className="mt-1 inline-flex min-h-9 items-center text-[11px] uppercase tracking-wider text-muted-foreground hover:text-accent"
+                          title="Everything this person has done — orders, chats, returns, wishlist"
+                        >
+                          Customer record →
+                        </Link>
                       )}
                       {l.notes && (
                         <p className="mt-1.5 max-w-[16rem] rounded-lg bg-muted px-2.5 py-1.5 text-xs text-muted-foreground">
@@ -181,7 +200,8 @@ export default async function AdminLeads({
                       />
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

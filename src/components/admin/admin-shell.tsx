@@ -20,6 +20,7 @@ import {
   Images,
   Star,
   PackageX,
+  UserRound,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { logout } from "@/app/actions/auth";
@@ -30,6 +31,9 @@ const nav = [
   { href: "/admin/products", label: "Products", icon: Package },
   { href: "/admin/categories", label: "Categories", icon: Tag },
   { href: "/admin/orders", label: "Orders", icon: ShoppingCart },
+  // Customers sits next to Orders, not next to "Interested customers": it is
+  // the master record a person resolves to, and an order is the usual way in.
+  { href: "/admin/customers", label: "Customers", icon: UserRound },
   { href: "/admin/returns", label: "Returns", icon: PackageX },
   { href: "/admin/reviews", label: "Reviews", icon: Star },
   { href: "/admin/coupons", label: "Coupons", icon: Ticket },

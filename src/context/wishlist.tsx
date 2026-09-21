@@ -5,9 +5,15 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import { toast } from "sonner";
+import {
+  clearMyWishlist,
+  mergeWishlist,
+  setWishlistItem,
+} from "@/app/actions/wishlist";
 
 const STORAGE_KEY = "level7_wishlist";
 
@@ -22,50 +28,135 @@ type WishlistContextType = {
 
 const WishlistContext = createContext<WishlistContextType | null>(null);
 
-export function WishlistProvider({ children }: { children: React.ReactNode }) {
-  const [slugs, setSlugs] = useState<string[]>([]);
-  const [loaded, setLoaded] = useState(false);
+function readLocal(): string[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed)
+      ? parsed.filter((s): s is string => typeof s === "string")
+      : [];
+  } catch {
+    return []; // corrupt or blocked storage
+  }
+}
 
-  // Load once from localStorage.
+/**
+ * Wishlist state.
+ *
+ * Two backing stores, one at a time:
+ *  - Signed in  → `WishlistItem` rows are the source of truth. Local storage
+ *    is drained into the account once and then cleared, so the two can never
+ *    drift and the next guest on this browser doesn't inherit the list.
+ *  - Guest      → localStorage, exactly as before.
+ *
+ * `initialSlugs` is rendered by the server so a signed-in customer's saves are
+ * correct on first paint instead of popping in after a fetch.
+ */
+export function WishlistProvider({
+  children,
+  signedIn = false,
+  initialSlugs = [],
+}: {
+  children: React.ReactNode;
+  signedIn?: boolean;
+  initialSlugs?: string[];
+}) {
+  const [slugs, setSlugs] = useState<string[]>(initialSlugs);
+  const [loaded, setLoaded] = useState(signedIn);
+  const mergedRef = useRef(false);
+
+  // ---- Hydrate ------------------------------------------------------------
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          setSlugs(parsed.filter((s): s is string => typeof s === "string"));
-        }
-      }
-    } catch {
-      // ignore corrupt storage
+    if (signedIn) {
+      // Drain anything saved while logged out into the account, once.
+      if (mergedRef.current) return;
+      mergedRef.current = true;
+
+      const local = readLocal();
+      if (local.length === 0) return;
+
+      void mergeWishlist(local)
+        .then((merged) => {
+          setSlugs(merged);
+          // Only clear after the server has confirmed the union, or a failed
+          // merge would silently lose the guest's saves.
+          try {
+            localStorage.removeItem(STORAGE_KEY);
+          } catch {
+            /* blocked storage — harmless */
+          }
+        })
+        .catch(() => {
+          /* keep the local copy for the next attempt */
+        });
+      return;
     }
-    setLoaded(true);
-  }, []);
 
-  // Persist after the initial load so we never clobber saved data with [].
+    setSlugs(readLocal());
+    setLoaded(true);
+  }, [signedIn]);
+
+  // ---- Persist (guests only) ---------------------------------------------
   useEffect(() => {
-    if (!loaded) return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(slugs));
-  }, [slugs, loaded]);
+    if (signedIn || !loaded) return;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(slugs));
+    } catch {
+      /* private mode */
+    }
+  }, [slugs, loaded, signedIn]);
 
   const has = useCallback((slug: string) => slugs.includes(slug), [slugs]);
 
-  const toggle = useCallback((slug: string, name?: string) => {
-    setSlugs((prev) => {
-      if (prev.includes(slug)) {
-        toast.success(name ? `Removed ${name} from wishlist` : "Removed from wishlist");
-        return prev.filter((s) => s !== slug);
-      }
-      toast.success(name ? `Saved ${name} to wishlist` : "Saved to wishlist");
-      return [...prev, slug];
-    });
-  }, []);
+  /** Optimistic locally, then reconciled with the server when signed in. */
+  const persist = useCallback(
+    (slug: string, saved: boolean) => {
+      if (!signedIn) return;
+      void setWishlistItem(slug, saved).then((res) => {
+        if (res.ok || res.guest) return;
+        // The write failed — put the UI back rather than showing a heart that
+        // isn't really saved.
+        setSlugs((prev) =>
+          saved ? prev.filter((s) => s !== slug) : [...prev, slug]
+        );
+        toast.error(res.error ?? "Could not update your wishlist");
+      });
+    },
+    [signedIn]
+  );
 
-  const remove = useCallback((slug: string) => {
-    setSlugs((prev) => prev.filter((s) => s !== slug));
-  }, []);
+  const toggle = useCallback(
+    (slug: string, name?: string) => {
+      setSlugs((prev) => {
+        const saved = !prev.includes(slug);
+        toast.success(
+          saved
+            ? name
+              ? `Saved ${name} to wishlist`
+              : "Saved to wishlist"
+            : name
+              ? `Removed ${name} from wishlist`
+              : "Removed from wishlist"
+        );
+        persist(slug, saved);
+        return saved ? [...prev, slug] : prev.filter((s) => s !== slug);
+      });
+    },
+    [persist]
+  );
 
-  const clear = useCallback(() => setSlugs([]), []);
+  const remove = useCallback(
+    (slug: string) => {
+      setSlugs((prev) => prev.filter((s) => s !== slug));
+      persist(slug, false);
+    },
+    [persist]
+  );
+
+  const clear = useCallback(() => {
+    setSlugs([]);
+    if (signedIn) void clearMyWishlist();
+  }, [signedIn]);
 
   return (
     <WishlistContext.Provider

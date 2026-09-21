@@ -4,7 +4,9 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { ShoppingBag, User, Search, Home, Store } from "lucide-react";
+import { ShoppingBag, User, Search, Home, Store, Heart } from "lucide-react";
+import { InstagramIcon } from "@/components/store/instagram-icon";
+import { useWishlist } from "@/context/wishlist";
 import { useCart } from "@/context/cart";
 import { useSettings } from "@/context/settings";
 import { ChatLauncherButton } from "@/components/store/chat-widget";
@@ -33,6 +35,7 @@ function isActive(pathname: string, href: string) {
 export function Navbar({ account }: { account?: { name: string } | null }) {
   const settings = useSettings();
   const { count, setOpen } = useCart();
+  const { count: wishlistCount } = useWishlist();
   const pathname = usePathname();
   const [scrolled, setScrolled] = useState(false);
   const keyboardOpen = useKeyboardOpen();
@@ -103,7 +106,7 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
             {/* Mobile: quick link to search / shop */}
             <Link
               href="/shop"
-              className="grid h-10 w-10 place-items-center rounded-full border border-border transition-all duration-300 hover:scale-105 hover:border-primary/40 hover:bg-primary/5 active:scale-95 cursor-pointer md:hidden"
+              className="grid h-11 w-11 place-items-center rounded-full border border-border transition-colors hover:border-primary/40 hover:bg-primary/5 cursor-pointer md:hidden"
               aria-label="Search"
             >
               <Search className="h-[18px] w-[18px]" />
@@ -115,10 +118,30 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
               `enableSystem` off), so nothing here is left half-set.
             */}
             <ChatLauncherButton />
+
+            {/* Wishlist. Saved items are per-account once signed in, so this
+                badge is the same number the customer sees on any device. */}
+            <Link
+              href="/wishlist"
+              className="relative grid h-11 w-11 place-items-center rounded-full border border-border transition-colors hover:border-primary/40 hover:bg-primary/5 cursor-pointer"
+              aria-label={
+                wishlistCount > 0
+                  ? `Wishlist (${wishlistCount} saved)`
+                  : "Wishlist"
+              }
+            >
+              <Heart className="h-[18px] w-[18px]" />
+              {wishlistCount > 0 && (
+                <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1 text-[11px] font-medium text-accent-foreground">
+                  {wishlistCount > 9 ? "9+" : wishlistCount}
+                </span>
+              )}
+            </Link>
+
             {/* Account — desktop only (mobile uses bottom bar) */}
             <Link
               href="/account"
-              className="relative hidden md:grid h-10 w-10 place-items-center rounded-full border border-border transition-all duration-300 hover:scale-105 hover:border-primary/40 hover:bg-primary/5 active:scale-95 cursor-pointer"
+              className="relative hidden md:grid h-11 w-11 place-items-center rounded-full border border-border transition-colors hover:border-primary/40 hover:bg-primary/5 cursor-pointer"
               aria-label={account ? "My account" : "Log in"}
               title={account ? `Hi, ${account.name.split(" ")[0]}` : "Log in"}
             >
@@ -129,7 +152,7 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
             </Link>
             <button
               onClick={() => setOpen(true)}
-              className="relative grid h-10 w-10 place-items-center rounded-full border border-border transition-all duration-300 hover:scale-105 hover:border-primary/40 hover:bg-primary/5 active:scale-95 cursor-pointer"
+              className="relative grid h-11 w-11 place-items-center rounded-full border border-border transition-colors hover:border-primary/40 hover:bg-primary/5 cursor-pointer"
               aria-label="Open cart"
             >
               <ShoppingBag className="h-[18px] w-[18px]" />
@@ -183,29 +206,29 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
               </li>
             );
           })}
-          {/* Cart tab */}
+          {/*
+            Instagram tab, where Cart used to be. Cart already has a permanent
+            slot in the top bar with its own count badge, so a second entry
+            point down here spent a quarter of the phone's primary navigation
+            on a duplicate.
+          */}
           <li className="flex-1">
-            <button
-              onClick={() => setOpen(true)}
+            <Link
+              href="/instagram"
               className={cn(
-                "relative flex w-full flex-col items-center justify-center gap-0.5 py-2.5 text-[10px] font-medium tracking-wide transition-colors",
-                "text-muted-foreground"
+                "relative flex flex-col items-center justify-center gap-0.5 py-2.5 text-[10px] font-medium tracking-wide transition-colors",
+                pathname.startsWith("/instagram")
+                  ? "text-accent"
+                  : "text-muted-foreground"
               )}
-              aria-label="Open cart"
+              aria-current={pathname.startsWith("/instagram") ? "page" : undefined}
             >
-              <span className="relative">
-                <ShoppingBag className="h-5 w-5" strokeWidth={1.6} />
-                {count > 0 && (
-                  <span
-                    key={count}
-                    className="animate-pop absolute -right-2 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full bg-primary px-0.5 text-[10px] font-semibold text-primary-foreground"
-                  >
-                    {count}
-                  </span>
-                )}
-              </span>
-              Cart
-            </button>
+              <InstagramIcon
+                className="h-5 w-5"
+                strokeWidth={pathname.startsWith("/instagram") ? 2.2 : 1.6}
+              />
+              Instagram
+            </Link>
           </li>
           {/* Account tab */}
           <li className="flex-1">

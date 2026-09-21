@@ -184,14 +184,21 @@ export async function resetPassword(input: { token: string; password: string }) 
   return { ok: true as const };
 }
 
-// ---------- Update profile (name, phone + saved shipping address) ----------
+// ---------- Update profile (IDENTITY ONLY: name + phone) ----------
+//
+// This deliberately no longer touches `User.address / city / state / pincode`.
+//
+// Those four inline columns used to be edited here AND as `Address` rows in the
+// address book AND retyped at checkout, so the same customer could hold three
+// disagreeing addresses. The `Address` table is now the single source of truth;
+// the inline columns survive only as a one-time legacy fallback, migrated into
+// an `Address` by `migrateLegacyInlineAddress` in `src/app/actions/addresses.ts`.
+//
+// Do not add address fields back to this action — writing them would resurrect
+// the split-brain the address book exists to remove.
 const profileSchema = z.object({
   name: z.string().trim().min(2, "Please enter your name"),
   phone: z.string().trim().optional(),
-  address: z.string().trim().optional(),
-  city: z.string().trim().optional(),
-  state: z.string().trim().optional(),
-  pincode: z.string().trim().optional(),
 });
 
 export type ProfileInput = z.input<typeof profileSchema>;
@@ -211,10 +218,6 @@ export async function updateProfile(input: ProfileInput) {
     data: {
       name: d.name,
       phone: d.phone || null,
-      address: d.address || null,
-      city: d.city || null,
-      state: d.state || null,
-      pincode: d.pincode || null,
     },
   });
   await setUserCookie({ id: user.id, email: user.email, name: user.name });

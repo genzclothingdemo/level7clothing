@@ -136,6 +136,14 @@ model Order {
   // A note the admin writes *for the customer*, shown highlighted on their
   // order page. Deliberately separate from `note`, which is internal.
   customerNote  String?
+  // What the CUSTOMER typed at checkout ("leave with the neighbour").
+  //
+  // This used to share `note` with the admin's private note: checkout wrote
+  // the buyer's text there and the admin's own note then overwrote it. That is
+  // why `note` could never be shown to anyone safely. Three distinct things,
+  // three columns: buyerNote (them → us), customerNote (us → them), note
+  // (internal, never rendered).
+  buyerNote     String?
   couponCode    String?
   discountTotal Int      @default(0)
   createdAt     DateTime @default(now())
@@ -164,6 +172,8 @@ model User {
   orders           Order[]
   addresses        Address[]
   chatThreads      ChatThread[]
+  wishlist         WishlistItem[]
+  pushSubscriptions PushSubscription[]
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 }
@@ -331,6 +341,20 @@ model SiteSettings {
   returnReasons         String[] @default(["Wrong size", "Damaged or defective", "Wrong item delivered", "Not as described", "Changed my mind"])
   // Shown above the return form — the plain-English policy the customer agrees to.
   returnPolicyNote      String   @default("Items must be unworn, unwashed and returned with their original tags.\nRaise the request within the return window shown on your order.\nCustomised pieces cannot be returned unless they arrived damaged.")
+  // ---- Refunds ----
+  // What the store keeps when it refunds. Applied to prepaid and COD orders;
+  // both can be set and are summed. Zero = full refund.
+  refundFeePercent      Int      @default(0)
+  refundFeeFlat         Int      @default(0)
+  // Partial orders: is the online advance returned? Default false, because the
+  // advance is what commits a made-to-order piece to production — and the
+  // checkout copy already tells the customer it is non-refundable.
+  partialAdvanceRefundable Boolean @default(false)
+  // Never charge the customer for the store's own mistake. When the reason is
+  // damaged/wrong item, the fee is waived regardless of the two values above.
+  waiveRefundFeeOnOurFault Boolean @default(true)
+  // Shown on the return form and the refund summary.
+  refundPolicyNote      String   @default("Prepaid orders are refunded to the original payment method within 5–7 working days.\nCash-on-delivery orders are refunded by UPI — we'll ask for your UPI ID once the return is approved.\nOn part-paid orders the online advance is not refundable; the balance was never collected.")
   updatedAt             DateTime @updatedAt
 }
 
@@ -437,8 +461,24 @@ model ReturnRequest {
   status        String   @default("pending") // see RETURN_STATUSES in lib/returns.ts
   // Shown to the customer on the order page — the decision explained.
   adminNote     String?
+  // Net amount actually returned to the customer (gross line value minus
+  // refundFee, and minus a non-refundable advance on partial orders).
   refundAmount  Int?
-  refundMethod  String?  // "original" | "upi" | "bank" | "replacement"
+  refundMethod  String?  // "original" | "upi" | "replacement" | "none"
+  // Gross value of the returned lines, and what the store kept. Stored rather
+  // than recomputed so a later change to the fee settings cannot silently
+  // rewrite the history of a refund that already went out.
+  refundGross   Int?
+  refundFee     Int?
+  // Where a non-original refund goes. UPI only, on purpose: a UPI handle is
+  // routinely shared and is not, by itself, enough to move money. Full bank
+  // account numbers are deliberately NOT stored here — that is a different
+  // class of data and would need encryption and a retention policy first.
+  refundUpi     String?
+  // Bank/UPI reference (UTR) the admin records once the money is sent, so the
+  // customer can be told exactly what to look for on their statement.
+  refundReference String?
+  refundedAt    DateTime?
   // ---- Reverse pickup (NimbusPost) ----
   nimbusOrderId String?  // draft reverse order id
   nimbusAwb     String?  // AWB once the reverse shipment is booked
@@ -463,13 +503,80 @@ model Coupon {
   discountAmount Int
   isPercentage   Boolean  @default(false)
   isActive       Boolean  @default(true)
-  productIds     String[] @default([]) // Array of product IDs this coupon applies to
+  productIds     String[] @default([]) // empty = applies to the whole cart
   usageLimit     Int?     // Optional max times this coupon can be used
   usedCount      Int      @default(0)
+  // Minimum cart subtotal (in whole rupees) before the code is accepted.
+  minSpend       Int?
+  // Ceiling on a percentage discount — "20% off, up to ₹300". Meaningless for
+  // flat coupons, and ignored there rather than validated away, so switching a
+  // coupon between flat and % doesn't lose the cap.
+  maxDiscount    Int?
+  // How many times ONE customer may use it (matched on user id, else email).
+  perUserLimit   Int?
+  startsAt       DateTime?
+  expiresAt      DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
+  redemptions CouponRedemption[]
+
   @@index([isActive])
+}
+
+/// One accepted use of a coupon.
+///
+/// `Coupon.usedCount` alone cannot answer "has THIS person used it before",
+/// which is what `perUserLimit` needs. Kept even if the order is later
+/// cancelled — the limit is on redeeming, not on keeping.
+model CouponRedemption {
+  id        String   @id @default(cuid())
+  couponId  String
+  coupon    Coupon   @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  orderId   String?
+  userId    String?
+  email     String?
+  amount    Int      @default(0) // discount actually applied, in rupees
+  createdAt DateTime @default(now())
+
+  @@index([couponId, userId])
+  @@index([couponId, email])
+}
+
+/// A saved product, per account.
+///
+/// The wishlist was localStorage-only, so it vanished on a new device and the
+/// admin could never see it. Guests still use localStorage; signing in merges
+/// those slugs in and the account becomes the source of truth from then on.
+model WishlistItem {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Stored by slug to match the storefront's own addressing, and so a deleted
+  // product degrades to "no longer available" instead of a dangling join.
+  slug      String
+  createdAt DateTime @default(now())
+
+  @@unique([userId, slug])
+  @@index([userId])
+}
+
+/// A browser that has granted push permission for this store.
+///
+/// Keyed by endpoint because that is what the push service issues and what
+/// must be deleted when it returns 404/410 (subscription expired).
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+  lastSeenAt DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 // -------- Media --------

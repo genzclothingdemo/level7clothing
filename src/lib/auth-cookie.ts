@@ -9,3 +9,15 @@
  */
 export const ADMIN_COOKIE = "level7_admin";
 export const USER_COOKIE = "level7_user";
+
+/**
+ * Guest contact captured by the add-to-cart mini sign-up (name + phone).
+ *
+ * Same hazard as the two above: it was declared separately in
+ * `src/app/actions/account.ts` and `src/context/cart.tsx`, so a rename in one
+ * would silently strand the other — logout would stop clearing the guest's
+ * details, or the cart would stop seeing them. The signed-in account is the
+ * source of truth for identity; this cookie only stands in for a guest, and
+ * login overwrites it from the account.
+ */
+export const LEAD_COOKIE = "level7_lead";

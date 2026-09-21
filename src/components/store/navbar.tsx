@@ -7,7 +7,7 @@ import { usePathname } from "next/navigation";
 import { ShoppingBag, User, Search, Home, Store } from "lucide-react";
 import { useCart } from "@/context/cart";
 import { useSettings } from "@/context/settings";
-import { ThemeToggle } from "@/components/ui/theme-toggle";
+import { ChatLauncherButton } from "@/components/store/chat-widget";
 import { SearchBox } from "@/components/store/search-box";
 import { useKeyboardOpen } from "@/hooks/use-keyboard-open";
 import { cn } from "@/lib/utils";
@@ -108,7 +108,13 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
             >
               <Search className="h-[18px] w-[18px]" />
             </Link>
-            <ThemeToggle />
+            {/*
+              This slot held the light/dark toggle. It now opens the chat,
+              which is what a shopper actually reaches for — the store stays
+              on its light default (see `defaultTheme` in providers.tsx, with
+              `enableSystem` off), so nothing here is left half-set.
+            */}
+            <ChatLauncherButton />
             {/* Account — desktop only (mobile uses bottom bar) */}
             <Link
               href="/account"
@@ -192,7 +198,7 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
                 {count > 0 && (
                   <span
                     key={count}
-                    className="animate-pop absolute -right-2 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full bg-primary px-0.5 text-[9px] font-semibold text-primary-foreground"
+                    className="animate-pop absolute -right-2 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full bg-primary px-0.5 text-[10px] font-semibold text-primary-foreground"
                   >
                     {count}
                   </span>

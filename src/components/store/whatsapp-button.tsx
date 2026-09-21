@@ -1,5 +1,6 @@
 "use client";
 
+import { usePathname } from "next/navigation";
 import { useSettings } from "@/context/settings";
 import { useKeyboardOpen } from "@/hooks/use-keyboard-open";
 
@@ -14,6 +15,7 @@ function WhatsAppIcon({ className }: { className?: string }) {
 export function WhatsAppButton() {
   const s = useSettings();
   const keyboardOpen = useKeyboardOpen();
+  const pathname = usePathname();
 
   if (!s.whatsapp) return null;
   const number = s.whatsapp.replace(/[^0-9]/g, "");
@@ -25,6 +27,11 @@ export function WhatsAppButton() {
     `Hi ${s.brandName}, I'd love to know more about your latest drops.`
   );
 
+  // Product pages stack a sticky buy bar (60–121px from the bottom) on top of
+  // the mobile tab bar, which covered the lower third of this button. The buy
+  // bar is the more important control, so the FAB steps aside on phones there.
+  const onProductPage = pathname?.startsWith("/product/") ?? false;
+
   // bottom-24 clears the fixed mobile tab bar; md+ has no tab bar so the
   // button drops back to the usual FAB offset.
   return (
@@ -33,10 +40,13 @@ export function WhatsAppButton() {
       target="_blank"
       rel="noreferrer"
       aria-label="Chat on WhatsApp"
-      className="group fixed bottom-24 right-5 z-30 grid h-14 w-14 place-items-center rounded-full bg-[#25D366] text-white shadow-lg shadow-black/20 transition-transform hover:scale-110 md:bottom-5"
+      className={`group fixed bottom-24 right-5 z-30 ${
+        onProductPage ? "hidden md:grid" : "grid"
+      } h-14 w-14 place-items-center rounded-full bg-[#25D366] text-white shadow-lg shadow-black/20 transition-colors hover:bg-[#1eb855] md:bottom-5`}
     >
-      {/* Attention ping ring */}
-      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#25D366] opacity-20 [animation-duration:2.5s]" />
+      {/* The looping "ping" ring and hover-bounce were removed: CLAUDE.md
+          records that ambient motion was stripped from this store on purpose,
+          and the marquee is meant to be the only looping animation. */}
       <WhatsAppIcon className="relative h-7 w-7" />
       <span className="pointer-events-none absolute right-16 whitespace-nowrap rounded-full bg-card px-3 py-1.5 text-xs font-medium text-foreground opacity-0 shadow-lg transition-all duration-300 group-hover:right-[4.25rem] group-hover:opacity-100">
         Chat with us

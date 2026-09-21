@@ -6,6 +6,7 @@ import { headers, cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
 import { sendPasswordResetEmail } from "@/lib/email";
+import { LEAD_COOKIE } from "@/lib/auth-cookie";
 import {
   authenticateUser,
   setUserCookie,
@@ -17,8 +18,8 @@ import {
 
 // Mirror the shopper's name/phone into a readable cookie so the add-to-cart
 // mini sign-up never prompts a logged-in customer. Not httpOnly on purpose —
-// it's convenience data, not a credential.
-const LEAD_COOKIE = "level7_lead";
+// it's convenience data, not a credential. The name itself lives in
+// lib/auth-cookie.ts so this file and the cart context cannot drift apart.
 async function setLeadCookie(name: string, phone: string) {
   const store = await cookies();
   store.set(LEAD_COOKIE, JSON.stringify({ name, phone }), {

@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
 import { OrdersTable, type AdminOrder } from "@/components/admin/orders-table";
+import type { StatusEntry } from "@/components/admin/order-types";
 import { OrderFilters } from "@/components/admin/order-filters";
 
 export const dynamic = "force-dynamic";
@@ -18,6 +19,8 @@ type SP = {
   min?: string;
   max?: string;
   coupon?: string;
+  /** "1" = only orders flagged as needing customisation. */
+  custom?: string;
   match?: string;
 };
 
@@ -64,6 +67,11 @@ function buildWhere(sp: SP): Prisma.OrderWhereInput {
     conditions.push({ couponCode: { equals: sp.coupon, mode: "insensitive" } });
   }
 
+  // Made-to-order baskets. The column is denormalised at checkout, so this
+  // finds orders placed since the flag existed; the list still badges older
+  // orders whose products are customisable today.
+  if (sp.custom === "1") conditions.push({ needsCustomisation: true });
+
   if (conditions.length === 0) return {};
   if (conditions.length === 1) return conditions[0];
 
@@ -98,6 +106,9 @@ export default async function AdminOrders({
   // slug for every product these orders reference — that's what turns a line
   // item into a clickable product link. A product deleted since the order was
   // placed simply has no slug, and renders without a link.
+  //
+  // The same lookup carries the customisation fields: the order knows *that*
+  // it needs customising, only the catalogue knows *what* has to be collected.
   const productIds = [
     ...new Set(
       raw.flatMap((o) =>
@@ -107,16 +118,21 @@ export default async function AdminOrders({
       )
     ),
   ];
-  const slugById = new Map(
+  const productById = new Map(
     (productIds.length
       ? await prisma.product
           .findMany({
             where: { id: { in: productIds } },
-            select: { id: true, slug: true },
+            select: {
+              id: true,
+              slug: true,
+              isCustomisable: true,
+              customisationNote: true,
+            },
           })
           .catch(() => [])
       : []
-    ).map((p) => [p.id, p.slug])
+    ).map((p) => [p.id, p])
   );
 
   const orders: AdminOrder[] = raw.map((o) => ({
@@ -130,10 +146,15 @@ export default async function AdminOrders({
     state: o.state,
     pincode: o.pincode,
     items: (Array.isArray(o.items) ? (o.items as AdminOrder["items"]) : []).map(
-      (it) => ({
-        ...it,
-        slug: it.productId ? (slugById.get(it.productId) ?? null) : null,
-      })
+      (it) => {
+        const p = it.productId ? productById.get(it.productId) : undefined;
+        return {
+          ...it,
+          slug: p?.slug ?? null,
+          isCustomisable: p?.isCustomisable ?? false,
+          customisationNote: p?.customisationNote ?? null,
+        };
+      }
     ),
     subtotal: o.subtotal,
     shipping: o.shipping,
@@ -156,6 +177,11 @@ export default async function AdminOrders({
     deliveryStatusAt: o.deliveryStatusAt?.toISOString() ?? null,
     lastSyncedAt: o.lastSyncedAt?.toISOString() ?? null,
     note: o.note,
+    customerNote: o.customerNote,
+    needsCustomisation: o.needsCustomisation,
+    statusHistory: (Array.isArray(o.statusHistory)
+      ? o.statusHistory
+      : []) as unknown as StatusEntry[],
     createdAt: o.createdAt.toISOString(),
     returnCount: o._count.returnRequests,
   }));
@@ -169,7 +195,7 @@ export default async function AdminOrders({
           : `${totalCount} order${totalCount === 1 ? "" : "s"}`}
       </p>
 
-      <div className="mt-6">
+      <div className="mt-4">
         <OrderFilters />
       </div>
 
@@ -186,7 +212,7 @@ export default async function AdminOrders({
           </p>
         </div>
       ) : (
-        <div className="mt-6">
+        <div className="mt-3">
           <OrdersTable
             orders={orders}
             returnWindowDays={settings.returnsEnabled ? settings.returnWindowDays : null}

@@ -44,6 +44,8 @@ import {
   X,
 } from "lucide-react";
 import { PhotoPicker } from "@/components/admin/photo-picker";
+import { InfoTip } from "@/components/store/info-tip";
+import { cn } from "@/lib/utils";
 import type { ProductOption } from "@/lib/types";
 
 export type VisualGalleryState = {
@@ -239,7 +241,12 @@ export function VariantMediaTab({
       <div className="space-y-3">
         <SectionHeader
           title="Product Gallery"
-          description="This product has no options, so it has a single gallery. The first photo is the cover shown on listings. Drag to reorder."
+          tip="This product has no options, so it has one gallery. The first photo is the cover shown on listing cards, in search results and on social previews. Drag to reorder."
+          aside={
+            <span className="text-xs text-muted-foreground">
+              {countLabel(state.common.length)}
+            </span>
+          }
         />
         <GalleryGrid
           images={state.common}
@@ -310,15 +317,16 @@ export function VariantMediaTab({
 
       {/* ── Section 0: Image Controller ── */}
       {optionMatrix.length > 1 && onVisualOptionChange && (
-        <div>
+        <div className="space-y-3">
           <SectionHeader
             title="Image Controller"
-            description="Which option's values swap the photos. Combinations differing only by the other options reuse the same gallery — so you shoot once per value, not once per combination."
+            tip="Which option's values swap the photos. Combinations that differ only by the other options reuse the same gallery, so you shoot once per value rather than once per combination — Colour is almost always the right answer, Size almost never."
           />
           <select
             value={visualName}
             onChange={(e) => onVisualOptionChange(e.target.value)}
-            className="input mt-3 max-w-xs"
+            aria-label="Option that controls the galleries"
+            className="input max-w-xs"
           >
             {optionMatrix.map((o) => (
               <option key={o.name} value={o.name}>
@@ -330,12 +338,12 @@ export function VariantMediaTab({
       )}
 
       {/* ── Section 1: Variant Previews (manually chosen per value) ── */}
-      <div>
+      <div className="space-y-3">
         <SectionHeader
           title="Variant Previews"
-          description={`One image per ${visualName} — this is the thumbnail on the storefront's picker cards. Leave it unset to use that value's first gallery photo.`}
+          tip={`One image per ${visualName} — the thumbnail on the storefront's picker cards. Leave it unset and that value's first gallery photo is used instead, which is usually what you want.`}
         />
-        <div className="mt-3 flex flex-wrap gap-3">
+        <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8">
           {visualValues.map((val) => {
             const manual = state.previews[val] ?? null;
             const gallery = state.galleries[val] ?? [];
@@ -347,9 +355,10 @@ export function VariantMediaTab({
             return (
               <div
                 key={val}
-                className={`w-[104px] rounded-xl border p-2 ${
+                className={cn(
+                  "min-w-0 rounded-lg border p-2",
                   effective ? "border-border" : "border-danger/50 bg-danger/5"
-                }`}
+                )}
               >
                 <div className="relative aspect-square w-full overflow-hidden rounded-lg border border-border bg-muted">
                   {effective ? (
@@ -409,12 +418,12 @@ export function VariantMediaTab({
       </div>
 
       {/* ── Section 2: Variant Galleries ── */}
-      <div>
+      <div className="space-y-3">
         <SectionHeader
           title={`${visualName} Galleries`}
-          description={`The photos shown when a customer picks each ${visualName}. Any number per value — some may have three, others eight. The Final gallery is what they'll actually swipe through.`}
+          tip={`The photos shown once a customer picks each ${visualName}. Any number per value — some may have three, others eight. "Final gallery" is the combined list they actually swipe through: this value's photos first, then the common ones.`}
         />
-        <div className="mt-3 space-y-2">
+        <div className="space-y-2">
           {visualValues.map((val) => {
             const gallery = state.galleries[val] ?? [];
             const isOpen = openSections.has(val);
@@ -427,21 +436,24 @@ export function VariantMediaTab({
             const finalGallery = [...gallery, ...state.common];
 
             return (
-              <div key={val} className="overflow-hidden rounded-xl border border-border">
+              <div key={val} className="overflow-hidden rounded-lg border border-border">
                 {/* Accordion header */}
                 <button
                   type="button"
                   onClick={() => toggleSection(val)}
-                  className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/50 transition-colors"
+                  aria-expanded={isOpen}
+                  className="flex min-h-11 w-full cursor-pointer items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/50"
                 >
                   {isOpen ? (
                     <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
                   ) : (
                     <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
                   )}
-                  <span className="flex-1 text-sm font-medium">{val}</span>
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                    {val}
+                  </span>
                   {inactive && (
-                    <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                    <span className="shrink-0 rounded-md bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
                       inactive
                     </span>
                   )}
@@ -449,21 +461,20 @@ export function VariantMediaTab({
                     <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" />
                   )}
                   <span
-                    className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${
+                    className={cn(
+                      "shrink-0 rounded-md px-2 py-0.5 text-xs tabular-nums",
                       gallery.length === 0
                         ? "bg-danger/10 text-danger"
                         : "bg-muted text-muted-foreground"
-                    }`}
+                    )}
+                    title={`${countLabel(gallery.length)} of its own, ${finalGallery.length} in the final gallery`}
                   >
-                    {countLabel(gallery.length)}
-                  </span>
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    → {finalGallery.length} total
+                    {gallery.length} / {finalGallery.length}
                   </span>
                 </button>
 
                 {isOpen && (
-                  <div className="space-y-3 border-t border-border px-4 pb-4 pt-3">
+                  <div className="space-y-3 border-t border-border p-3">
                     {/* Actions row */}
                     <div className="flex flex-wrap items-center gap-2">
                       <PhotoPicker
@@ -483,7 +494,7 @@ export function VariantMediaTab({
                         <button
                           type="button"
                           onClick={() => addPreviewToGallery(val)}
-                          className="rounded-full border border-danger/40 bg-danger/5 px-3 py-1.5 text-xs font-medium text-danger hover:bg-danger/10"
+                          className="inline-flex min-h-9 cursor-pointer items-center rounded-lg border border-danger/40 bg-danger/5 px-3 text-[11px] font-medium uppercase tracking-widest text-danger transition-colors hover:bg-danger/10"
                         >
                           Use preview in gallery
                         </button>
@@ -493,7 +504,7 @@ export function VariantMediaTab({
                     {/* Variant-only gallery grid (drag to reorder, click X to remove).
                         Editing here reflects in the Final gallery below. */}
                     {gallery.length > 0 ? (
-                      <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">
+                      <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-7">
                         {gallery.map((img, i) => (
                           <div
                             key={img}
@@ -558,9 +569,15 @@ export function VariantMediaTab({
                         Removing/reordering here writes back to the correct
                         source (variant vs. common). */}
                     <div>
-                      <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                        Final gallery ({finalGallery.length}) — what the customer
-                        swipes. Drag to reorder, × to remove.
+                      <p className="mb-1.5 flex items-center gap-1 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
+                        Final gallery ({finalGallery.length})
+                        <InfoTip term="Final gallery">
+                          Exactly what the customer swipes through for this{" "}
+                          {visualName}: its own photos in your order, then the
+                          common photos in theirs. Drag to reorder within a
+                          group, × to remove — either writes back to the gallery
+                          the photo came from.
+                        </InfoTip>
                       </p>
                       {finalGallery.length > 0 ? (
                         <div className="flex flex-wrap gap-1.5">
@@ -631,12 +648,18 @@ export function VariantMediaTab({
       </div>
 
       {/* ── Section 3: Common Gallery ── */}
-      <div>
+      <div className="space-y-3">
         <SectionHeader
           title="Common Gallery"
-          description={`Photos appended to every ${visualName}'s gallery — packaging, dimensions, a care card, whatever this product needs. Drag to reorder; they always come after the ${visualName} photos.`}
+          tip={`Photos appended to every ${visualName}'s gallery — packaging, a size chart, a care card, whatever the whole product shares. They always come after the ${visualName} photos, never interleaved.`}
+          aside={
+            <span className="text-xs text-muted-foreground">
+              {countLabel(state.common.length)} · added to all{" "}
+              {visualValues.length} {visualName} galleries
+            </span>
+          }
         />
-        <div className="mt-3 space-y-3">
+        <div className="space-y-3">
           <div className="flex flex-wrap items-center gap-2">
             <PhotoPicker
               selected={state.common}
@@ -651,10 +674,6 @@ export function VariantMediaTab({
                 onFiles={async (files) => appendTo(COMMON_SCOPE, await onUploadFiles(files))}
               />
             )}
-            <span className="text-xs text-muted-foreground">
-              {countLabel(state.common.length)} · added to all{" "}
-              {visualValues.length} {visualName} galleries
-            </span>
           </div>
           {state.common.length > 0 ? (
             <GalleryGrid
@@ -678,17 +697,28 @@ export function VariantMediaTab({
 
 // ---- Helper components ----
 
+/**
+ * Section title + an `(i)`. The descriptions used to be two-line paragraphs
+ * under every heading, which added ~120px of prose to a tab whose whole job is
+ * showing photographs. The explanation is unchanged — it just waits to be asked
+ * for. `aside` takes a count or a control pinned to the right.
+ */
 function SectionHeader({
   title,
-  description,
+  tip,
+  aside,
 }: {
   title: string;
-  description: string;
+  tip: React.ReactNode;
+  aside?: React.ReactNode;
 }) {
   return (
-    <div>
-      <h4 className="text-sm font-medium">{title}</h4>
-      <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
+    <div className="flex min-h-8 flex-wrap items-center justify-between gap-x-2 gap-y-1">
+      <h4 className="flex items-center gap-1 text-sm font-medium">
+        {title}
+        <InfoTip term={title}>{tip}</InfoTip>
+      </h4>
+      {aside}
     </div>
   );
 }
@@ -719,9 +749,11 @@ function UploadButton({ onFiles }: { onFiles: (files: File[]) => Promise<void> }
   const [busy, setBusy] = useState(false);
   return (
     <label
-      className={`inline-flex cursor-pointer items-center gap-2 rounded-full border border-border px-3 py-1.5 text-xs hover:bg-muted ${
-        busy ? "pointer-events-none opacity-60" : ""
-      }`}
+      className={cn(
+        "inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-card px-3",
+        "text-[11px] font-medium uppercase tracking-widest transition-colors hover:bg-muted",
+        busy && "pointer-events-none opacity-60"
+      )}
     >
       {busy ? (
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -771,7 +803,7 @@ function GalleryGrid({
 }) {
   if (images.length === 0) return null;
   return (
-    <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">
+    <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-7">
       {images.map((img, i) => (
         <div
           key={img}

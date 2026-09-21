@@ -4,6 +4,7 @@ import { Plus, Package, Download } from "lucide-react";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { formatINR } from "@/lib/utils";
+import { fuzzyFilter } from "@/lib/search";
 import { ProductRowActions } from "@/components/admin/product-row-actions";
 import { ProductFilters } from "@/components/admin/product-filters";
 import { CopyableId } from "@/components/admin/copy-id";
@@ -24,18 +25,11 @@ type SP = {
 function buildWhere(sp: SP): Prisma.ProductWhereInput {
   const conditions: Prisma.ProductWhereInput[] = [];
 
-  if (sp.q) {
-    const q = sp.q.trim();
-    conditions.push({
-      OR: [
-        { name: { contains: q, mode: "insensitive" } },
-        { description: { contains: q, mode: "insensitive" } },
-        { category: { contains: q, mode: "insensitive" } },
-        { secondaryCategory: { contains: q, mode: "insensitive" } },
-        { tags: { hasSome: [q] } },
-      ],
-    });
-  }
+  // NOTE: `sp.q` is deliberately NOT part of the SQL WHERE. `contains` is a
+  // substring test, so "hoodei" matched nothing and neither did "tshirt"
+  // against "T-Shirt". The text query is applied afterwards with the same
+  // typo-tolerant ranking the storefront uses (see fuzzyFilter below), while
+  // every other facet stays in the database where it belongs.
 
   if (sp.category) {
     conditions.push({
@@ -97,9 +91,10 @@ export default async function AdminProducts({
   const sp = await searchParams;
   const where = buildWhere(sp);
   const orderBy = buildOrderBy(sp.sort);
-  const hasFilters = Object.keys(where).length > 0 || (sp.sort && sp.sort !== "newest");
+  const hasFilters =
+    Object.keys(where).length > 0 || !!sp.q?.trim() || (sp.sort && sp.sort !== "newest");
 
-  const [products, totalCount, categoriesList] = await Promise.all([
+  const [allMatching, totalCount, categoriesList] = await Promise.all([
     prisma.product
       .findMany({
         where,
@@ -110,6 +105,18 @@ export default async function AdminProducts({
     prisma.product.count().catch(() => 0),
     prisma.category.findMany({ orderBy: { name: "asc" } }),
   ]);
+
+  // Typo-tolerant text search, ranked by relevance. Applied after the facet
+  // filters so "hoodei" still respects the category and stock pickers.
+  const products = sp.q?.trim()
+    ? fuzzyFilter(allMatching, sp.q, [
+        { name: "name", weight: 0.5 },
+        { name: "tags", weight: 0.2 },
+        { name: "category", weight: 0.12 },
+        { name: "secondaryCategory", weight: 0.08 },
+        { name: "description", weight: 0.1 },
+      ])
+    : allMatching;
 
   const subcategoriesList = await prisma.subcategory
     .findMany({

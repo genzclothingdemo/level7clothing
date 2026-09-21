@@ -11,6 +11,8 @@ import {
   Star,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ExpandableText } from "@/components/store/expandable-text";
+import { GlossaryText, InfoTip } from "@/components/store/info-tip";
 
 /**
  * Everything a customer reads *after* deciding — description, care, shipping,
@@ -75,6 +77,11 @@ function Row({
  * Renders admin-authored copy as bullets — one line in, one bullet out. Leading
  * "-"/"•" markers are tolerated so it doesn't matter whether the admin typed
  * them. Returns null for blank copy, which is how a section gets hidden.
+ *
+ * Each row is a block with a hanging dot rather than a flex row. It looks
+ * identical, but a flex container starts its own layout context, and
+ * `line-clamp` on an ancestor cannot count lines through one — so the flex
+ * version silently refused to clamp inside <ExpandableText />.
  */
 function Bullets({ text }: { text: string }) {
   const items = text
@@ -85,14 +92,34 @@ function Bullets({ text }: { text: string }) {
   return (
     <ul className="space-y-1.5">
       {items.map((t, i) => (
-        <li key={`${i}-${t}`} className="flex gap-2">
-          <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-accent" />
-          <span>{t}</span>
+        <li key={`${i}-${t}`} className="relative pl-3">
+          <span
+            aria-hidden="true"
+            className="absolute left-0 top-[7px] h-1 w-1 rounded-full bg-accent"
+          />
+          <GlossaryText text={t} />
         </li>
       ))}
     </ul>
   );
 }
+
+/**
+ * Jargon that turns up in the physical specs. The shopper sees "300 g" and has
+ * no way to know the courier may bill for more than that.
+ */
+const SPEC_TIPS: Record<string, { term: string; body: string }> = {
+  Weight: {
+    term: "Billable weight",
+    body:
+      "The garment's own weight. Couriers bill the greater of this and the volumetric weight (length × breadth × height ÷ 5000), so a light but bulky parcel is charged as a heavier one.",
+  },
+  Dimensions: {
+    term: "Parcel size",
+    body:
+      "The packed size we hand to the courier. It sets the volumetric weight your delivery is quoted against.",
+  },
+};
 
 export function ProductInfoSections({
   description,
@@ -134,20 +161,34 @@ export function ProductInfoSections({
         title="Product Details"
         defaultOpen
       >
-        <p className="whitespace-pre-line">{description}</p>
+        {/* This row is open by default, so an eight-paragraph description would
+            otherwise push shipping, returns and reviews off the screen. */}
+        <ExpandableText lines={6} contentClassName="whitespace-pre-line">
+          {description}
+        </ExpandableText>
       </Row>
 
       {(materialsCare.trim() || hasSpecs) && (
         <Row icon={<Sparkles className="h-4 w-4" />} title="Materials & Care">
-          <Bullets text={materialsCare} />
+          {/* Generous clamp: most care copy is four bullets and shows in full,
+              with no toggle at all. */}
+          <ExpandableText lines={8}>
+            <Bullets text={materialsCare} />
+          </ExpandableText>
           {hasSpecs && (
             <dl className="mt-3 grid gap-x-6 gap-y-1.5 sm:grid-cols-2">
-              {specs.map(({ label, value }) => (
-                <div key={label} className="flex justify-between gap-3 sm:justify-start">
-                  <dt className="text-muted-foreground">{label}</dt>
-                  <dd className="font-medium text-foreground sm:ml-auto">{value}</dd>
-                </div>
-              ))}
+              {specs.map(({ label, value }) => {
+                const tip = SPEC_TIPS[label];
+                return (
+                  <div key={label} className="flex justify-between gap-3 sm:justify-start">
+                    <dt className="flex items-center text-muted-foreground">
+                      {label}
+                      {tip && <InfoTip term={tip.term}>{tip.body}</InfoTip>}
+                    </dt>
+                    <dd className="font-medium text-foreground sm:ml-auto">{value}</dd>
+                  </div>
+                );
+              })}
             </dl>
           )}
         </Row>

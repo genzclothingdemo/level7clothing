@@ -30,7 +30,7 @@ export default async function AboutPage() {
           <p className="text-xs uppercase tracking-widest text-muted-foreground">
             Our story
           </p>
-          <h1 className="mt-3 font-serif text-5xl leading-tight">
+          <h1 className="mt-3 font-serif text-4xl leading-tight md:text-5xl">
             {s.brandName}
           </h1>
           <p className="mx-auto mt-5 max-w-2xl text-lg leading-relaxed text-muted-foreground">

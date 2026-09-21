@@ -163,6 +163,14 @@ export type ProductDTO = {
   returnsInfo: string | null;
   /** null = inherit SettingsDTO.defaultReturnable. Resolve via resolveReturnPolicy(). */
   returnable: boolean | null;
+  /**
+   * Made-to-order / personalised piece. Drives the storefront notice that
+   * explains why the payment options differ and what the customer must send,
+   * and flags the order for the admin.
+   */
+  isCustomisable: boolean;
+  /** What the customer has to supply (name, number, measurements…). */
+  customisationNote: string | null;
   /** Admin-added social/video links, rendered as the Video previews rail. */
   videos: ProductVideo[];
   isFeatured: boolean;

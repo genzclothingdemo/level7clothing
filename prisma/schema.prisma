@@ -66,6 +66,13 @@ model Product {
   // NULL = inherit SiteSettings.defaultReturnable. False marks a piece
   // non-returnable (customised / personalised work).
   returnable        Boolean?
+  // Made-to-order / personalised piece. Drives three things: the storefront
+  // explains why the payment options differ, the order is flagged for the
+  // admin as needing customisation details, and returns default to off.
+  isCustomisable    Boolean  @default(false)
+  // What the customer has to supply (name, number, measurements…). Shown on
+  // the product page and copied onto the order so the admin has it to hand.
+  customisationNote String?
   // Social/video links shown as "Video previews" under the info accordion.
   // Shape: [{ title, url }] — YouTube, Instagram reels, packaging clips.
   videos            Json     @default("[]")
@@ -122,6 +129,13 @@ model Order {
   lastSyncedAt     DateTime? // last time the auto-sync polled NimbusPost
   statusHistory  Json     @default("[]") // [{ status, note, at }] appended on each admin update
   note          String?
+  // True when any line item was a customisable product. Denormalised at
+  // checkout so the orders list can flag "needs customisation" without
+  // loading every product behind it.
+  needsCustomisation Boolean @default(false)
+  // A note the admin writes *for the customer*, shown highlighted on their
+  // order page. Deliberately separate from `note`, which is internal.
+  customerNote  String?
   couponCode    String?
   discountTotal Int      @default(0)
   createdAt     DateTime @default(now())
@@ -149,8 +163,58 @@ model User {
   resetTokenExpiry DateTime?
   orders           Order[]
   addresses        Address[]
+  chatThreads      ChatThread[]
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
+}
+
+/// One customer's conversation with the store.
+///
+/// Keyed by account when signed in, and by a `guestKey` cookie otherwise, so a
+/// guest keeps their history and the thread can be claimed onto their account
+/// when they later sign in. Replaces the old one-way Message/Inquiry inbox.
+model ChatThread {
+  id            String   @id @default(cuid())
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  // Anonymous browser identity. Unique so a cookie maps to exactly one thread.
+  guestKey      String?  @unique
+  name          String?
+  email         String?
+  phone         String?
+  // Denormalised so the admin inbox can sort and badge without aggregating
+  // the whole message table on every page load.
+  lastMessageAt DateTime @default(now())
+  lastMessage   String?
+  adminUnread   Int      @default(0)
+  userUnread    Int      @default(0)
+  isClosed      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  messages ChatMessage[]
+
+  @@index([lastMessageAt])
+  @@index([userId])
+}
+
+model ChatMessage {
+  id             String     @id @default(cuid())
+  threadId       String
+  thread         ChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  // "user" | "admin" — who typed it.
+  sender         String
+  body           String
+  // WhatsApp-style delivery state: sent -> delivered -> seen. "pending" only
+  // exists client-side while the request is in flight; it is never persisted.
+  status         String     @default("sent")
+  attachmentUrl  String?
+  attachmentName String?
+  attachmentType String?
+  seenAt         DateTime?
+  createdAt      DateTime   @default(now())
+
+  @@index([threadId, createdAt])
 }
 
 // -------- Saved shipping addresses (address book) --------
@@ -261,6 +325,12 @@ model SiteSettings {
   defaultReturnable     Boolean  @default(true)
   // Days after delivery a request can still be raised.
   returnWindowDays      Int      @default(7)
+  // Which reasons a customer may choose when raising a return. Admin-editable
+  // so the accepted grounds are a policy decision, not a code change. Empty
+  // falls back to RETURN_REASONS in lib/returns.ts.
+  returnReasons         String[] @default(["Wrong size", "Damaged or defective", "Wrong item delivered", "Not as described", "Changed my mind"])
+  // Shown above the return form — the plain-English policy the customer agrees to.
+  returnPolicyNote      String   @default("Items must be unworn, unwashed and returned with their original tags.\nRaise the request within the return window shown on your order.\nCustomised pieces cannot be returned unless they arrived damaged.")
   updatedAt             DateTime @updatedAt
 }
 

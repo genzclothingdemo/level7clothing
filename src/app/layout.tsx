@@ -1,7 +1,12 @@
 import type { Metadata, Viewport } from "next";
+import { Suspense } from "react";
 import { Inter, Space_Grotesk } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
+import { PwaRegister } from "@/components/store/pwa-register";
+import { RouteProgress } from "@/components/store/route-progress";
+import { UpdateWatcher } from "@/components/store/update-watcher";
+import { buildId } from "@/lib/build-id";
 import { getSettings } from "@/lib/settings";
 import { getUserSession } from "@/lib/user-auth";
 import { prisma } from "@/lib/prisma";
@@ -31,6 +36,12 @@ export const viewport: Viewport = {
   // Shrink the layout viewport when the on-screen keyboard opens, so fixed
   // elements stay anchored to the visible area instead of drifting behind it.
   interactiveWidget: "resizes-content",
+  // Tints the browser/status bar so it meets the announcement bar (which is
+  // `bg-foreground`) without a seam — most visible as an installed app.
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#0a0a0a" },
+    { media: "(prefers-color-scheme: dark)", color: "#09090b" },
+  ],
 };
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -52,7 +63,27 @@ export async function generateMetadata(): Promise<Metadata> {
       "premium cotton tees India",
       s.brandName,
     ],
-    alternates: { canonical: "/" },
+    // NO `alternates.canonical` here on purpose. Next merges metadata
+    // shallowly, so a canonical set at the root is inherited verbatim by every
+    // page that doesn't override it — which pointed /contact, /track-order and
+    // eleven other routes at the homepage and made them unrankable. Each route
+    // declares its own; the homepage's lives in `(store)/page.tsx`.
+    applicationName: s.brandName,
+    // iOS ignores the web manifest, so the installed-app title, status bar and
+    // home-screen icon have to be declared separately here.
+    appleWebApp: {
+      capable: true,
+      title: s.brandName,
+      statusBarStyle: "black-translucent",
+    },
+    icons: {
+      icon: [
+        { url: "/favicon.ico", sizes: "any" },
+        { url: "/icons/icon-192.png", type: "image/png", sizes: "192x192" },
+        { url: "/icons/icon-512.png", type: "image/png", sizes: "512x512" },
+      ],
+      apple: [{ url: "/icons/apple-touch-icon.png", sizes: "180x180" }],
+    },
     openGraph: {
       title,
       description: s.heroSubtext,
@@ -150,11 +181,20 @@ export default async function RootLayout({
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
         />
+        {/* `useSearchParams` inside RouteProgress needs its own boundary, or it
+            would opt the whole tree into client-side rendering. */}
+        <Suspense fallback={null}>
+          <RouteProgress />
+        </Suspense>
+
         {/* Server-only fields (the product-page default copy) are stripped here
             so they don't ride along in every page's client payload. */}
         <Providers settings={clientSettings} initialLead={initialLead}>
           {children}
         </Providers>
+
+        <PwaRegister />
+        <UpdateWatcher current={buildId()} />
       </body>
     </html>
   );

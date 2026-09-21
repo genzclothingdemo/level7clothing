@@ -12,13 +12,13 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import type { CartItem } from "@/lib/types";
 import { makeLineId } from "@/lib/options";
+import { LEAD_COOKIE } from "@/lib/auth-cookie";
 import { MiniSignupModal } from "@/components/store/mini-signup-modal";
 
 type NewCartItem = Omit<CartItem, "quantity" | "lineId">;
 
 const STORAGE_KEY = "level7_cart";
 const VISITOR_KEY = "level7_vid";
-const LEAD_COOKIE = "level7_lead";
 const LEAD_MAX_AGE = 60 * 60 * 24 * 180; // 180 days
 
 export type LeadInfo = { name: string; phone: string };

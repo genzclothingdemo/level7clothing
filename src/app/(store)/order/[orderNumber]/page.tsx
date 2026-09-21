@@ -1,4 +1,4 @@
-import { CheckCircle2, Package, MessageCircle } from "lucide-react";
+import { CheckCircle2, Package, MessageCircle, MessageSquare } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
 import { formatINR, whatsappLink } from "@/lib/utils";
@@ -16,7 +16,13 @@ import { resolveReturnPolicy, returnWindow, isReturnStatus } from "@/lib/returns
 import { prisma as db } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Order confirmed" };
+// This page renders a real customer's items, address and order total, so it
+// must never be indexed. robots.txt disallows /order; this is the backstop for
+// a URL reached from a forwarded confirmation email rather than a crawl.
+export const metadata = {
+  title: "Order confirmed",
+  robots: { index: false, follow: false },
+};
 
 type Item = {
   name: string;
@@ -67,7 +73,17 @@ export default async function OrderPage({
     ? await db.product
         .findMany({
           where: { id: { in: productIds } },
-          select: { id: true, returnable: true, returnsInfo: true },
+          // `isCustomisable` is required here: resolveReturnPolicy treats a
+          // made-to-order piece with no explicit `returnable` as non-returnable,
+          // but the field is optional on its input type — so omitting it from
+          // this select silently falls through to defaultReturnable and offers
+          // returns on personalised work. Typechecks either way.
+          select: {
+            id: true,
+            returnable: true,
+            returnsInfo: true,
+            isCustomisable: true,
+          },
         })
         .catch(() => [])
     : [];
@@ -109,7 +125,22 @@ export default async function OrderPage({
   }));
   const history = (
     Array.isArray(order.statusHistory) ? order.statusHistory : []
-  ) as unknown as StatusEntry[];
+  ) as unknown as (StatusEntry & { forCustomer?: boolean })[];
+
+  // ---- What the store has told this customer ----
+  // Two sources, both written deliberately for them: `customerNote`, the
+  // standing message on the order, and the notes the admin attached to a
+  // status update (flagged `forCustomer`).
+  //
+  // `order.note` is the admin's INTERNAL note and is never read here — the
+  // rest of `statusHistory` is internal too (NimbusPost draft/AWB chatter,
+  // courier scans, "cancelled by admin"), which is why this filters on the
+  // flag instead of showing every entry that happens to carry a note.
+  const storeUpdates = history
+    .filter((h) => h.forCustomer && h.note?.trim())
+    .reverse();
+  const hasStoreMessage = Boolean(order.customerNote?.trim()) ||
+    storeUpdates.length > 0;
 
   const waMessage = [
     `Hi ${settings.brandName}, I just placed an order! 🧡`,
@@ -151,7 +182,53 @@ export default async function OrderPage({
         </p>
       </div>
 
-      <div className="mt-10 rounded-2xl border border-border bg-card p-6">
+      {/* A message from the store. Deliberately loud — violet border, violet
+          wash, violet label — because it is the one thing on this page the
+          customer may have to act on. */}
+      {hasStoreMessage && (
+        <section className="mt-8 rounded-2xl border border-accent/45 bg-accent/10 p-5">
+          <p className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-widest text-accent">
+            <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-accent/20">
+              <MessageSquare className="h-3.5 w-3.5" />
+            </span>
+            Message from {settings.brandName}
+          </p>
+
+          {order.customerNote?.trim() && (
+            <p className="mt-3 whitespace-pre-line text-sm leading-relaxed text-foreground">
+              {order.customerNote}
+            </p>
+          )}
+
+          {storeUpdates.length > 0 && (
+            <ul
+              className={`space-y-3 ${
+                order.customerNote?.trim()
+                  ? "mt-4 border-t border-accent/25 pt-4"
+                  : "mt-3"
+              }`}
+            >
+              {storeUpdates.map((h, i) => (
+                <li key={i}>
+                  <p className="whitespace-pre-line text-sm leading-relaxed text-foreground">
+                    {h.note}
+                  </p>
+                  <p className="mt-1 text-xs capitalize text-muted-foreground">
+                    {h.status.replace("_", " ")} ·{" "}
+                    {new Date(h.at).toLocaleDateString("en-IN", {
+                      day: "numeric",
+                      month: "short",
+                      year: "numeric",
+                    })}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+
+      <div className="mt-8 rounded-2xl border border-border bg-card p-6">
         <div className="flex items-center justify-between">
           <h2 className="font-serif text-xl">Order summary</h2>
           <span className="rounded-full bg-muted px-3 py-1 text-xs capitalize text-muted-foreground">
@@ -208,11 +285,13 @@ export default async function OrderPage({
       <div className="mt-6 rounded-2xl border border-border bg-card p-6">
         <h2 className="font-serif text-xl">Order status</h2>
         <div className="mt-5">
+          {/* `note` is intentionally not passed: it is the admin's internal
+              note. Anything meant for the customer is in the violet callout
+              above, sourced from `customerNote` + flagged status updates. */}
           <OrderTimeline
             status={order.status}
             history={history}
             deliveryStatus={order.deliveryStatus}
-            note={order.note}
             brandName={settings.brandName}
           />
         </div>

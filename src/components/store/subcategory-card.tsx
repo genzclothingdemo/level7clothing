@@ -128,7 +128,7 @@ export function SubcategoryCard({ tile }: { tile: SubcategoryTile }) {
       {/* ── Info area ── */}
       <div className="mt-2 flex flex-1 flex-col sm:mt-3">
         {/* Category */}
-        <p className="truncate text-[9px] uppercase tracking-widest gold-text sm:text-[10px]">
+        <p className="truncate text-[10px] uppercase tracking-widest gold-text sm:text-xs">
           {category}
         </p>
 

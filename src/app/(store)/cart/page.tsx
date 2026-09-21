@@ -62,7 +62,7 @@ export default function CartPage() {
                   </Link>
                   <button
                     onClick={() => removeItem(item.lineId)}
-                    className="text-muted-foreground hover:text-danger cursor-pointer"
+                    className="grid h-11 w-11 -m-1.5 shrink-0 place-items-center rounded-lg text-muted-foreground hover:text-danger cursor-pointer"
                     aria-label="Remove"
                   >
                     <Trash2 className="h-5 w-5" />
@@ -80,7 +80,7 @@ export default function CartPage() {
                   <div className="inline-flex items-center rounded-full border border-border">
                     <button
                       onClick={() => updateQty(item.lineId, item.quantity - 1)}
-                      className="grid h-9 w-9 place-items-center hover:bg-muted rounded-l-full cursor-pointer"
+                      className="grid h-11 w-11 place-items-center hover:bg-muted rounded-l-full cursor-pointer"
                       aria-label="Decrease"
                     >
                       <Minus className="h-4 w-4" />
@@ -90,7 +90,7 @@ export default function CartPage() {
                     </span>
                     <button
                       onClick={() => updateQty(item.lineId, item.quantity + 1)}
-                      className="grid h-9 w-9 place-items-center hover:bg-muted rounded-r-full cursor-pointer"
+                      className="grid h-11 w-11 place-items-center hover:bg-muted rounded-r-full cursor-pointer"
                       aria-label="Increase"
                     >
                       <Plus className="h-4 w-4" />

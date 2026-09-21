@@ -16,7 +16,25 @@ export default async function EditProductPage({
 }) {
   const { id } = await params;
   const [product, categoriesList, subcategories, settings] = await Promise.all([
-    prisma.product.findUnique({ where: { id } }),
+    // `productImages` is the persisted contract for galleries — slot +
+    // variantValue + sortOrder, written by syncProductImages(). Without it the
+    // editor rebuilt its Media tab from the `Product.variants` JSON mirror,
+    // where every variant's `images` already has the common photos appended.
+    // That round-trip put the common shots under each variant value, left
+    // Common empty, and the next save then deleted the slot="common" rows.
+    prisma.product.findUnique({
+      where: { id },
+      include: {
+        productImages: {
+          orderBy: { sortOrder: "asc" },
+          include: {
+            media: {
+              select: { id: true, url: true, alt: true, width: true, height: true },
+            },
+          },
+        },
+      },
+    }),
     prisma.category.findMany({ orderBy: { name: "asc" } }),
     prisma.subcategory.findMany({
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
@@ -39,6 +57,16 @@ export default async function EditProductPage({
 
   const dto = {
     ...product,
+    media: product.productImages.map((pi) => ({
+      id: pi.media.id,
+      url: pi.media.url,
+      alt: pi.media.alt,
+      width: pi.media.width,
+      height: pi.media.height,
+      slot: pi.slot,
+      variantValue: pi.variantValue,
+      sortOrder: pi.sortOrder,
+    })),
     options: Array.isArray(product.options)
       ? (product.options as unknown as ProductOption[])
       : [],

@@ -115,7 +115,7 @@ export function VisualVariantPicker({
 
                   {!enabled && (
                     <span className="absolute inset-0 grid place-items-center bg-background/55">
-                      <span className="rounded bg-background/90 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
+                      <span className="rounded bg-background/90 px-1 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                         Sold out
                       </span>
                     </span>

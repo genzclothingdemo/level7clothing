@@ -12,8 +12,18 @@ Built as a demo for a friend who currently sells on Shopify (`level7clothing.com
 the catalogue, copy and categories mirror that real store.
 
 - **Repo:** `github.com/genzclothingdemo/level7clothing` (branch `main`)
-- **Live:** `https://www.level7clothing.shop` (Vercel, team `genzclothingdemo`)
+- **Live:** `https://clothingdemoshop.vercel.app` — Vercel project `level7clothing`
+  in **team scope `genzclothingdemo`**, functions in `bom1`
 - **Local path:** `Quellflow/code/Clothing/level7clothing`
+
+> **Deploy to the right project.** `level7clothing.shop` was disabled on
+> 2026-09-21 (its GoDaddy records had a stray `0`: `...vercel-dns-017.com.0` and
+> `216.198.79.10`), so there is no custom domain attached. A **duplicate** project
+> of the same name lived in the personal scope `clothing6` and was deleted — if a
+> deploy seems to have no effect, check `vercel whoami` and the linked scope.
+> Note `vercel link` appends `.vercel` *and* a second `.env*` to `.gitignore`;
+> that second `.env*` lands after `!.env.example` and untracks the template, so
+> revert `.gitignore` after linking (`.vercel` is already ignored at line 41).
 
 > This codebase started life as a copy of an unrelated resin-art store
 > ("Artvelle"). All of that branding is gone — **do not reintroduce it**, and don't
@@ -80,6 +90,111 @@ Aesthetic is **monochrome + electric violet**, editorial/streetwear:
   Don't add ambient motion back.
 - Utilities: `.eyebrow` (uppercase wide-tracked label), `.display-tight`, `.rule`.
 
+## CSS cascade layers — unlayered rules silently beat every utility
+
+`@import "tailwindcss"` puts utilities in `@layer utilities`. **An unlayered rule
+outranks every layered rule regardless of specificity**, so anything written at the
+top level of `globals.css` defeats Tailwind with no warning and no error.
+
+This had already bitten twice before it was found:
+
+- `* { border-color: var(--border) }` made **every** `border-<colour>` utility in the
+  repo inert — `border-accent`, `border-primary`, `border-foreground` all rendered as
+  the default hairline.
+- `.input { padding: 0 0.875rem; height: 2.75rem }` made `class="input pl-9"` put the
+  text under the icon, and `class="input h-10"` a silent no-op.
+
+Both are now wrapped (`@layer base` and `@layer components`), and `.input` uses
+`padding-inline`/`padding-block` longhands so a `pl-*` utility isn't reset by the
+shorthand. **Keep new global rules inside a layer.**
+
+## Product media: ProductImage rows are the contract, not `Product.variants`
+
+`syncProductImages()` writes the real gallery as `ProductImage` rows:
+
+| slot | variantValue | meaning |
+|---|---|---|
+| `preview` | the value | the one card/preview shot for that variant value |
+| `gallery` | the value | that value's gallery, in `sortOrder` |
+| `common` | `null` | photos shown for every variant |
+
+`Product.variants[].images` is a **mirror**, and a lossy one — each variant's
+`images` is written as `[...designImages, ...common]`. The admin editor used to
+rehydrate from that mirror, which meant reopening a product with variants *and*
+common photos put the common shots under every value, left Common empty, and the
+next save deleted the `slot="common"` rows. A hand-picked `previewImage` was lost
+the same way, because the mirror path always took `images[0]`.
+
+So: **the edit page must `include: { productImages: { include: { media } } }`**
+and the form must rehydrate from `slot`/`variantValue`/`sortOrder`. The legacy
+mirror path is kept only as a fallback for rows saved before ProductImage existed.
+
+## Zod strips anything not in the schema — silently
+
+`returnable` was missing from `productSchema` in `src/app/actions/admin.ts`, so it
+was dropped from every payload and neither `createProduct` nor `updateProduct`
+wrote the column. The admin's Returns control looked fine and saved nothing, and
+`resolveReturnPolicy()` kept offering returns on pieces marked non-returnable.
+Nothing fails loudly here — no type error, no runtime error. **When adding a
+Product column, add it to `productSchema` AND to both writers**, and collapse
+`undefined` to `null` explicitly so "inherit the store default" survives an update.
+
+The same shape of trap: `resolveReturnPolicy(product, settings)` takes
+`isCustomisable` as an *optional* field, so a Prisma `select` that omits it still
+typechecks and silently treats made-to-order pieces as returnable.
+
+## Turbopack workspace root
+
+There is a stray `package.json` + `package-lock.json` in the user's home
+directory. Turbopack finds it while walking up for a lockfile and infers
+`C:\Users\15ind` as the workspace root, which makes `next build` die at the end
+with `ENOENT .next/server/pages-manifest.json` (an App-Router-only app never
+emits that file). `next.config.ts` pins `turbopack: { root: __dirname }`. Don't
+remove it.
+
+## Chat (replaces the old one-way inbox)
+
+`ChatThread` / `ChatMessage`, polled — not WebSockets, this is serverless.
+`src/lib/chat.ts` holds identity resolution, guest→account claiming, delivery
+states and validation; the customer never names a thread id, it is resolved from
+the session or the `level7_chat_guest` cookie. Claiming happens lazily inside
+thread resolution rather than in the login action, so it also catches someone who
+signs up after chatting or logs in in another tab.
+
+## The component-orphan trap
+
+Four finished components were imported **nowhere**, so features documented as working
+were silently dead: the size guide, the wishlist heart, the newsletter form and the
+address book. `WishlistProvider` was also missing from `providers.tsx` entirely, which
+made `useWishlist()` throw and took out the whole `/wishlist` page.
+
+They typecheck clean and lint clean — nothing catches an unused component. When a big
+refactor lands, grep each store component for an importer:
+
+```bash
+for c in SizeGuideModal WishlistButton NewsletterForm AddressBook; do
+  printf "%s: " "$c"; grep -rl "$c" src/ --include=*.tsx | grep -v "$(echo "$c")" | wc -l
+done
+```
+
+Also note `size` can be either the **visual** (image-card) attribute or a **pill**
+group depending on the product, so anything hung off the size selector must render
+outside that branch or it disappears for half the catalogue.
+
+## PWA, and auto-refresh on deploy
+
+- `src/app/manifest.ts` (brand strings from `getSettings()`), `public/sw.js`,
+  icons generated by `npm run pwa:icons` into `public/icons`.
+- The worker is **production-only** and deliberately conservative: navigations are
+  network-first, and `/api`, `/admin`, `/account`, `/checkout`, `/cart`, `/order`,
+  `/wishlist` are never cached — stale prices or one shopper seeing another's order
+  would be far worse than a slower load. It also skips RSC payloads.
+- `UpdateWatcher` polls `/api/version` and compares against `buildId()` rendered into
+  the shell. It reloads automatically **only when it is safe** — nothing typed, no
+  dialog open, not on checkout/account/admin/order — and otherwise shows a Refresh
+  prompt. A `sessionStorage` guard stops a reload loop when two deployments serve at
+  once.
+
 ## Modal pattern — don't hide with transforms
 
 A bug worth not repeating: the size guide stayed mounted and was "hidden" with
@@ -114,19 +229,23 @@ the AWB and drive margin visibility.
 
 ## Why pages feel slow (measured, not guessed)
 
-| Route type | Production TTFB |
-|---|---|
-| Static (`robots.txt`) | **0.08 s** |
-| DB-backed (home, shop, product) | **4.4–4.6 s** |
-| One DB query from a dev machine in India | **~100 ms** |
+**This is now fixed** — the live project runs in `bom1`, and DB-backed routes
+measure **0.23–0.55 s** TTFB. Keep the region there; the history below explains why.
 
-Not the client, not the network, not Supabase. The cause is **geography**: Vercel's
-function region is **`iad1` (Washington DC)** while Supabase is **`ap-south-1`
-(Mumbai)** — every query crosses the planet. `connection_limit=1` then *serialises*
-those hops, so N queries cost N round trips with no overlap.
+| Route type | TTFB in `iad1` (old) | TTFB in `bom1` (now) |
+|---|---|---|
+| Static (`robots.txt`) | 0.08 s | 0.08 s |
+| DB-backed (home, shop, product) | **4.4–4.6 s** | **0.23–0.55 s** |
+| One DB query from a dev machine in India | ~100 ms | ~100 ms |
 
-**The single biggest fix is changing the Vercel function region to `bom1` (Mumbai).**
-Nothing in the code can compensate for a ~250 ms floor per query.
+It was never the client, the network or Supabase. The cause was **geography**: the
+function region was **`iad1` (Washington DC)** while Supabase is **`ap-south-1`
+(Mumbai)** — every query crossed the planet, and `connection_limit=1` *serialised*
+those hops, so N queries cost N round trips with no overlap. Nothing in the code can
+compensate for a ~250 ms floor per query, which is why the region is the whole fix.
+
+The region is a **project setting, not in `vercel.json`** — a new Vercel project
+defaults to `iad1` and silently reintroduces the 4.4 s floor.
 
 Mitigations already in place — don't undo them:
 
@@ -212,6 +331,7 @@ npm run db:push          # push schema
 npm run db:seed          # DESTRUCTIVE: deletes + recreates all products
 npm run db:backup        # snapshot the DB to scripts/tmp/ (gitignored)
 npm run media:manifest   # rebuild src/lib/media-manifest.json from public/products
+npm run pwa:icons        # regenerate public/icons (PWA / home-screen icons)
 npm run shipping:free    # safe: only shipping fields, keeps reviews/orders
 npx tsc --noEmit         # typecheck
 npx next build           # production build

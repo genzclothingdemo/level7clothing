@@ -1,80 +1,95 @@
-import { MessageSquare, Mail, Phone } from "lucide-react";
+import { Mail, Phone } from "lucide-react";
 import { prisma } from "@/lib/prisma";
-import { MessageActions } from "@/components/admin/message-actions";
+import { ChatInbox } from "@/components/admin/chat-inbox";
+import {
+  ATTACHMENT_ACCEPT,
+  MAX_ATTACHMENT_BYTES,
+  MAX_MESSAGE_LENGTH,
+} from "@/lib/chat";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Inquiries" };
+export const metadata = { title: "Messages" };
 
+/**
+ * Two-way chat with shoppers, in the slot that used to hold the read-only
+ * contact-form inbox.
+ *
+ * The page itself stays a thin server shell: the inbox polls, so rendering
+ * threads here would only serve a snapshot that is stale a second later, and
+ * on this store every DB query from the function region costs ~250ms.
+ *
+ * Contact-form submissions still land in the `Message` table (the /contact
+ * page writes there and emails the store), so they are kept below as a
+ * read-only archive rather than being quietly hidden.
+ */
 export default async function AdminMessages() {
-  const messages = await prisma.message
-    .findMany({ orderBy: { createdAt: "desc" }, take: 200 })
+  const legacy = await prisma.message
+    .findMany({ orderBy: { createdAt: "desc" }, take: 50 })
     .catch(() => []);
 
   return (
-    <div>
-      <h1 className="font-serif text-3xl">Inquiries</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        Messages from your contact form.
-      </p>
+    <div className="flex min-h-0 flex-col">
+      <div>
+        <h1 className="font-serif text-3xl">Messages</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Chat directly with shoppers. Replies appear in their chat panel on the
+          storefront.
+        </p>
+      </div>
 
-      {messages.length === 0 ? (
-        <div className="mt-10 rounded-2xl border border-dashed border-border p-12 text-center">
-          <MessageSquare className="mx-auto h-10 w-10 text-muted-foreground" />
-          <p className="mt-4 font-serif text-xl">No inquiries yet</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Contact form submissions will appear here.
+      <div className="mt-6 h-[calc(100dvh-16rem)] min-h-[30rem]">
+        <ChatInbox
+          maxLength={MAX_MESSAGE_LENGTH}
+          maxBytes={MAX_ATTACHMENT_BYTES}
+          accept={ATTACHMENT_ACCEPT}
+        />
+      </div>
+
+      {legacy.length > 0 && (
+        <details className="mt-6 rounded-2xl border border-border bg-card p-4">
+          <summary className="cursor-pointer text-sm font-medium">
+            Contact-form inquiries{" "}
+            <span className="text-muted-foreground">
+              ({legacy.length} archived)
+            </span>
+          </summary>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Sent before chat existed, or from the contact page. Read-only —
+            reply by email or phone.
           </p>
-        </div>
-      ) : (
-        <div className="mt-6 space-y-3">
-          {messages.map((m) => (
-            <div
-              key={m.id}
-              className={`rounded-2xl border p-5 ${
-                m.isRead
-                  ? "border-border bg-card"
-                  : "border-accent/40 bg-accent/5"
-              }`}
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{m.name}</span>
-                    {!m.isRead && (
-                      <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] text-accent-foreground">
-                        New
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          <ul className="mt-4 space-y-3">
+            {legacy.map((m) => (
+              <li key={m.id} className="rounded-xl border border-border p-4">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className="text-sm font-medium">{m.name}</span>
+                  <a
+                    href={`mailto:${m.email}`}
+                    className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-accent"
+                  >
+                    <Mail className="h-3 w-3" /> {m.email}
+                  </a>
+                  {m.phone && (
                     <a
-                      href={`mailto:${m.email}`}
-                      className="inline-flex items-center gap-1 hover:text-accent"
+                      href={`tel:${m.phone}`}
+                      className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-accent"
                     >
-                      <Mail className="h-3 w-3" /> {m.email}
+                      <Phone className="h-3 w-3" /> {m.phone}
                     </a>
-                    {m.phone && (
-                      <a
-                        href={`tel:${m.phone}`}
-                        className="inline-flex items-center gap-1 hover:text-accent"
-                      >
-                        <Phone className="h-3 w-3" /> {m.phone}
-                      </a>
-                    )}
-                    <span>{m.createdAt.toLocaleString("en-IN")}</span>
-                  </div>
+                  )}
+                  <span className="text-xs text-muted-foreground">
+                    {m.createdAt.toLocaleString("en-IN")}
+                  </span>
                 </div>
-                <MessageActions id={m.id} isRead={m.isRead} />
-              </div>
-              {m.subject && (
-                <p className="mt-3 text-sm font-medium">{m.subject}</p>
-              )}
-              <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">
-                {m.message}
-              </p>
-            </div>
-          ))}
-        </div>
+                {m.subject && (
+                  <p className="mt-2 text-sm font-medium">{m.subject}</p>
+                )}
+                <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">
+                  {m.message}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
     </div>
   );

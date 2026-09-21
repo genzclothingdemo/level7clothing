@@ -20,6 +20,11 @@ import { useProductView } from "@/context/product-view";
 import { Button } from "@/components/ui/button";
 import { WhatsAppProductButton } from "@/components/store/product-actions";
 import { VisualVariantPicker } from "@/components/store/visual-variant-picker";
+import { SizeGuideModal } from "@/components/store/size-guide-modal";
+import {
+  CustomisationNotice,
+  PaymentModesNote,
+} from "@/components/store/product-notices";
 import { formatINR, cn } from "@/lib/utils";
 import {
   priceForSelection,
@@ -37,8 +42,10 @@ function TrustRow() {
     { icon: <ShieldCheck className="h-4 w-4" />, label: "Secure Packaging" },
     { icon: <IndianRupee className="h-4 w-4" />, label: "Cash on Delivery" },
   ];
+  // 2-up on phones: 4-up gave each cell ~56px at 320px, stacking every label
+  // into three lines of 10px text.
   return (
-    <div className="grid grid-cols-4 gap-2 rounded-2xl border border-border p-4">
+    <div className="grid grid-cols-2 gap-2 rounded-2xl border border-border p-4 sm:grid-cols-4">
       {items.map(({ icon, label }) => (
         <div key={label} className="flex flex-col items-center gap-1.5 text-center">
           <span className="gold-text">{icon}</span>
@@ -248,18 +255,23 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
 
         return (
           <section key={group.name} aria-label={`Choose ${group.name}`}>
-            <p className="mb-2.5 flex flex-wrap items-baseline gap-x-1.5 text-sm font-semibold">
-              <span>
-                {step ? `${step}. ` : ""}Choose {group.name}
-              </span>
-              {selection[group.name] ? (
-                <span className="font-normal text-muted-foreground">
-                  — {selection[group.name]}
+            <div className="mb-2.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+              <p className="flex flex-wrap items-baseline gap-x-1.5 text-sm font-semibold">
+                <span>
+                  {step ? `${step}. ` : ""}Choose {group.name}
                 </span>
-              ) : (
-                <span className="text-xs font-normal text-danger">Select one</span>
-              )}
-            </p>
+                {selection[group.name] ? (
+                  <span className="font-normal text-muted-foreground">
+                    — {selection[group.name]}
+                  </span>
+                ) : (
+                  <span className="text-xs font-normal text-danger">Select one</span>
+                )}
+              </p>
+
+              {/* The fits are intentionally oversized, so the chart belongs
+                  right where the size is chosen. */}
+            </div>
 
             <div className="flex flex-wrap gap-2">
               {group.values.map((val) => {
@@ -299,6 +311,17 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
           </section>
         );
       })}
+
+      {/* Size guide sits after the option groups rather than inside one,
+          because "Size" can be either the visual (image-card) group or a pill
+          group depending on the product — putting it in the pill branch alone
+          meant it never rendered for products where size drives the imagery.
+          The fits are intentionally oversized, so this chart matters. */}
+      {attributes.some((a) => /size/i.test(a.name)) && (
+        <div className="flex justify-end">
+          <SizeGuideModal category={product.category} />
+        </div>
+      )}
 
       {/* ── Quantity + Add to cart / Buy CTA ── */}
       <div ref={ctaRef} className="space-y-3 pt-1">
@@ -365,6 +388,17 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
         </div>
       </div>
 
+      {/* Made-to-order pieces change what the shopper has to do and what they
+          can expect back, so this sits above the trust row, not in fine print. */}
+      {product.isCustomisable && (
+        <CustomisationNotice note={product.customisationNote} />
+      )}
+
+      <PaymentModesNote
+        modes={product.paymentModes}
+        advancePercent={product.advancePercent ?? null}
+      />
+
       <TrustRow />
 
       {/* ── Sticky mobile buy bar — sits above the app's bottom tab bar ── */}
@@ -387,7 +421,11 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
                 <p className="truncate text-[11px] text-muted-foreground">
                   {Object.values(selection).join(" · ") || product.name}
                 </p>
-                <p className="text-sm font-semibold leading-tight">
+                {/* The three siblings in this bar are all shrink-0, leaving
+                    this column ~44px at 320px. A 5-digit total is one
+                    unbreakable token, so without truncate it overlapped the
+                    quantity stepper. */}
+                <p className="truncate text-sm font-semibold leading-tight">
                   {formatINR(unitPrice * qty)}
                 </p>
               </div>

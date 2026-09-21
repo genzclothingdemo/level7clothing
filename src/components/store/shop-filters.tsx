@@ -40,12 +40,18 @@ export function ShopFilters({ categories }: { categories: string[] }) {
       else sp.set(k, v);
     }
     if ("category" in next || "q" in next) sp.delete("sub");
+    // Any change to the filters reshuffles the result set, so page 3 of the
+    // old listing is meaningless against the new one — always land on page 1.
+    sp.delete("page");
     router.push(`/shop?${sp.toString()}`);
   }
 
   return (
-    /* Sticky wrapper — sticks below the navbar (navbar ~56 px on mobile) */
-    <div className="sticky top-14 z-20 -mx-5 bg-background/90 px-5 pb-3 pt-2 backdrop-blur-md sm:top-16 sm:mx-0 sm:px-0">
+    /* Sticky wrapper. Offsets must track the navbar exactly: it is h-14 (56px)
+       and md:h-20 (80px). The old `sm:top-16` pinned this at 64px, so from
+       768px up the 80px navbar painted over its top 16px, and between 640–767px
+       it left an 8px gap that products scrolled through. */
+    <div className="sticky top-14 z-20 -mx-5 bg-background/90 px-5 pb-3 pt-2 backdrop-blur-md sm:mx-0 sm:px-0 md:top-20">
       {/* ── Search + Sort row ── */}
       <div className="flex items-center gap-2 sm:gap-3">
         <form

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Ruler, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -32,6 +33,9 @@ const CHARTS: Record<
 
 export function SizeGuideModal({ category }: { category: string }) {
   const [open, setOpen] = useState(false);
+  // Portalling needs a DOM target, which doesn't exist during SSR.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   const kind: ChartKind = /hoodie/i.test(category) ? "hoodie" : "tee";
   const { rows } = CHARTS[kind];
 
@@ -64,7 +68,12 @@ export function SizeGuideModal({ category }: { category: string }) {
           "hidden" with translateY(100%), which from a vertically centred
           position doesn't clear the viewport — so the sheet sat visible on
           top of the page. */}
-      {open && (
+      {/* Portalled to <body>: (store)/template.tsx wraps every page in a
+          framer-motion transform, and a transformed ancestor becomes the
+          containing block for `position: fixed` — which would anchor this
+          sheet to the page wrapper instead of the viewport. The sticky buy bar
+          in product-purchase.tsx portals for exactly the same reason. */}
+      {open && mounted && createPortal(
         <div
           role="dialog"
           aria-modal="true"
@@ -140,7 +149,8 @@ export function SizeGuideModal({ category }: { category: string }) {
               variation is normal.
             </p>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

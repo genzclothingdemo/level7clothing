@@ -43,7 +43,7 @@ export default function ContactPage() {
         <p className="text-xs uppercase tracking-widest text-muted-foreground">
           Say hello
         </p>
-        <h1 className="mt-3 font-serif text-5xl">Get in touch</h1>
+        <h1 className="mt-3 font-serif text-4xl md:text-5xl">Get in touch</h1>
         <p className="mx-auto mt-4 max-w-xl text-muted-foreground">
           Questions, custom commissions or bulk orders — we&apos;d love to hear
           from you.

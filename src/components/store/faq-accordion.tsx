@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { GlossaryText } from "@/components/store/info-tip";
 
 export type FaqItem = { q: string; a: string };
 
@@ -30,6 +31,10 @@ export function FaqAccordion({ items }: { items: FaqItem[] }) {
               />
             </button>
             <div
+              // The answer stays in the DOM when collapsed (crawlers read it),
+              // so `inert` is what keeps the info-tip buttons inside it out of
+              // the tab order until the panel is actually open.
+              inert={!open}
               className={cn(
                 "grid transition-all duration-300 ease-out",
                 open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
@@ -37,7 +42,10 @@ export function FaqAccordion({ items }: { items: FaqItem[] }) {
             >
               <div className="overflow-hidden">
                 <p className="px-5 pb-4 text-sm leading-relaxed text-muted-foreground">
-                  {item.a}
+                  {/* Explains "Cash on Delivery", "prepaid", "business days" …
+                      in place — the tip is portalled, so this panel's
+                      overflow-hidden can't clip it. */}
+                  <GlossaryText text={item.a} />
                 </p>
               </div>
             </div>

@@ -37,7 +37,7 @@ export function CartDrawer() {
               </h2>
               <button
                 onClick={() => setOpen(false)}
-                className="h-9 w-9 grid place-items-center rounded-full hover:bg-muted cursor-pointer"
+                className="h-11 w-11 grid place-items-center rounded-full hover:bg-muted cursor-pointer"
                 aria-label="Close cart"
               >
                 <X className="h-5 w-5" />
@@ -80,7 +80,7 @@ export function CartDrawer() {
                             </p>
                             <button
                               onClick={() => removeItem(item.lineId)}
-                              className="text-muted-foreground hover:text-danger cursor-pointer"
+                              className="grid h-11 w-11 -m-1.5 shrink-0 place-items-center rounded-lg text-muted-foreground hover:text-danger cursor-pointer"
                               aria-label="Remove item"
                             >
                               <Trash2 className="h-4 w-4" />
@@ -100,7 +100,7 @@ export function CartDrawer() {
                                 onClick={() =>
                                   updateQty(item.lineId, item.quantity - 1)
                                 }
-                                className="h-8 w-8 grid place-items-center hover:bg-muted rounded-l-full cursor-pointer"
+                                className="h-11 w-11 grid place-items-center hover:bg-muted rounded-l-full cursor-pointer"
                                 aria-label="Decrease"
                               >
                                 <Minus className="h-3.5 w-3.5" />
@@ -112,7 +112,7 @@ export function CartDrawer() {
                                 onClick={() =>
                                   updateQty(item.lineId, item.quantity + 1)
                                 }
-                                className="h-8 w-8 grid place-items-center hover:bg-muted rounded-r-full cursor-pointer"
+                                className="h-11 w-11 grid place-items-center hover:bg-muted rounded-r-full cursor-pointer"
                                 aria-label="Increase"
                               >
                                 <Plus className="h-3.5 w-3.5" />

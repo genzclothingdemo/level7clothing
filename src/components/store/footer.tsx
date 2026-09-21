@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { Mail, Phone, MapPin } from "lucide-react";
 import { useSettings } from "@/context/settings";
+import { NewsletterForm } from "@/components/store/newsletter-form";
+import { InstallAppButton } from "@/components/store/install-app-button";
 
 function Instagram({ className }: { className?: string }) {
   return (
@@ -59,12 +61,22 @@ export function Footer() {
                 </a>
               )}
             </div>
+
+            {/* The newsletter form existed but was imported nowhere, so the
+                subscribe action had no entry point on the site. */}
+            <div className="mt-7 max-w-sm">
+              <p className="text-sm font-medium">Early access to new drops</p>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Join the list for first looks and subscriber-only deals.
+              </p>
+              <NewsletterForm className="mt-3" />
+            </div>
           </div>
 
           <div>
-            <h4 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
+            <h2 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
               Explore
-            </h4>
+            </h2>
             <ul className="mt-4 space-y-2 text-sm">
               <li>
                 <Link href="/shop" className="hover:text-accent">
@@ -90,9 +102,9 @@ export function Footer() {
           </div>
 
           <div>
-            <h4 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
+            <h2 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
               Help &amp; policies
-            </h4>
+            </h2>
             <ul className="mt-4 space-y-2 text-sm">
               <li>
                 <Link href="/faq" className="hover:text-accent">
@@ -118,13 +130,18 @@ export function Footer() {
           </div>
 
           <div>
-            <h4 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
+            <h2 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
               Get in touch
-            </h4>
+            </h2>
             <ul className="mt-4 space-y-3 text-sm text-muted-foreground">
-              <li className="flex items-center gap-2">
+              <li className="flex min-w-0 items-center gap-2">
                 <Mail className="h-4 w-4 shrink-0" />
-                <a href={`mailto:${s.contactEmail}`} className="hover:text-accent">
+                {/* The address is admin-editable and unbreakable; without
+                    break-all a long one overflows the column at 320px. */}
+                <a
+                  href={`mailto:${s.contactEmail}`}
+                  className="min-w-0 break-all hover:text-accent"
+                >
                   {s.contactEmail}
                 </a>
               </li>
@@ -151,7 +168,11 @@ export function Footer() {
           <p>
             © {year} {s.brandName}. All rights reserved.
           </p>
-          <p>Free shipping across India · COD available</p>
+          <div className="flex flex-col items-center gap-3 sm:flex-row">
+            {/* Renders only where the browser actually supports installing. */}
+            <InstallAppButton />
+            <p>Free shipping across India · COD available</p>
+          </div>
         </div>
       </div>
     </footer>

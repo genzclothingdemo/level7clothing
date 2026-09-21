@@ -79,6 +79,12 @@ const productSchema = z.object({
   media: z.any().optional(),
   isFeatured: z.boolean().default(false),
   isActive: z.boolean().default(true),
+  // Made-to-order / personalised piece, plus what the buyer has to supply.
+  // The note is only meaningful while `isCustomisable` is true — the editor
+  // sends null for it otherwise, so a switched-off product can't keep asking
+  // the storefront for details nobody is collecting.
+  isCustomisable: z.boolean().default(false),
+  customisationNote: z.string().nullable().optional(),
   // Which checkout modes this product supports (subset of the 4 modes).
   paymentModes: z
     .array(z.enum(PAYMENT_MODES))
@@ -97,6 +103,13 @@ const productSchema = z.object({
   // Per-product overrides for the info accordion. `null` = inherit the store
   // default (see resolveProductInfo); a string replaces it for this product.
   materialsCare: z.string().nullable().optional(),
+  // Returns override. `null` = inherit SiteSettings.defaultReturnable.
+  //
+  // This key was missing entirely, so zod stripped it from every payload and
+  // neither writer below set the column — the admin's Returns control has
+  // never actually saved. resolveReturnPolicy() reads this field, so a piece
+  // marked non-returnable was still being offered for return.
+  returnable: z.boolean().nullable().optional(),
   // Social/video links for the product page's "Video previews" rail. Rows with
   // no url are dropped by the editor; the url is checked here so a typo can't
   // reach the storefront as a dead card.
@@ -157,8 +170,12 @@ export async function createProduct(input: ProductInput) {
       shippingType: data.shippingType,
       shippingFee: data.shippingFee,
       shippingMarkup: data.shippingMarkup,
+      isCustomisable: data.isCustomisable,
+      customisationNote: data.customisationNote ?? null,
       // `undefined` would leave the column at its previous value on update, so
       // collapse it to null — the "inherit the store default" state.
+      // null = inherit SiteSettings.defaultReturnable.
+      returnable: data.returnable ?? null,
       materialsCare: data.materialsCare ?? null,
       shippingInfo: data.shippingInfo ?? null,
       returnsInfo: data.returnsInfo ?? null,
@@ -335,6 +352,13 @@ export async function updateProduct(id: string, input: ProductInput) {
       heightCm: data.heightCm ?? null,
       shippingType: data.shippingType,
       shippingFee: data.shippingFee,
+      isCustomisable: data.isCustomisable,
+      // Explicit, not left to the `...productData` spread: an `undefined` here
+      // would leave the previous note on the row after the product stopped
+      // being made-to-order.
+      customisationNote: data.customisationNote ?? null,
+      // null = inherit SiteSettings.defaultReturnable.
+      returnable: data.returnable ?? null,
       materialsCare: data.materialsCare ?? null,
       shippingInfo: data.shippingInfo ?? null,
       returnsInfo: data.returnsInfo ?? null,
@@ -687,7 +711,17 @@ const ORDER_STATUSES = [
   "payment_failed",
 ] as const;
 
-type StatusEntry = { status: string; note?: string; at: string };
+type StatusEntry = {
+  status: string;
+  note?: string;
+  at: string;
+  /**
+   * Marks a note the admin deliberately wrote for the customer. The rest of
+   * the history is internal — NimbusPost draft/AWB chatter, courier scans,
+   * "cancelled by admin" — so the storefront shows flagged entries only.
+   */
+  forCustomer?: boolean;
+};
 
 export async function updateOrderStatus(
   id: string,
@@ -707,7 +741,12 @@ export async function updateOrderStatus(
     : [];
   const entry: StatusEntry = { status, at: new Date().toISOString() };
   const trimmed = note?.trim();
-  if (trimmed) entry.note = trimmed;
+  if (trimmed) {
+    entry.note = trimmed;
+    // The admin types this in a field labelled "message with this update", so
+    // it is written for the customer and shown on their order page.
+    entry.forCustomer = true;
+  }
   history.push(entry);
 
   // The return window is counted from `deliveryStatusAt`. Only the NimbusPost
@@ -731,7 +770,10 @@ export async function updateOrderStatus(
       status,
       statusHistory: history as unknown as object[],
       ...deliveryTouch,
-      ...(trimmed ? { note: trimmed } : {}),
+      // The message stays in the history entry above. It deliberately does NOT
+      // overwrite `note`, which is the private internal note, nor
+      // `customerNote`, which is the standing message the admin manages
+      // separately in Admin → Orders → Notes.
     },
   });
 
@@ -796,31 +838,52 @@ export async function updatePaymentStatus(id: string, paymentStatus: string) {
   return { ok: true as const };
 }
 
+/**
+ * The **internal** note on an order. Staff only — it is never rendered on the
+ * storefront, so it must also stay out of `statusHistory`, which the
+ * customer's order page reads.
+ */
 export async function addOrderNote(id: string, note: string) {
   await requireAdmin();
   const trimmed = note.trim();
-  const order = await prisma.order.findUnique({ where: { id } });
+  const order = await prisma.order.findUnique({
+    where: { id },
+    select: { id: true },
+  });
   if (!order) return { ok: false as const, error: "Order not found" };
-
-  const history = Array.isArray(order.statusHistory)
-    ? (order.statusHistory as unknown as StatusEntry[])
-    : [];
-  if (trimmed) {
-    history.push({
-      status: order.status,
-      note: `Note: ${trimmed}`,
-      at: new Date().toISOString(),
-    });
-  }
 
   await prisma.order.update({
     where: { id },
-    data: {
-      note: trimmed || null,
-      statusHistory: history as unknown as object[],
-    },
+    data: { note: trimmed || null },
   });
 
+  revalidatePath("/admin/orders");
+  revalidatePath("/admin");
+  return { ok: true as const };
+}
+
+/**
+ * The message the customer sees on their order page, in a highlighted callout.
+ * Kept apart from `note` so an internal remark can never be published by
+ * accident — the two are edited in separate fields and stored in separate
+ * columns.
+ */
+export async function setCustomerNote(id: string, note: string) {
+  await requireAdmin();
+  const trimmed = note.trim();
+  const order = await prisma.order.findUnique({
+    where: { id },
+    select: { id: true },
+  });
+  if (!order) return { ok: false as const, error: "Order not found" };
+
+  await prisma.order.update({
+    where: { id },
+    data: { customerNote: trimmed || null },
+  });
+
+  // The customer's order page is force-dynamic, so it picks this up on its
+  // next request without a revalidate.
   revalidatePath("/admin/orders");
   revalidatePath("/admin");
   return { ok: true as const };

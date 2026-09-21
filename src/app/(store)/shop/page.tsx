@@ -14,6 +14,11 @@ import { getReviewSummaries, type ReviewSummary } from "@/lib/reviews";
 import { SubcategoryCard } from "@/components/store/subcategory-card";
 import { Reveal } from "@/components/store/reveal";
 import { ShopFilters } from "@/components/store/shop-filters";
+import {
+  Pagination,
+  paginate,
+  parsePageParam,
+} from "@/components/store/pagination";
 import { prisma } from "@/lib/prisma";
 import { formatINR } from "@/lib/utils";
 
@@ -24,7 +29,19 @@ type SP = Promise<{
   sub?: string;
   q?: string;
   sort?: string;
+  page?: string;
 }>;
+
+/** Self-canonical for a paged shelf — page 1 stays at the bare URL. */
+function withPage(url: string, page: number): string {
+  if (page <= 1) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}page=${page}`;
+}
+
+/** Title suffix so paged shelves aren't reported as duplicate titles. */
+function pageSuffix(page: number): string {
+  return page > 1 ? ` — Page ${page}` : "";
+}
 
 export async function generateMetadata({
   searchParams,
@@ -32,6 +49,7 @@ export async function generateMetadata({
   searchParams: SP;
 }): Promise<Metadata> {
   const sp = await searchParams;
+  const page = parsePageParam(sp.page);
 
   // Search result pages are near-infinite and thin — keep them out of the
   // index but let crawlers follow through to the products themselves.
@@ -47,11 +65,13 @@ export async function generateMetadata({
   if (sp.category && sp.sub) {
     const view = await getSubcategoryView(sp.category, sp.sub);
     if (view) {
-      const url = `/shop?category=${encodeURIComponent(sp.category)}&sub=${
-        view.slug
-      }`;
+      const url = withPage(
+        `/shop?category=${encodeURIComponent(sp.category)}&sub=${view.slug}`,
+        page
+      );
+      const title = `${view.name} — ${view.categoryName}${pageSuffix(page)}`;
       return {
-        title: `${view.name} — ${view.categoryName}`,
+        title,
         description: `${
           view.products.length
         } ${view.name.toLowerCase()} designs in premium cotton, made in India. Free shipping and cash on delivery available.`,
@@ -61,27 +81,26 @@ export async function generateMetadata({
           view.categoryName,
         ],
         alternates: { canonical: url },
-        openGraph: { title: `${view.name} — ${view.categoryName}`, url },
+        openGraph: { title, url },
       };
     }
   }
 
   if (sp.category && sp.category !== "All") {
     const c = sp.category;
+    const url = withPage(`/shop?category=${encodeURIComponent(c)}`, page);
+    const title = `${c} — Premium Streetwear${pageSuffix(page)}`;
     return {
-      title: `${c} — Premium Streetwear`,
+      title,
       description: `Shop ${c.toLowerCase()} in premium cotton — designed and made in India. Free shipping across India, cash on delivery available.`,
       keywords: [`${c.toLowerCase()} online India`, `buy ${c.toLowerCase()}`, c],
-      alternates: { canonical: `/shop?category=${encodeURIComponent(c)}` },
-      openGraph: {
-        title: `${c} — Premium Streetwear`,
-        url: `/shop?category=${encodeURIComponent(c)}`,
-      },
+      alternates: { canonical: url },
+      openGraph: { title, url },
     };
   }
 
   return {
-    title: "Shop All — Tees, Hoodies & Streetwear",
+    title: `Shop All — Tees, Hoodies & Streetwear${pageSuffix(page)}`,
     description:
       "Browse the full range — oversized tees, drop-shoulder hoodies and everyday essentials in premium cotton. Free shipping across India.",
     keywords: [
@@ -90,7 +109,7 @@ export async function generateMetadata({
       "drop-shoulder hoodies",
       "unisex streetwear",
     ],
-    alternates: { canonical: "/shop" },
+    alternates: { canonical: withPage("/shop", page) },
   };
 }
 
@@ -160,7 +179,9 @@ export default async function ShopPage({
         view.priceMin === view.priceMax
           ? formatINR(view.priceMin)
           : `${formatINR(view.priceMin)} – ${formatINR(view.priceMax)}`;
-      const subRatings = await ratingsFor(view.products);
+      // Rate only what this page shows — the grouped review query shrinks with it.
+      const paged = paginate(view.products, sp.page);
+      const subRatings = await ratingsFor(paged.items);
 
       return (
         <div className="container-px mx-auto max-w-7xl py-8 md:py-12">
@@ -190,14 +211,21 @@ export default async function ShopPage({
             <ShopFilters categories={categories} />
           </Suspense>
 
-          {view.products.length > 0 ? (
-            <div className={GRID}>
-              {view.products.map((p, i) => (
-                <Reveal key={p.id} delay={Math.min(i * 0.05, 0.3)}>
-                  <ProductCard product={p} rating={subRatings.get(p.id)} />
-                </Reveal>
-              ))}
-            </div>
+          {paged.items.length > 0 ? (
+            <>
+              <div className={GRID}>
+                {paged.items.map((p, i) => (
+                  <Reveal key={p.id} delay={Math.min(i * 0.05, 0.3)}>
+                    <ProductCard product={p} rating={subRatings.get(p.id)} />
+                  </Reveal>
+                ))}
+              </div>
+              <Pagination
+                page={paged.page}
+                totalPages={paged.totalPages}
+                params={sp}
+              />
+            </>
           ) : (
             <Empty message="This collection is being restocked — check back soon." />
           )}
@@ -210,8 +238,9 @@ export default async function ShopPage({
   // ---- Level 2: a category — groups as tiles, one-offs as products ----
   if (inCategory && !sp.q) {
     const tiles = await getCategoryTiles(sp.category!, sort);
+    const paged = paginate(tiles, sp.page);
     const tileRatings = await ratingsFor(
-      tiles.flatMap((t) => (t.kind === "product" ? [t.product] : []))
+      paged.items.flatMap((t) => (t.kind === "product" ? [t.product] : []))
     );
 
     return (
@@ -233,8 +262,15 @@ export default async function ShopPage({
           <ShopFilters categories={categories} />
         </Suspense>
 
-        {tiles.length > 0 ? (
-          <TileGrid tiles={tiles} ratings={tileRatings} />
+        {paged.items.length > 0 ? (
+          <>
+            <TileGrid tiles={paged.items} ratings={tileRatings} />
+            <Pagination
+              page={paged.page}
+              totalPages={paged.totalPages}
+              params={sp}
+            />
+          </>
         ) : (
           <Empty message="Nothing in this category yet — try another one." />
         )}
@@ -245,7 +281,8 @@ export default async function ShopPage({
   // ---- A search reaches individual pieces, so it stays a flat product list ----
   if (sp.q) {
     const products = await getProducts({ category: sp.category, q: sp.q, sort });
-    const catRatings = await ratingsFor(products);
+    const paged = paginate(products, sp.page);
+    const catRatings = await ratingsFor(paged.items);
     return (
       <div className="container-px mx-auto max-w-7xl py-8 md:py-12">
         <header className="mb-6 md:mb-8">
@@ -264,14 +301,21 @@ export default async function ShopPage({
           <ShopFilters categories={categories} />
         </Suspense>
 
-        {products.length > 0 ? (
-          <div className={GRID}>
-            {products.map((p, i) => (
-              <Reveal key={p.id} delay={Math.min(i * 0.05, 0.3)}>
-                <ProductCard product={p} rating={catRatings.get(p.id)} />
-              </Reveal>
-            ))}
-          </div>
+        {paged.items.length > 0 ? (
+          <>
+            <div className={GRID}>
+              {paged.items.map((p, i) => (
+                <Reveal key={p.id} delay={Math.min(i * 0.05, 0.3)}>
+                  <ProductCard product={p} rating={catRatings.get(p.id)} />
+                </Reveal>
+              ))}
+            </div>
+            <Pagination
+              page={paged.page}
+              totalPages={paged.totalPages}
+              params={sp}
+            />
+          </>
         ) : (
           <Empty message="Try a different category or search term." />
         )}
@@ -281,8 +325,9 @@ export default async function ShopPage({
 
   // ---- Level 1: shop all — folded the same way as a category page ----
   const tiles = await getShopTiles(sort);
+  const paged = paginate(tiles, sp.page);
   const allRatings = await ratingsFor(
-    tiles.flatMap((t) => (t.kind === "product" ? [t.product] : []))
+    paged.items.flatMap((t) => (t.kind === "product" ? [t.product] : []))
   );
 
   return (
@@ -298,8 +343,15 @@ export default async function ShopPage({
         <ShopFilters categories={categories} />
       </Suspense>
 
-      {tiles.length > 0 ? (
-        <TileGrid tiles={tiles} ratings={allRatings} />
+      {paged.items.length > 0 ? (
+        <>
+          <TileGrid tiles={paged.items} ratings={allRatings} />
+          <Pagination
+            page={paged.page}
+            totalPages={paged.totalPages}
+            params={sp}
+          />
+        </>
       ) : (
         <Empty message="Nothing here yet — please check back soon." />
       )}

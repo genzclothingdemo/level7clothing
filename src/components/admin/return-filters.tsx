@@ -9,13 +9,23 @@ import {
 } from "@/lib/returns";
 
 /**
- * Navbar-style status tabs plus the extra narrowing a growing queue needs:
- * free-text search, reason, pickup-problem and age.
+ * Status tabs plus the extra narrowing a growing queue needs: free-text
+ * search, reason, pickup-problem and age.
  *
  * "Needs action" leads because it is the only tab that represents work — the
  * per-status tabs are for auditing, not for the daily pass.
+ *
+ * Every control is a URL parameter, never local state: a filtered queue is
+ * something the owner sends to themselves or reloads after acting on a row.
  */
-export function ReturnFilters({ counts }: { counts: Record<string, number> }) {
+export function ReturnFilters({
+  counts,
+  reasons,
+}: {
+  counts: Record<string, number>;
+  /** The admin's live list, so the filter can't offer a reason nobody can pick. */
+  reasons: string[];
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
@@ -39,21 +49,29 @@ export function ReturnFilters({ counts }: { counts: Record<string, number> }) {
     ...RETURN_STATUSES.map((s) => ({ key: s, label: RETURN_STATUS_LABEL[s] })),
   ];
 
+  // Reasons retired from the settings list, but still on rows already raised —
+  // dropping them from the filter would make those rows unfindable.
+  const legacy = RETURN_REASONS.filter(
+    (r) => !reasons.some((c) => c.toLowerCase() === r.label.toLowerCase())
+  );
+
   const narrowed = !!(q || reason || issue || age);
+  const pill =
+    "inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-3 text-xs font-medium transition-colors";
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {/* Status rail — scrolls sideways on mobile rather than wrapping to 3 rows */}
       <div className="-mx-1 overflow-x-auto px-1">
-        <div className="flex w-max gap-2 pb-1 md:w-auto md:flex-wrap">
+        <div className="flex w-max gap-1.5 pb-1 md:w-auto md:flex-wrap">
           {tabs.map((t) => {
             const active = status === t.key;
-            const count = counts[t.key] ?? 0;
             return (
               <button
                 key={t.key}
+                type="button"
                 onClick={() => setParam("status", t.key === "open" ? null : t.key)}
-                className={`inline-flex shrink-0 items-center gap-2 rounded-full px-3.5 py-1.5 text-sm transition-colors ${
+                className={`inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-2 rounded-lg px-3 text-sm transition-colors ${
                   active
                     ? "bg-foreground text-background"
                     : "border border-border text-muted-foreground hover:bg-muted"
@@ -65,7 +83,7 @@ export function ReturnFilters({ counts }: { counts: Record<string, number> }) {
                     active ? "bg-background/20" : "bg-muted"
                   }`}
                 >
-                  {count}
+                  {counts[t.key] ?? 0}
                 </span>
               </button>
             );
@@ -74,18 +92,20 @@ export function ReturnFilters({ counts }: { counts: Record<string, number> }) {
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <div className="relative min-w-[15rem] flex-1">
+        <div className="relative min-w-0 flex-1 basis-56">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <input
             defaultValue={q}
             onChange={(e) => setParam("q", e.target.value.trim() || null)}
-            placeholder="Search RET number, order, customer or product…"
-            className="input h-10 pl-9 pr-9"
+            placeholder="Search RET, order, customer or product…"
+            aria-label="Search returns"
+            className="input pl-9 pr-9"
           />
           {q && (
             <button
+              type="button"
               onClick={() => setParam("q", null)}
-              className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-full text-muted-foreground hover:bg-muted"
+              className="absolute right-1 top-1/2 grid h-9 w-9 -translate-y-1/2 cursor-pointer place-items-center rounded-lg text-muted-foreground hover:bg-muted"
               aria-label="Clear search"
             >
               <X className="h-4 w-4" />
@@ -96,22 +116,31 @@ export function ReturnFilters({ counts }: { counts: Record<string, number> }) {
         <select
           value={reason}
           onChange={(e) => setParam("reason", e.target.value || null)}
-          className="input h-10 w-auto min-w-[12rem]"
+          className="input min-w-0 flex-1 basis-44"
           aria-label="Filter by reason"
         >
           <option value="">Any reason</option>
           <option value="our_fault">Our fault (damaged / wrong / missing)</option>
-          {RETURN_REASONS.map((r) => (
-            <option key={r.value} value={r.value}>
-              {r.label}
+          {reasons.map((r) => (
+            <option key={r} value={r}>
+              {r}
             </option>
           ))}
+          {legacy.length > 0 && (
+            <optgroup label="No longer offered">
+              {legacy.map((r) => (
+                <option key={r.value} value={r.value}>
+                  {r.label}
+                </option>
+              ))}
+            </optgroup>
+          )}
         </select>
 
         <select
           value={age}
           onChange={(e) => setParam("age", e.target.value || null)}
-          className="input h-10 w-auto min-w-[10rem]"
+          className="input min-w-0 flex-1 basis-36"
           aria-label="Filter by age"
         >
           <option value="">Any time</option>
@@ -124,7 +153,7 @@ export function ReturnFilters({ counts }: { counts: Record<string, number> }) {
         <button
           type="button"
           onClick={() => setParam("issue", issue === "pickup" ? null : "pickup")}
-          className={`inline-flex items-center gap-1.5 rounded-full px-3 py-2 text-xs font-medium transition-colors ${
+          className={`${pill} ${
             issue === "pickup"
               ? "bg-danger text-white"
               : "border border-border text-muted-foreground hover:bg-muted"
@@ -136,12 +165,13 @@ export function ReturnFilters({ counts }: { counts: Record<string, number> }) {
 
         {narrowed && (
           <button
+            type="button"
             onClick={() =>
               router.replace(pathname + (status === "open" ? "" : `?status=${status}`))
             }
-            className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-2 text-xs text-muted-foreground hover:bg-muted"
+            className={`${pill} border border-border text-muted-foreground hover:bg-muted`}
           >
-            <X className="h-3.5 w-3.5" /> Clear filters
+            <X className="h-3.5 w-3.5" /> Clear
           </button>
         )}
       </div>

@@ -32,8 +32,10 @@ export function WishlistButton({
       title={saved ? "Saved — click to remove" : "Save for later"}
       className={cn(
         "grid place-items-center rounded-full transition-colors cursor-pointer",
+        // 44px: this sits on a product tile and is the most-tapped control on
+        // a phone; 32px was well under the accessible minimum.
         variant === "overlay"
-          ? "h-8 w-8 bg-card/90 shadow-md backdrop-blur hover:bg-card"
+          ? "h-11 w-11 bg-card/90 shadow-md backdrop-blur hover:bg-card"
           : "h-12 w-12 border border-border hover:bg-muted",
         className
       )}

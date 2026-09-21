@@ -1,4 +1,5 @@
 import Image from "next/image";
+import Link from "next/link";
 import { Users } from "lucide-react";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -133,7 +134,22 @@ export default async function AdminLeads({
                           )}
                         </div>
                         <div className="min-w-0">
-                          <p className="truncate font-medium">{l.productName}</p>
+                          {/* A lead is only actionable if you can get to the
+                              piece it was raised on. `productId` was stored
+                              but never linked. It is nullable, and the product
+                              may since have been deleted, so fall back to
+                              plain text rather than a dead link. */}
+                          {l.productId ? (
+                            <Link
+                              href={`/admin/products/${l.productId}/edit`}
+                              className="block truncate font-medium hover:text-accent hover:underline"
+                              title={`Edit ${l.productName}`}
+                            >
+                              {l.productName}
+                            </Link>
+                          ) : (
+                            <p className="truncate font-medium">{l.productName}</p>
+                          )}
                           <p className="text-xs text-muted-foreground">
                             Qty {l.quantity}
                             {l.price != null ? ` · ${formatINR(l.price)}` : ""}

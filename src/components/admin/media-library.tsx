@@ -1,46 +1,62 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+/**
+ * MediaLibrary — Admin → Media.
+ *
+ * What changed and why, so it doesn't get "fixed" back:
+ *
+ * - **The left filter sidebar is gone.** Seven stacked filter groups (plus a
+ *   localStorage preset manager) took a fixed 256px column, were hidden below
+ *   `md` so phones had no filtering at all, and offered options that matched
+ *   nothing. Filtering now lives in the shared, collapsible `MediaFilterBar`
+ *   above the grid — same control set as the PhotoPicker, so there is one
+ *   thing to learn.
+ * - **Selection does something.** `selectedIds` used to drive nothing but a
+ *   ring on the thumbnail. There is now a select-all that agrees with the
+ *   active filters, an indeterminate partial state, a live readout, and bulk
+ *   tag/delete.
+ * - **"All" is spelled out.** The API is paged, so "select all" can only ever
+ *   mean "every loaded photo that matches the filters". The bar says exactly
+ *   that and offers to load the rest.
+ * - **The details panel is a bottom sheet on phones** — conditionally
+ *   rendered, fading in only, never parked offscreen with a transform (see the
+ *   "Modal pattern" note in CLAUDE.md).
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { toast } from "sonner";
 import {
   Check,
+  HardDrive,
+  Image as ImageIcon,
+  Info,
   RefreshCw,
-  Search,
+  Trash2,
   Upload,
   X,
-  Filter,
-  Image as ImageIcon,
-  Tag as TagIcon,
-  HardDrive,
-  Info
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { InfoTip } from "@/components/store/info-tip";
+import {
+  MediaFilterBar,
+  NO_FILTERS,
+  TriCheckbox,
+  errorMessage,
+  filterPhotos,
+  normalizePhotos,
+  photoFolder,
+  photoLabel,
+  safeSrc,
+  selectionSummary,
+  useFilterOptions,
+  type MediaFilters,
+  type MediaPhoto,
+  type UsageMap,
+} from "@/components/admin/media-filters";
 
-type Photo = {
-  id: string;
-  url: string;
-  file: string;
-  // Human-editable display name ("Image Name" in the UI) — independent of
-  // the on-disk filename. Nullable: falls back to the filename when unset.
-  alt?: string | null;
-  category: string;
-  group: string;
-  source: "repo" | "blob" | "external";
-  tags: string[];
-  roles: string[];
-  size?: number;
-  width?: number;
-  height?: number;
-  createdAt: string;
-  variantAttribute?: string | null;
-  variantValue?: string | null;
-  subcategoryName?: string | null;
-};
-
-type PhotoUse = { kind: string; id: string; name: string; slot?: string };
-type Library = { photos: Photo[]; usage: Record<string, PhotoUse[]> };
+type Library = { photos: MediaPhoto[]; usage: UsageMap };
 
 // Classification options served by GET /api/admin/taxonomy.
 type TaxSubcategory = { name: string; slug: string };
@@ -60,21 +76,9 @@ type Taxonomy = {
   products: TaxProduct[];
 };
 
-// A saved combination of every sidebar/search filter, persisted to
-// localStorage so admins can re-apply common views in one click.
-type FilterPreset = {
-  name: string;
-  q: string;
-  source: string;
-  role: string;
-  tag: string;
-  usage: string;
-  subcategory: string;
-  variantAttr: string;
-  variantValue: string;
-};
-
-const PRESETS_KEY = "level7:media-filter-presets";
+const PAGE_SIZE = 100;
+/** Safety net for "Load all" — 20 pages is 2000 photos, far past this store. */
+const MAX_AUTO_PAGES = 20;
 
 /**
  * Build a <select> option list from `options`, de-duped and order-preserving,
@@ -94,63 +98,40 @@ function withCurrent(options: string[], current?: string | null): string[] {
   return out;
 }
 
-/**
- * Coerce raw API rows into render-safe photos. `tags` and `roles` are JSON
- * columns that can come back `null`, which would crash the `.forEach`/`.map`/
- * `.includes` calls used on every render — so they are forced to arrays here.
- */
-function normalizePhotos(rows: unknown): Photo[] {
-  return (Array.isArray(rows) ? rows : []).map((p: any) => ({
-    ...p,
-    tags: Array.isArray(p?.tags) ? p.tags : [],
-    roles: Array.isArray(p?.roles) ? p.roles : []
-  })) as Photo[];
-}
-
 export function MediaLibrary() {
   const [library, setLibrary] = useState<Library | null>(null);
   const [loading, setLoading] = useState(true);
-  const [q, setQ] = useState("");
-  
-  // Filters
-  const [filterSource, setFilterSource] = useState<string>("All");
-  const [filterRole, setFilterRole] = useState<string>("All");
-  const [filterTag, setFilterTag] = useState<string>("All");
-  const [filterUsage, setFilterUsage] = useState<string>("All");
-  // Meta-tag (classification) filters — find product images by their metadata.
-  const [filterSubcategory, setFilterSubcategory] = useState<string>("All");
-  const [filterVariantAttr, setFilterVariantAttr] = useState<string>("All");
-  const [filterVariantValue, setFilterVariantValue] = useState<string>("All");
-
-  // Saved filter presets, hydrated from localStorage on mount.
-  const [presets, setPresets] = useState<FilterPreset[]>([]);
+  const [filters, setFilters] = useState<MediaFilters>({ ...NO_FILTERS });
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [activePhotoId, setActivePhotoId] = useState<string | null>(null);
 
   // Classification dropdown options (categories + variant attribute values).
   const [taxonomy, setTaxonomy] = useState<Taxonomy | null>(null);
-  // UI-only scoping category for the Info panel: narrows the Subcategory
+  // UI-only scoping category for the details panel: narrows the Subcategory
   // options. Does NOT persist (Media has no category column).
   const [catFilter, setCatFilter] = useState<string>("");
-  // UI-only product scope for the Info panel: picks which product's variant
+  // UI-only product scope for the details panel: picks which product's variant
   // attributes/values populate the cascade below. Does NOT persist (Media has
   // no product column) — it only narrows the Attribute/Value dropdowns.
   const [selectedProductId, setSelectedProductId] = useState<string>("");
 
-  // Pagination — the API is capped at `PAGE_SIZE` per request; "Load more"
-  // fetches the next page and appends it.
-  const PAGE_SIZE = 100;
+  // Pagination — the API is capped at `PAGE_SIZE` per request.
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
 
-  // Upload plumbing
+  // Upload / mutation plumbing
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  /* ------------------------------------------------------------------ */
+  /*  Loading                                                            */
+  /* ------------------------------------------------------------------ */
 
   /** Loads the first page of media, replacing whatever is on screen. */
-  const fetchLibrary = async () => {
+  const fetchLibrary = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch(`/api/admin/media?page=1&limit=${PAGE_SIZE}`);
@@ -160,40 +141,55 @@ export function MediaLibrary() {
       setLibrary({ photos, usage: data.usage ?? {} });
       setTotal(data.total ?? photos.length);
       setPage(1);
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(errorMessage(err, "Could not load photos"));
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  /** Fetches the next page and appends it to the current list. */
-  const loadMore = async () => {
-    const next = page + 1;
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/admin/media?page=${next}&limit=${PAGE_SIZE}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Could not load photos");
-      const more = normalizePhotos(data.photos);
-      const moreUsage = data.usage ?? {};
-      setLibrary((prev) =>
-        prev
-          ? { photos: [...prev.photos, ...more], usage: { ...prev.usage, ...moreUsage } }
-          : { photos: more, usage: moreUsage }
-      );
-      setTotal(data.total ?? 0);
-      setPage(next);
-    } catch (err: any) {
-      toast.error(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  /**
+   * Append the next `count` pages. One path for both "Load more" (1) and
+   * "Load all" (the rest), so the merge logic only exists once.
+   */
+  const loadMore = useCallback(
+    async (count = 1) => {
+      setLoading(true);
+      try {
+        let current = page;
+        let known = total;
+        for (let i = 0; i < count && i < MAX_AUTO_PAGES; i++) {
+          const next = current + 1;
+          const res = await fetch(`/api/admin/media?page=${next}&limit=${PAGE_SIZE}`);
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "Could not load photos");
+          const more = normalizePhotos(data.photos);
+          known = data.total ?? known;
+          setLibrary((prev) =>
+            prev
+              ? {
+                  photos: [...prev.photos, ...more],
+                  usage: { ...prev.usage, ...(data.usage ?? {}) },
+                }
+              : { photos: more, usage: data.usage ?? {} }
+          );
+          setTotal(known);
+          current = next;
+          setPage(next);
+          if (more.length === 0 || current * PAGE_SIZE >= known) break;
+        }
+      } catch (err) {
+        toast.error(errorMessage(err, "Could not load photos"));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [page, total]
+  );
 
   useEffect(() => {
-    fetchLibrary();
-  }, []);
+    void fetchLibrary();
+  }, [fetchLibrary]);
 
   // Load classification options once. Non-fatal if it fails — the panel just
   // falls back to whatever value the photo already carries.
@@ -209,89 +205,70 @@ export function MediaLibrary() {
     })();
   }, []);
 
-  // Hydrate saved presets once, client-side only (localStorage is undefined
-  // during SSR, so guard against `typeof window`).
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = window.localStorage.getItem(PRESETS_KEY);
-      const parsed = raw ? JSON.parse(raw) : null;
-      if (Array.isArray(parsed)) setPresets(parsed as FilterPreset[]);
-    } catch {
-      /* ignore malformed/blocked storage */
-    }
-  }, []);
+  /* ------------------------------------------------------------------ */
+  /*  Filtering + selection                                              */
+  /* ------------------------------------------------------------------ */
 
-  /** Writes presets to state and localStorage together. */
-  const savePresets = (next: FilterPreset[]) => {
-    setPresets(next);
-    if (typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(PRESETS_KEY, JSON.stringify(next));
-    } catch {
-      /* ignore — storage may be full or blocked */
-    }
+  const photos = useMemo(() => library?.photos ?? [], [library]);
+  const usage = useMemo(() => library?.usage ?? {}, [library]);
+  const options = useFilterOptions(photos);
+
+  /** The filtered result set — the single definition of "shown". */
+  const visible = useMemo(
+    () => filterPhotos(photos, usage, filters),
+    [photos, usage, filters]
+  );
+
+  const selectedInView = useMemo(
+    () => visible.reduce((n, p) => n + (selectedIds.has(p.id) ? 1 : 0), 0),
+    [visible, selectedIds]
+  );
+  const allInViewSelected = visible.length > 0 && selectedInView === visible.length;
+
+  const loadedAll = photos.length >= total;
+  const remaining = Math.max(0, total - photos.length);
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
-  /** Snapshots the current filter combination under a prompted name. */
-  const saveCurrentPreset = () => {
-    const name = window.prompt("Name this filter preset")?.trim();
-    if (!name) return;
-    const preset: FilterPreset = {
-      name,
-      q,
-      source: filterSource,
-      role: filterRole,
-      tag: filterTag,
-      usage: filterUsage,
-      subcategory: filterSubcategory,
-      variantAttr: filterVariantAttr,
-      variantValue: filterVariantValue
-    };
-    // Overwrite any preset with the same name; keep the list to a sane length.
-    const next = [...presets.filter((p) => p.name !== name), preset].slice(-8);
-    savePresets(next);
-    toast.success(`Saved preset "${name}"`);
+  /**
+   * Select all — deliberately scoped to `visible`, i.e. exactly the photos the
+   * active filters are showing, never the whole table. Unchecking removes only
+   * those, so a selection made under a different filter survives.
+   */
+  const toggleAllShown = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allInViewSelected) visible.forEach((p) => next.delete(p.id));
+      else visible.forEach((p) => next.add(p.id));
+      return next;
+    });
   };
 
-  /** Re-applies a saved preset to every filter in one click. */
-  const applyPreset = (p: FilterPreset) => {
-    setQ(p.q ?? "");
-    setFilterSource(p.source ?? "All");
-    setFilterRole(p.role ?? "All");
-    setFilterTag(p.tag ?? "All");
-    setFilterUsage(p.usage ?? "All");
-    setFilterSubcategory(p.subcategory ?? "All");
-    setFilterVariantAttr(p.variantAttr ?? "All");
-    setFilterVariantValue(p.variantValue ?? "All");
-  };
+  const selectedPhotos = useMemo(
+    () => photos.filter((p) => selectedIds.has(p.id)),
+    [photos, selectedIds]
+  );
 
-  /** Drops a saved preset by name. */
-  const deletePreset = (name: string) => {
-    savePresets(presets.filter((p) => p.name !== name));
-  };
+  /* ------------------------------------------------------------------ */
+  /*  Details panel (tagging)                                            */
+  /* ------------------------------------------------------------------ */
 
-  /** Resets every filter and the search box to their defaults. */
-  const clearFilters = () => {
-    setQ("");
-    setFilterSource("All");
-    setFilterRole("All");
-    setFilterTag("All");
-    setFilterUsage("All");
-    setFilterSubcategory("All");
-    setFilterVariantAttr("All");
-    setFilterVariantValue("All");
-  };
-
-  const activePhoto = useMemo(() => {
-    if (!activePhotoId || !library) return null;
-    return library.photos.find(p => p.id === activePhotoId) || null;
-  }, [activePhotoId, library]);
+  const activePhoto = useMemo(
+    () => (activePhotoId ? photos.find((p) => p.id === activePhotoId) ?? null : null),
+    [activePhotoId, photos]
+  );
 
   // Derive the scoping Category from the selected photo's subcategory whenever
-  // the selection or taxonomy changes. `library` is intentionally omitted so a
+  // the selection or taxonomy changes. `photos` is intentionally omitted so a
   // manual category choice survives subsequent subcategory edits (which mutate
-  // `library` but not the active photo id).
+  // the photo list but not the active photo id).
   useEffect(() => {
     setSelectedProductId(""); // new photo → drop any product scope
     if (!activePhotoId || !taxonomy) {
@@ -327,7 +304,6 @@ export function MediaLibrary() {
 
   // Product-first flow: the Product select always offers EVERY product,
   // grouped by category, so the admin can start from the product they know.
-  // Choosing one auto-fills Category (scope) + Subcategory below.
   const productGroups = useMemo(() => {
     const all = [...(taxonomy?.products ?? [])].sort((a, b) =>
       a.name.localeCompare(b.name)
@@ -342,11 +318,83 @@ export function MediaLibrary() {
     return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }, [taxonomy]);
 
+  // Variant attribute names: the scoped product's own keys when a product is
+  // chosen, otherwise the global set auto-collected across all products.
+  const attrOptions = useMemo(() => {
+    const base = selectedProduct
+      ? Object.keys(selectedProduct.variantAttributes)
+      : taxonomy
+        ? Object.keys(taxonomy.variantAttributes)
+        : [];
+    return withCurrent(base, activePhoto?.variantAttribute);
+  }, [selectedProduct, taxonomy, activePhoto?.variantAttribute]);
+
+  // Values for the currently-selected variant attribute — scoped to the chosen
+  // product when set, else the global values for that attribute.
+  const valueOptions = useMemo(() => {
+    const attr = activePhoto?.variantAttribute || "";
+    let base: string[] = [];
+    if (attr) {
+      if (selectedProduct) base = selectedProduct.variantAttributes[attr] ?? [];
+      else if (taxonomy) base = taxonomy.variantAttributes[attr] ?? [];
+    }
+    return withCurrent(base, activePhoto?.variantValue);
+  }, [selectedProduct, taxonomy, activePhoto?.variantAttribute, activePhoto?.variantValue]);
+
+  /* ------------------------------------------------------------------ */
+  /*  Mutations                                                          */
+  /* ------------------------------------------------------------------ */
+
+  /** Optimistically merge changes into local state so inputs stay responsive. */
+  const mergeLocal = (id: string, updates: Partial<MediaPhoto>) => {
+    setLibrary((prev) =>
+      prev
+        ? { ...prev, photos: prev.photos.map((p) => (p.id === id ? { ...p, ...updates } : p)) }
+        : prev
+    );
+  };
+
+  /** Persist metadata to the server. Only toasts on success when `notify` is set. */
+  const persist = async (id: string, updates: Partial<MediaPhoto>, notify = false) => {
+    try {
+      const res = await fetch(`/api/admin/media/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(updates),
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) throw new Error("Failed to update");
+      if (notify) toast.success("Updated");
+      return true;
+    } catch (err) {
+      toast.error(errorMessage(err, "Could not update image"));
+      return false;
+    }
+  };
+
+  // Debounce metadata edits so typing "Pink" is one PATCH, not four.
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingRef = useRef<{ id: string; updates: Partial<MediaPhoto> } | null>(null);
+
+  /** Updates local state immediately and debounces the PATCH by 500ms. */
+  const editMeta = (id: string, updates: Partial<MediaPhoto>) => {
+    mergeLocal(id, updates);
+    const prev = pendingRef.current;
+    pendingRef.current = {
+      id,
+      updates: prev && prev.id === id ? { ...prev.updates, ...updates } : updates,
+    };
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      const p = pendingRef.current;
+      pendingRef.current = null;
+      debounceRef.current = null;
+      if (p) void persist(p.id, p.updates);
+    }, 500);
+  };
+
   /**
-   * Product picked in the Info panel: scope the variant dropdowns to it AND
-   * auto-detect the photo's classification from the product itself —
-   * Category (scoping select) + Subcategory (persisted). Variant attr/value
-   * are kept when they exist on the chosen product, cleared when they don't.
+   * Product picked in the details panel: scope the variant dropdowns to it AND
+   * auto-detect the photo's classification from the product itself.
    */
   const chooseProduct = (id: string) => {
     setSelectedProductId(id);
@@ -356,7 +404,7 @@ export function MediaLibrary() {
 
     setCatFilter(prod.category || "");
 
-    const updates: Partial<Photo> = {};
+    const updates: Partial<MediaPhoto> = {};
     if (prod.subcategoryName && prod.subcategoryName !== activePhoto.subcategoryName) {
       updates.subcategoryName = prod.subcategoryName;
     }
@@ -377,148 +425,6 @@ export function MediaLibrary() {
     if (Object.keys(updates).length > 0) editMeta(activePhoto.id, updates);
   };
 
-  // Variant attribute names: the scoped product's own keys when a product is
-  // chosen, otherwise the global set auto-collected across all products.
-  const attrOptions = useMemo(() => {
-    const base = selectedProduct
-      ? Object.keys(selectedProduct.variantAttributes)
-      : taxonomy
-        ? Object.keys(taxonomy.variantAttributes)
-        : [];
-    return withCurrent(base, activePhoto?.variantAttribute);
-  }, [selectedProduct, taxonomy, activePhoto?.variantAttribute]);
-
-  // Values for the currently-selected variant attribute — scoped to the chosen
-  // product when set, else the global values for that attribute (empty when none).
-  const valueOptions = useMemo(() => {
-    const attr = activePhoto?.variantAttribute || "";
-    let base: string[] = [];
-    if (attr) {
-      if (selectedProduct) base = selectedProduct.variantAttributes[attr] ?? [];
-      else if (taxonomy) base = taxonomy.variantAttributes[attr] ?? [];
-    }
-    return withCurrent(base, activePhoto?.variantValue);
-  }, [selectedProduct, taxonomy, activePhoto?.variantAttribute, activePhoto?.variantValue]);
-
-  const allTags = useMemo(() => {
-    if (!library) return [];
-    const tags = new Set<string>();
-    library.photos.forEach(p => p.tags.forEach(t => tags.add(t)));
-    return Array.from(tags).sort();
-  }, [library]);
-
-  const allRoles = useMemo(() => {
-    if (!library) return [];
-    const roles = new Set<string>();
-    library.photos.forEach(p => p.roles.forEach(r => roles.add(r)));
-    return Array.from(roles).sort();
-  }, [library]);
-
-  // Meta-tag filter options: union of taxonomy values and what the loaded
-  // media actually carry, so both known and legacy values are selectable.
-  const allSubcategories = useMemo(() => {
-    const set = new Set<string>();
-    (taxonomy?.categories ?? []).forEach(c => c.subcategories.forEach(s => set.add(s.name)));
-    (library?.photos ?? []).forEach(p => { if (p.subcategoryName) set.add(p.subcategoryName); });
-    return Array.from(set).sort();
-  }, [taxonomy, library]);
-
-  const allVariantAttrs = useMemo(() => {
-    const set = new Set<string>();
-    Object.keys(taxonomy?.variantAttributes ?? {}).forEach(a => set.add(a));
-    (library?.photos ?? []).forEach(p => { if (p.variantAttribute) set.add(p.variantAttribute); });
-    return Array.from(set).sort();
-  }, [taxonomy, library]);
-
-  // Values are scoped to the selected variant attribute when one is active.
-  const allVariantValues = useMemo(() => {
-    const set = new Set<string>();
-    const attrs = taxonomy?.variantAttributes ?? {};
-    if (filterVariantAttr !== "All") {
-      (attrs[filterVariantAttr] ?? []).forEach(v => set.add(v));
-    } else {
-      Object.values(attrs).forEach(list => list.forEach(v => set.add(v)));
-    }
-    (library?.photos ?? []).forEach(p => {
-      if (!p.variantValue) return;
-      if (filterVariantAttr !== "All" && p.variantAttribute !== filterVariantAttr) return;
-      set.add(p.variantValue);
-    });
-    return Array.from(set).sort();
-  }, [taxonomy, library, filterVariantAttr]);
-
-  const visible = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    return (library?.photos ?? []).filter((p) => {
-      if (filterSource !== "All" && p.source !== filterSource) return false;
-      if (filterRole !== "All" && !p.roles.includes(filterRole)) return false;
-      if (filterTag !== "All" && !p.tags.includes(filterTag)) return false;
-      if (filterSubcategory !== "All" && p.subcategoryName !== filterSubcategory) return false;
-      if (filterVariantAttr !== "All" && p.variantAttribute !== filterVariantAttr) return false;
-      if (filterVariantValue !== "All" && p.variantValue !== filterVariantValue) return false;
-
-      const uses = library?.usage[p.url] || [];
-      if (filterUsage === "Unused" && uses.length > 0) return false;
-      if (filterUsage === "Used" && uses.length === 0) return false;
-
-      if (!needle) return true;
-      const searchable = `${p.file} ${p.tags.join(" ")} ${p.roles.join(" ")}`.toLowerCase();
-      return searchable.includes(needle);
-    });
-  }, [library, q, filterSource, filterRole, filterTag, filterUsage, filterSubcategory, filterVariantAttr, filterVariantValue]);
-
-  const toggleSelect = (id: string) => {
-    const next = new Set(selectedIds);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setSelectedIds(next);
-  };
-
-  /** Optimistically merge changes into local state so inputs stay responsive. */
-  const mergeLocal = (id: string, updates: Partial<Photo>) => {
-    setLibrary(prev =>
-      prev
-        ? { ...prev, photos: prev.photos.map(p => (p.id === id ? { ...p, ...updates } : p)) }
-        : prev
-    );
-  };
-
-  /** Persist metadata to the server. Only toasts on success when `notify` is set. */
-  const persist = async (id: string, updates: Partial<Photo>, notify = false) => {
-    try {
-      const res = await fetch(`/api/admin/media/${id}`, {
-        method: "PATCH",
-        body: JSON.stringify(updates),
-        headers: { "Content-Type": "application/json" }
-      });
-      if (!res.ok) throw new Error("Failed to update");
-      if (notify) toast.success("Updated");
-    } catch (err: any) {
-      toast.error(err.message);
-    }
-  };
-
-  // Debounce metadata edits so typing "Pink" is one PATCH, not four.
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingRef = useRef<{ id: string; updates: Partial<Photo> } | null>(null);
-
-  /** Updates local state immediately and debounces the PATCH by 500ms. */
-  const editMeta = (id: string, updates: Partial<Photo>) => {
-    mergeLocal(id, updates);
-    const prev = pendingRef.current;
-    pendingRef.current = {
-      id,
-      updates: prev && prev.id === id ? { ...prev.updates, ...updates } : updates
-    };
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      const p = pendingRef.current;
-      pendingRef.current = null;
-      debounceRef.current = null;
-      if (p) void persist(p.id, p.updates);
-    }, 500);
-  };
-
   /** Sends each chosen file to /api/upload, then refreshes the library. */
   const handleUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -532,8 +438,8 @@ export function MediaLibrary() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "Upload failed");
         ok++;
-      } catch (err: any) {
-        toast.error(`${file.name}: ${err.message}`);
+      } catch (err) {
+        toast.error(`${file.name}: ${errorMessage(err, "Upload failed")}`);
       }
     }
     setUploading(false);
@@ -551,8 +457,8 @@ export function MediaLibrary() {
       toast.success("Image deleted");
       setActivePhotoId(null);
       await fetchLibrary();
-    } catch (err: any) {
-      toast.error(err.message);
+    } catch (err) {
+      toast.error(errorMessage(err, "Could not delete image"));
     } finally {
       setDeleting(false);
     }
@@ -567,7 +473,7 @@ export function MediaLibrary() {
     const current = activePhoto[kind];
     if (current.includes(value)) return;
     const next = [...current, value];
-    const update: Partial<Photo> = kind === "roles" ? { roles: next } : { tags: next };
+    const update: Partial<MediaPhoto> = kind === "roles" ? { roles: next } : { tags: next };
     mergeLocal(activePhoto.id, update);
     void persist(activePhoto.id, update, true);
   };
@@ -575,545 +481,660 @@ export function MediaLibrary() {
   /** Removes a role/tag from the active photo and persists it via PATCH. */
   const removeTerm = (kind: "roles" | "tags", value: string) => {
     if (!activePhoto) return;
-    const next = activePhoto[kind].filter(v => v !== value);
-    const update: Partial<Photo> = kind === "roles" ? { roles: next } : { tags: next };
+    const next = activePhoto[kind].filter((v) => v !== value);
+    const update: Partial<MediaPhoto> = kind === "roles" ? { roles: next } : { tags: next };
     mergeLocal(activePhoto.id, update);
     void persist(activePhoto.id, update, true);
   };
 
+  /* ---- Bulk actions on the selection ---- */
+
+  const bulkAddTag = async () => {
+    if (selectedPhotos.length === 0) return;
+    const value = window.prompt(
+      `Tag to add to ${selectedPhotos.length} selected photo${
+        selectedPhotos.length === 1 ? "" : "s"
+      }`
+    )?.trim();
+    if (!value) return;
+
+    setBulkBusy(true);
+    let ok = 0;
+    let already = 0;
+    for (const p of selectedPhotos) {
+      if (p.tags.includes(value)) {
+        already++;
+        continue;
+      }
+      const next = [...p.tags, value];
+      mergeLocal(p.id, { tags: next });
+      if (await persist(p.id, { tags: next })) ok++;
+    }
+    setBulkBusy(false);
+
+    // Spell out the "already had it" case — otherwise re-applying a tag to a
+    // selection reads as "Tagged 0 photos", which looks like a failure.
+    const parts: string[] = [];
+    if (ok > 0) parts.push(`Tagged ${ok} photo${ok === 1 ? "" : "s"}`);
+    if (already > 0) parts.push(`${already} already had it`);
+    toast.success(`${parts.join(" · ")} — “${value}”`);
+  };
+
+  const bulkDelete = async () => {
+    const inUse = selectedPhotos.filter((p) => (usage[p.url]?.length ?? 0) > 0);
+    const free = selectedPhotos.filter((p) => (usage[p.url]?.length ?? 0) === 0);
+
+    if (free.length === 0) {
+      toast.error(
+        "Every selected photo is in use by a product. Remove it from the product first."
+      );
+      return;
+    }
+    const warning =
+      inUse.length > 0
+        ? `\n\n${inUse.length} of them are in use and will be skipped.`
+        : "";
+    if (
+      !window.confirm(
+        `Permanently delete ${free.length} photo${free.length === 1 ? "" : "s"}?${warning}`
+      )
+    ) {
+      return;
+    }
+
+    setBulkBusy(true);
+    let ok = 0;
+    for (const p of free) {
+      try {
+        const res = await fetch(`/api/admin/media/${p.id}`, { method: "DELETE" });
+        if (res.ok) ok++;
+      } catch {
+        /* counted as a failure below */
+      }
+    }
+    setBulkBusy(false);
+    setSelectedIds(new Set());
+    setActivePhotoId(null);
+    if (ok > 0) toast.success(`Deleted ${ok} photo${ok === 1 ? "" : "s"}.`);
+    if (ok < free.length) toast.error(`${free.length - ok} could not be deleted.`);
+    await fetchLibrary();
+  };
+
+  /* ------------------------------------------------------------------ */
+  /*  Render                                                             */
+  /* ------------------------------------------------------------------ */
+
   if (loading && !library) {
-    return <div className="p-8 flex items-center justify-center text-muted-foreground"><RefreshCw className="animate-spin w-5 h-5 mr-2"/> Loading library...</div>;
+    return (
+      <div className="flex items-center justify-center p-8 text-muted-foreground">
+        <RefreshCw className="mr-2 h-5 w-5 animate-spin" /> Loading library…
+      </div>
+    );
   }
 
+  const activeUses = activePhoto ? usage[activePhoto.url] ?? [] : [];
+
   return (
-    <div className="flex h-full">
-      {/* Left Filters Sidebar */}
-      <div className="w-64 shrink-0 border-r border-border bg-card overflow-y-auto hidden md:block p-4 space-y-6">
-        {/* Saved filter presets */}
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Saved Filters</h3>
-            <button
-              onClick={clearFilters}
-              className="text-[10px] text-muted-foreground hover:text-foreground"
-            >
-              Clear
-            </button>
-          </div>
-          <div className="space-y-1">
-            {presets.length === 0 && (
-              <p className="text-xs text-muted-foreground px-2 py-1">No saved presets yet.</p>
-            )}
-            {presets.map((preset) => (
-              <div key={preset.name} className="flex items-center gap-1">
-                <button
-                  onClick={() => applyPreset(preset)}
-                  className="flex-1 text-left px-2 py-1.5 text-sm rounded-md transition-colors hover:bg-muted text-muted-foreground truncate"
-                  title={`Apply "${preset.name}"`}
+    <div className="flex h-full min-w-0">
+      {/* ── Main column ── */}
+      <div className="flex min-w-0 flex-1 flex-col bg-muted/20">
+        {/* Filters + library actions */}
+        <div className="shrink-0 border-b border-border bg-card px-3 py-3 sm:px-5">
+          <MediaFilterBar
+            filters={filters}
+            onChange={setFilters}
+            options={options}
+            actions={
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  type="button"
+                  aria-label="Refresh library"
+                  className="h-11 w-11 shrink-0 p-0 sm:w-auto sm:px-3.5"
+                  onClick={() => void fetchLibrary()}
+                  disabled={loading}
                 >
-                  {preset.name}
-                </button>
-                <button
-                  onClick={() => deletePreset(preset.name)}
-                  className="p-1 rounded-md hover:bg-muted text-muted-foreground shrink-0"
-                  aria-label={`Delete preset ${preset.name}`}
+                  <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
+                  <span className="hidden sm:inline">Refresh</span>
+                </Button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={async (e) => {
+                    await handleUpload(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+                <Button
+                  size="sm"
+                  type="button"
+                  aria-label="Upload images"
+                  className="h-11 w-11 shrink-0 p-0 sm:w-auto sm:px-3.5"
+                  disabled={uploading}
+                  onClick={() => fileInputRef.current?.click()}
                 >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ))}
-            <button
-              onClick={saveCurrentPreset}
-              className="w-full mt-1 px-2 py-1.5 text-xs rounded-md border border-dashed border-border text-muted-foreground hover:bg-muted"
-            >
-              + Save current filters
-            </button>
-          </div>
+                  {uploading ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Upload className="h-4 w-4" />
+                  )}
+                  <span className="hidden sm:inline">
+                    {uploading ? "Uploading…" : "Upload"}
+                  </span>
+                </Button>
+              </>
+            }
+          />
         </div>
 
-        <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Source</h3>
-          <div className="space-y-1">
-            {["All", "repo", "blob", "external"].map(src => (
-              <button 
-                key={src} 
-                onClick={() => setFilterSource(src)}
-                className={cn("w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors", filterSource === src ? "bg-accent/10 text-accent font-medium" : "hover:bg-muted text-muted-foreground")}
+        {/* Selection bar — select-all always agrees with the filters above. */}
+        <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border bg-card px-3 py-1 sm:px-5">
+          <TriCheckbox
+            checked={allInViewSelected}
+            indeterminate={selectedInView > 0}
+            onChange={toggleAllShown}
+            label={
+              <span className="text-muted-foreground">
+                {visible.length === 0
+                  ? "Nothing to select"
+                  : selectionSummary({
+                      selectedInView,
+                      inView: visible.length,
+                      // Counted from the loaded photos, not `selectedIds.size`,
+                      // so an id left over from a deleted row can't inflate it.
+                      totalSelected: selectedPhotos.length,
+                    })}
+              </span>
+            }
+          />
+
+          <span className="flex items-center text-[11px] text-muted-foreground">
+            {loadedAll
+              ? `all ${total} loaded`
+              : `${photos.length} of ${total} loaded`}
+            <InfoTip term="What “all” selects" className="shrink-0">
+              The tick box selects every photo the current filters are showing —
+              not the whole library. Photos are fetched a page at a time, so it
+              can only reach the {photos.length} loaded so far
+              {loadedAll ? "" : `; “Load all ${total}” pulls in the rest`}.
+            </InfoTip>
+          </span>
+
+          {selectedPhotos.length > 0 && (
+            <div className="ml-auto flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={bulkAddTag}
+                disabled={bulkBusy}
+                className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-border px-3 text-xs hover:bg-muted disabled:opacity-50 sm:min-h-8"
               >
-                {src === "All" ? "All Sources" : src === "repo" ? "Public Folder" : src === "blob" ? "Blob Storage" : "External URLs"}
+                Add tag
               </button>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Usage</h3>
-          <div className="space-y-1">
-            {["All", "Used", "Unused"].map(use => (
-              <button 
-                key={use} 
-                onClick={() => setFilterUsage(use)}
-                className={cn("w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors", filterUsage === use ? "bg-accent/10 text-accent font-medium" : "hover:bg-muted text-muted-foreground")}
+              <button
+                type="button"
+                onClick={bulkDelete}
+                disabled={bulkBusy}
+                className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-danger/40 px-3 text-xs text-danger hover:bg-danger/10 disabled:opacity-50 sm:min-h-8"
               >
-                {use}
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete
               </button>
-            ))}
-          </div>
-        </div>
-
-        {allSubcategories.length > 0 && (
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Subcategory</h3>
-            <select
-              value={filterSubcategory}
-              onChange={(e) => setFilterSubcategory(e.target.value)}
-              className="input h-8 px-2 text-xs w-full"
-            >
-              <option value="All">All Subcategories</option>
-              {allSubcategories.map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        {allVariantAttrs.length > 0 && (
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Variant Attribute</h3>
-            <select
-              value={filterVariantAttr}
-              onChange={(e) => { setFilterVariantAttr(e.target.value); setFilterVariantValue("All"); }}
-              className="input h-8 px-2 text-xs w-full"
-            >
-              <option value="All">All Attributes</option>
-              {allVariantAttrs.map((a) => (
-                <option key={a} value={a}>{a}</option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        {allVariantValues.length > 0 && (
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Variant Value</h3>
-            <select
-              value={filterVariantValue}
-              onChange={(e) => setFilterVariantValue(e.target.value)}
-              className="input h-8 px-2 text-xs w-full"
-            >
-              <option value="All">All Values</option>
-              {allVariantValues.map((v) => (
-                <option key={v} value={v}>{v}</option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        {allRoles.length > 0 && (
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Roles</h3>
-            <div className="space-y-1">
-              <button 
-                onClick={() => setFilterRole("All")}
-                className={cn("w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors", filterRole === "All" ? "bg-accent/10 text-accent font-medium" : "hover:bg-muted text-muted-foreground")}
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                className="inline-flex min-h-11 cursor-pointer items-center rounded-lg px-2 text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground sm:min-h-8"
               >
-                All Roles
+                Clear
               </button>
-              {allRoles.map(role => (
-                <button 
-                  key={role} 
-                  onClick={() => setFilterRole(role)}
-                  className={cn("w-full text-left px-2 py-1.5 text-sm rounded-md transition-colors", filterRole === role ? "bg-accent/10 text-accent font-medium" : "hover:bg-muted text-muted-foreground")}
-                >
-                  {role}
-                </button>
-              ))}
             </div>
-          </div>
-        )}
-
-        {allTags.length > 0 && (
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Tags</h3>
-            <div className="flex flex-wrap gap-1.5">
-              <button 
-                onClick={() => setFilterTag("All")}
-                className={cn("px-2.5 py-1 text-xs rounded-full border transition-colors", filterTag === "All" ? "bg-foreground text-background border-foreground" : "bg-card border-border text-muted-foreground hover:bg-muted")}
-              >
-                All
-              </button>
-              {allTags.map(tag => (
-                <button 
-                  key={tag} 
-                  onClick={() => setFilterTag(tag)}
-                  className={cn("px-2.5 py-1 text-xs rounded-full border transition-colors", filterTag === tag ? "bg-foreground text-background border-foreground" : "bg-card border-border text-muted-foreground hover:bg-muted")}
-                >
-                  {tag}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Main Grid Area */}
-      <div className="flex-1 flex flex-col min-w-0 bg-muted/20">
-        {/* Toolbar */}
-        <div className="h-14 border-b border-border bg-card px-4 flex items-center justify-between shrink-0 gap-4">
-          <div className="relative flex-1 max-w-md">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <input 
-              className="input pl-8 py-1.5 h-8 text-xs w-full"
-              placeholder="Search images..."
-              value={q}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setQ(e.target.value)}
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={() => fetchLibrary()}>
-              <RefreshCw className={cn("w-4 h-4 mr-2", loading && "animate-spin")} /> Refresh
-            </Button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              multiple
-              className="hidden"
-              onChange={async (e) => {
-                await handleUpload(e.target.files);
-                e.target.value = "";
-              }}
-            />
-            <Button size="sm" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
-              {uploading ? (
-                <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
-              ) : (
-                <Upload className="w-4 h-4 mr-2" />
-              )}
-              {uploading ? "Uploading…" : "Upload"}
-            </Button>
-          </div>
+          )}
         </div>
 
         {/* Gallery */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-6">
+        <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
           {visible.length === 0 ? (
-            <div className="text-center py-20 text-muted-foreground">
-              <ImageIcon className="w-12 h-12 mx-auto mb-3 opacity-20" />
-              <p>No media found.</p>
+            <div className="py-20 text-center text-muted-foreground">
+              <ImageIcon className="mx-auto mb-3 h-12 w-12 opacity-20" />
+              <p className="text-sm">
+                {photos.length === 0
+                  ? "No images yet. Use Upload to add your first one."
+                  : "No photos match your filters."}
+              </p>
+              {photos.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setFilters({ ...NO_FILTERS })}
+                  className="mt-2 min-h-11 cursor-pointer text-xs underline hover:text-foreground"
+                >
+                  Clear all filters
+                </button>
+              )}
             </div>
           ) : (
             <>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-              {visible.map(photo => {
-                const uses = library?.usage[photo.url] || [];
-                const isSelected = selectedIds.has(photo.id);
-                const isActive = activePhotoId === photo.id;
-                
-                return (
-                  <div 
-                    key={photo.id}
-                    onClick={() => setActivePhotoId(photo.id)}
-                    className={cn(
-                      "group relative aspect-square rounded-xl border bg-card overflow-hidden cursor-pointer transition-all hover:border-accent hover:shadow-sm",
-                      isActive ? "ring-2 ring-accent border-accent" : "border-border",
-                      isSelected && "ring-2 ring-primary border-primary"
-                    )}
-                  >
-                    <Image 
-                      src={photo.url} 
-                      alt={photo.file} 
-                      fill 
-                      className="object-cover transition-transform group-hover:scale-105" 
-                      sizes="(max-width: 768px) 50vw, 25vw"
-                    />
-                    
-                    {/* Checkbox Overlay */}
-                    <div 
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+                {visible.map((photo) => {
+                  const uses = usage[photo.url] ?? [];
+                  const isSelected = selectedIds.has(photo.id);
+                  const isActive = activePhotoId === photo.id;
+
+                  return (
+                    <div
+                      key={photo.id}
                       className={cn(
-                        "absolute top-2 left-2 z-10 p-1 rounded-md transition-opacity",
-                        isSelected ? "opacity-100 bg-primary text-primary-foreground" : "opacity-0 group-hover:opacity-100 bg-background/80 hover:bg-background"
+                        "group relative aspect-square overflow-hidden rounded-lg border bg-card transition-colors",
+                        isActive ? "border-accent ring-2 ring-accent" : "border-border",
+                        isSelected && "border-primary ring-2 ring-primary"
                       )}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleSelect(photo.id);
-                      }}
                     >
-                      <Check className={cn("w-4 h-4", !isSelected && "opacity-30")} />
-                    </div>
-                    
-                    {/* Info Overlay */}
-                    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent p-3 pt-8 pointer-events-none">
-                      <p className="text-white text-xs truncate drop-shadow-md">{photo.alt || photo.file.split('/').pop()}</p>
-                      <div className="flex items-center gap-2 mt-1">
-                        {uses.length > 0 && (
-                          <span className="text-[10px] text-white/80 bg-white/20 rounded px-1.5 py-0.5 backdrop-blur-sm">
-                            {uses.length} use{uses.length !== 1 && 's'}
-                          </span>
-                        )}
-                        {photo.roles.length > 0 && (
-                          <span className="text-[10px] text-accent-foreground bg-accent/80 rounded px-1.5 py-0.5 backdrop-blur-sm truncate">
-                            {photo.roles[0]}
-                          </span>
-                        )}
+                      <Image
+                        src={safeSrc(photo.url)}
+                        alt={photoLabel(photo)}
+                        fill
+                        className="object-cover"
+                        sizes="(max-width: 640px) 50vw, (max-width: 1024px) 25vw, 16vw"
+                      />
+
+                      {/* Whole tile opens the details panel. A real button so
+                          it's reachable by keyboard; the tick box sits above
+                          it rather than nested inside it (nested buttons are
+                          invalid HTML). */}
+                      <button
+                        type="button"
+                        onClick={() => setActivePhotoId(photo.id)}
+                        aria-label={`Details for ${photoLabel(photo)}`}
+                        className="absolute inset-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => toggleSelect(photo.id)}
+                        aria-pressed={isSelected}
+                        aria-label={`${isSelected ? "Deselect" : "Select"} ${photoLabel(photo)}`}
+                        className="absolute left-0 top-0 z-10 grid h-11 w-11 cursor-pointer place-items-center md:h-9 md:w-9"
+                      >
+                        <span
+                          className={cn(
+                            "grid h-6 w-6 place-items-center rounded-md border transition-colors",
+                            isSelected
+                              ? "border-primary bg-primary text-primary-foreground"
+                              : "border-white/70 bg-background/80 text-transparent group-hover:text-muted-foreground"
+                          )}
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                        </span>
+                      </button>
+
+                      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent p-2 pt-8">
+                        <p className="truncate text-[11px] text-white drop-shadow-md">
+                          {photoLabel(photo)}
+                        </p>
+                        <div className="mt-1 flex items-center gap-1.5">
+                          {uses.length > 0 && (
+                            <span className="rounded px-1.5 py-0.5 text-[10px] text-white/90 backdrop-blur-sm bg-white/20">
+                              {uses.length} use{uses.length !== 1 && "s"}
+                            </span>
+                          )}
+                          {photo.roles.length > 0 && (
+                            <span className="truncate rounded bg-accent/80 px-1.5 py-0.5 text-[10px] text-white backdrop-blur-sm">
+                              {photo.roles[0]}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
 
-            {/* Count + Load more (paginated) */}
-            <div className="mt-6 flex flex-col items-center gap-2">
-              <p className="text-xs text-muted-foreground">
-                {visible.length} shown · {library?.photos.length ?? 0} of {total} loaded
-              </p>
-              {library && library.photos.length < total && (
-                <Button variant="outline" size="sm" onClick={loadMore} disabled={loading}>
-                  {loading && <RefreshCw className="w-4 h-4 mr-2 animate-spin" />}
-                  Load more
-                </Button>
+              {!loadedAll && (
+                <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+                  <p className="w-full text-center text-xs text-muted-foreground">
+                    {remaining} more photo{remaining === 1 ? "" : "s"} not loaded yet
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    type="button"
+                    onClick={() => void loadMore(1)}
+                    disabled={loading}
+                  >
+                    {loading && <RefreshCw className="mr-2 h-4 w-4 animate-spin" />}
+                    Load more
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    type="button"
+                    onClick={() => void loadMore(MAX_AUTO_PAGES)}
+                    disabled={loading}
+                  >
+                    Load all {total}
+                  </Button>
+                </div>
               )}
-            </div>
             </>
           )}
         </div>
       </div>
 
-      {/* Slide-out Info Panel */}
+      {/* ── Details panel ──
+          A docked column from `md` up, a bottom sheet below it. Mounted only
+          while a photo is active and faded in only — never parked offscreen
+          with a transform. */}
       {activePhoto && (
-        <div className="w-80 shrink-0 border-l border-border bg-card overflow-y-auto flex flex-col">
-          <div className="h-14 border-b border-border flex items-center justify-between px-4 shrink-0">
-            <h3 className="font-medium text-sm">Image Details</h3>
-            <button onClick={() => setActivePhotoId(null)} className="p-1 rounded-md hover:bg-muted text-muted-foreground">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          
-          <div className="p-4 space-y-6">
-            <div className="aspect-square relative rounded-lg border border-border overflow-hidden bg-muted/30">
-              <Image 
-                src={activePhoto.url} 
-                alt={activePhoto.file} 
-                fill 
-                className="object-contain" 
-              />
+        <>
+          <button
+            type="button"
+            aria-label="Close image details"
+            onClick={() => setActivePhotoId(null)}
+            className="fixed inset-0 z-40 cursor-default bg-black/50 animate-[fadeIn_0.2s_ease-out_both] md:hidden"
+          />
+          <aside
+            className={cn(
+              "fixed inset-x-0 bottom-0 z-50 flex max-h-[85dvh] flex-col overflow-y-auto rounded-t-2xl border border-border bg-card",
+              "md:static md:z-auto md:h-full md:max-h-none md:w-80 md:shrink-0 md:rounded-none md:border-0 md:border-l",
+              "animate-[fadeIn_0.2s_ease-out_both] md:animate-none"
+            )}
+          >
+            <div className="sticky top-0 z-10 flex h-14 shrink-0 items-center justify-between border-b border-border bg-card px-4">
+              <h3 className="text-sm font-medium">Image details</h3>
+              <button
+                type="button"
+                onClick={() => setActivePhotoId(null)}
+                aria-label="Close image details"
+                className="grid h-11 w-11 cursor-pointer place-items-center rounded-lg text-muted-foreground hover:bg-muted"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
-            
-            <div className="space-y-4 text-sm">
-              <div>
-                <label className="text-muted-foreground text-xs mb-1 block">Image Name</label>
-                <input
-                  type="text"
-                  value={activePhoto.alt ?? ""}
-                  placeholder={activePhoto.file.split('/').pop()}
-                  onChange={(e) => editMeta(activePhoto.id, { alt: e.target.value || null })}
-                  className="input h-8 px-2 text-sm w-full"
+
+            <div className="space-y-6 p-4">
+              <div className="relative aspect-square overflow-hidden rounded-lg border border-border bg-muted/30">
+                <Image
+                  src={safeSrc(activePhoto.url)}
+                  alt={photoLabel(activePhoto)}
+                  fill
+                  sizes="320px"
+                  className="object-contain"
                 />
               </div>
 
-              <div>
-                <p className="text-muted-foreground text-xs mb-1">Filename</p>
-                <p className="break-all">{activePhoto.file.split('/').pop()}</p>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-4 text-sm">
                 <div>
-                  <p className="text-muted-foreground text-xs mb-1">Source</p>
-                  <p className="capitalize flex items-center gap-1.5"><HardDrive className="w-3.5 h-3.5" /> {activePhoto.source}</p>
+                  <label className="mb-1 block text-xs text-muted-foreground">
+                    Image name
+                  </label>
+                  <input
+                    type="text"
+                    value={activePhoto.alt ?? ""}
+                    placeholder={activePhoto.file.split("/").pop()}
+                    onChange={(e) =>
+                      editMeta(activePhoto.id, { alt: e.target.value || null })
+                    }
+                    className="input"
+                  />
                 </div>
-                <div>
-                  <p className="text-muted-foreground text-xs mb-1">Added</p>
-                  <p>{new Date(activePhoto.createdAt).toLocaleDateString()}</p>
-                </div>
-              </div>
 
-              <div className="pt-4 border-t border-border">
-                <p className="text-muted-foreground text-xs mb-2">Smart Categorization</p>
-                <p className="text-[10px] text-muted-foreground mb-3">
-                  Pick a Product first — Category &amp; Subcategory are auto-detected
-                  from it, and the Variant dropdowns show only that product&apos;s
-                  options. Or set them manually below.
-                </p>
-                <div className="space-y-3">
+                <div>
+                  <p className="mb-1 text-xs text-muted-foreground">Filename</p>
+                  <p className="break-all">{activePhoto.file.split("/").pop()}</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="min-w-0">
+                    <p className="mb-1 text-xs text-muted-foreground">Stored in</p>
+                    <p className="flex items-center gap-1.5 break-all">
+                      <HardDrive className="h-3.5 w-3.5 shrink-0" />
+                      {photoFolder(activePhoto)}
+                    </p>
+                  </div>
                   <div>
-                    {/* Product-first: choosing a product auto-fills Category +
-                        Subcategory and scopes the Variant selects. The product
-                        itself is not persisted (Media has no product column). */}
-                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Product</label>
-                    <select
-                      value={selectedProductId}
-                      onChange={(e) => chooseProduct(e.target.value)}
-                      className="input h-7 px-2 text-xs w-full mt-1"
-                      disabled={productGroups.length === 0}
-                    >
-                      <option value="">
-                        {productGroups.length === 0 ? "— no products —" : "— select a product —"}
-                      </option>
-                      {productGroups.map(([cat, prods]) => (
-                        <optgroup key={cat} label={cat}>
-                          {prods.map((p) => (
-                            <option key={p.id} value={p.id}>{p.name}</option>
+                    <p className="mb-1 text-xs text-muted-foreground">Added</p>
+                    <p>{new Date(activePhoto.createdAt).toLocaleDateString()}</p>
+                  </div>
+                </div>
+
+                <div className="border-t border-border pt-4">
+                  <p className="mb-3 flex items-center text-xs text-muted-foreground">
+                    Tagging
+                    <InfoTip term="Tagging">
+                      Optional labels that make a photo easier to find later.
+                      Pick the Product first and the Category, Subcategory and
+                      variant options fill themselves in from it; or set each one
+                      by hand. Nothing here changes where the photo is used.
+                    </InfoTip>
+                  </p>
+                  <div className="space-y-3">
+                    <div>
+                      {/* Product-first: choosing a product auto-fills Category +
+                          Subcategory and scopes the Variant selects. The product
+                          itself is not persisted (Media has no product column). */}
+                      <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                        Product
+                      </label>
+                      <select
+                        value={selectedProductId}
+                        onChange={(e) => chooseProduct(e.target.value)}
+                        className="input mt-1"
+                        disabled={productGroups.length === 0}
+                      >
+                        <option value="">
+                          {productGroups.length === 0
+                            ? "— no products —"
+                            : "— select a product —"}
+                        </option>
+                        {productGroups.map(([cat, prods]) => (
+                          <optgroup key={cat} label={cat}>
+                            {prods.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      {/* Scoping-only: narrows the Subcategory list. Auto-set when
+                          a product is chosen. Not persisted. */}
+                      <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                        Category
+                      </label>
+                      <select
+                        value={catFilter}
+                        onChange={(e) => setCatFilter(e.target.value)}
+                        className="input mt-1"
+                      >
+                        <option value="">— none —</option>
+                        {(taxonomy?.categories ?? []).map((c) => (
+                          <option key={c.slug} value={c.name}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                        Subcategory
+                      </label>
+                      <select
+                        value={activePhoto.subcategoryName || ""}
+                        onChange={(e) =>
+                          editMeta(activePhoto.id, {
+                            subcategoryName: e.target.value || null,
+                          })
+                        }
+                        className="input mt-1"
+                      >
+                        <option value="">— none —</option>
+                        {subcatOptions.map((s) => (
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="min-w-0">
+                        <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                          Variant attr
+                        </label>
+                        <select
+                          value={activePhoto.variantAttribute || ""}
+                          onChange={(e) =>
+                            editMeta(activePhoto.id, {
+                              variantAttribute: e.target.value || null,
+                            })
+                          }
+                          className="input mt-1"
+                        >
+                          <option value="">— none —</option>
+                          {attrOptions.map((a) => (
+                            <option key={a} value={a}>
+                              {a}
+                            </option>
                           ))}
-                        </optgroup>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Category (Derived)</label>
-                    <input
-                      type="text"
-                      value={activePhoto.category || ""}
-                      disabled
-                      className="input h-7 px-2 text-xs w-full mt-1 bg-muted/50 cursor-not-allowed"
-                    />
-                  </div>
-                  <div>
-                    {/* Scoping-only: narrows the Subcategory list. Auto-set when a
-                        product is chosen. Not persisted. */}
-                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Category</label>
-                    <select
-                      value={catFilter}
-                      onChange={(e) => setCatFilter(e.target.value)}
-                      className="input h-7 px-2 text-xs w-full mt-1"
-                    >
-                      <option value="">— none —</option>
-                      {(taxonomy?.categories ?? []).map((c) => (
-                        <option key={c.slug} value={c.name}>{c.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Subcategory</label>
-                    <select
-                      value={activePhoto.subcategoryName || ""}
-                      onChange={(e) => editMeta(activePhoto.id, { subcategoryName: e.target.value || null })}
-                      className="input h-7 px-2 text-xs w-full mt-1"
-                    >
-                      <option value="">— none —</option>
-                      {subcatOptions.map((s) => (
-                        <option key={s} value={s}>{s}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Variant Attr</label>
-                      <select
-                        value={activePhoto.variantAttribute || ""}
-                        onChange={(e) => editMeta(activePhoto.id, { variantAttribute: e.target.value || null })}
-                        className="input h-7 px-2 text-xs w-full mt-1"
-                      >
-                        <option value="">— none —</option>
-                        {attrOptions.map((a) => (
-                          <option key={a} value={a}>{a}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Variant Value</label>
-                      <select
-                        value={activePhoto.variantValue || ""}
-                        onChange={(e) => editMeta(activePhoto.id, { variantValue: e.target.value || null })}
-                        className="input h-7 px-2 text-xs w-full mt-1"
-                      >
-                        <option value="">— none —</option>
-                        {valueOptions.map((v) => (
-                          <option key={v} value={v}>{v}</option>
-                        ))}
-                      </select>
+                        </select>
+                      </div>
+                      <div className="min-w-0">
+                        <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                          Variant value
+                        </label>
+                        <select
+                          value={activePhoto.variantValue || ""}
+                          onChange={(e) =>
+                            editMeta(activePhoto.id, {
+                              variantValue: e.target.value || null,
+                            })
+                          }
+                          className="input mt-1"
+                        >
+                          <option value="">— none —</option>
+                          {valueOptions.map((v) => (
+                            <option key={v} value={v}>
+                              {v}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="pt-4 border-t border-border">
-                <p className="text-muted-foreground text-xs mb-2">Roles (System Level)</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {activePhoto.roles.map(r => (
-                    <span key={r} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-accent/10 text-accent text-xs">
-                      {r}
-                      <button
-                        onClick={() => removeTerm("roles", r)}
-                        className="hover:text-danger"
-                        aria-label={`Remove role ${r}`}
+                <div className="border-t border-border pt-4">
+                  <p className="mb-2 flex items-center text-xs text-muted-foreground">
+                    Roles
+                    <InfoTip term="Roles">
+                      Slots the store itself understands, like “hero” or
+                      “thumbnail”. Use them sparingly — a tag is the right choice
+                      for your own labels.
+                    </InfoTip>
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {activePhoto.roles.map((r) => (
+                      <span
+                        key={r}
+                        className="inline-flex items-center gap-1 rounded-md bg-accent/10 px-2 py-1 text-xs text-accent"
                       >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  ))}
-                  <button
-                    onClick={() => addTerm("roles")}
-                    className="px-2 py-0.5 rounded-md border border-dashed border-border text-xs text-muted-foreground hover:bg-muted"
-                  >
-                    + Add Role
-                  </button>
+                        {r}
+                        <button
+                          type="button"
+                          onClick={() => removeTerm("roles", r)}
+                          className="cursor-pointer hover:text-danger"
+                          aria-label={`Remove role ${r}`}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => addTerm("roles")}
+                      className="cursor-pointer rounded-md border border-dashed border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
+                    >
+                      + Add role
+                    </button>
+                  </div>
                 </div>
-              </div>
 
-              <div className="pt-4 border-t border-border">
-                <p className="text-muted-foreground text-xs mb-2">Tags</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {activePhoto.tags.map(t => (
-                    <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-border bg-muted/50 text-xs">
-                      {t}
-                      <button
-                        onClick={() => removeTerm("tags", t)}
-                        className="hover:text-danger"
-                        aria-label={`Remove tag ${t}`}
+                <div className="border-t border-border pt-4">
+                  <p className="mb-2 text-xs text-muted-foreground">Tags</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {activePhoto.tags.map((t) => (
+                      <span
+                        key={t}
+                        className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/50 px-2 py-1 text-xs"
                       >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  ))}
-                  <button
-                    onClick={() => addTerm("tags")}
-                    className="px-2 py-0.5 rounded-full border border-dashed border-border text-xs text-muted-foreground hover:bg-muted"
-                  >
-                    + Add Tag
-                  </button>
+                        {t}
+                        <button
+                          type="button"
+                          onClick={() => removeTerm("tags", t)}
+                          className="cursor-pointer hover:text-danger"
+                          aria-label={`Remove tag ${t}`}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => addTerm("tags")}
+                      className="cursor-pointer rounded-full border border-dashed border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
+                    >
+                      + Add tag
+                    </button>
+                  </div>
                 </div>
-              </div>
 
-              <div className="pt-4 border-t border-border">
-                <p className="text-muted-foreground text-xs mb-2">Usage Context</p>
-                {(() => {
-                  const uses = library?.usage[activePhoto.url] || [];
-                  if (uses.length === 0) return <p className="text-muted-foreground text-xs italic">Not used anywhere</p>;
-                  return (
+                <div className="border-t border-border pt-4">
+                  <p className="mb-2 text-xs text-muted-foreground">Where it&apos;s used</p>
+                  {activeUses.length === 0 ? (
+                    <p className="text-xs italic text-muted-foreground">
+                      Not used anywhere
+                    </p>
+                  ) : (
                     <ul className="space-y-2">
-                      {uses.map((u, i) => (
+                      {activeUses.map((u, i) => (
                         <li key={i} className="flex flex-col gap-0.5 text-xs">
                           <div className="flex items-center gap-1.5">
-                            <Info className="w-3.5 h-3.5 text-muted-foreground" />
-                            <span className="font-medium truncate">{u.name}</span>
+                            <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            <span className="truncate font-medium">{u.name}</span>
                           </div>
-                          <span className="text-muted-foreground pl-5 capitalize">
+                          <span className="pl-5 capitalize text-muted-foreground">
                             {u.kind} • {u.slot || "Gallery"}
                           </span>
                         </li>
                       ))}
                     </ul>
-                  );
-                })()}
+                  )}
+                </div>
+              </div>
+
+              <div className="pt-2">
+                <Button
+                  variant="danger"
+                  type="button"
+                  className="w-full"
+                  disabled={deleting || activeUses.length > 0}
+                  onClick={() => deletePhoto(activePhoto.id)}
+                >
+                  {deleting ? "Deleting…" : "Delete image"}
+                </Button>
+                {activeUses.length > 0 && (
+                  <p className="mt-2 text-center text-[10px] text-muted-foreground">
+                    In use by {activeUses.length} product
+                    {activeUses.length === 1 ? "" : "s"} — remove it there first.
+                  </p>
+                )}
               </div>
             </div>
-            
-            <div className="pt-4 mt-auto">
-              <Button
-                variant="danger"
-                className="w-full"
-                disabled={deleting || (library?.usage[activePhoto.url] || []).length > 0}
-                onClick={() => deletePhoto(activePhoto.id)}
-              >
-                {deleting ? "Deleting…" : "Delete Image"}
-              </Button>
-              {(library?.usage[activePhoto.url] || []).length > 0 && (
-                <p className="text-center text-[10px] text-muted-foreground mt-2">Cannot delete image while it is in use.</p>
-              )}
-            </div>
-          </div>
-        </div>
+          </aside>
+        </>
       )}
     </div>
   );

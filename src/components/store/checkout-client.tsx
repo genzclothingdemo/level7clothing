@@ -371,26 +371,29 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
     PaymentMode,
     { label: string; desc: string; icon: React.ReactNode }
   > = {
+    // Labels must match product-notices.tsx word for word — a shopper who read
+    // "Part now, rest on delivery" on the product page should find that exact
+    // option here, not "Advance Payment".
     prepaid: {
-      label: "Prepaid — Pay Online",
-      desc: "UPI, cards, netbanking & wallets — secured by Razorpay",
+      label: "Pay online",
+      desc: "UPI, cards, netbanking and wallets — secured by Razorpay.",
       icon: <CreditCard className="h-4 w-4 text-muted-foreground" />,
     },
     partial: {
-      label: "Advance Payment",
-      desc: `Pay ${formatINR(advance)} advance online now · ${formatINR(
+      label: "Part now, rest on delivery",
+      desc: `Pay ${formatINR(advance)} online now, then ${formatINR(
         total - advance
-      )} on delivery. Advance is non-refundable.`,
+      )} in cash when it arrives. The advance is non-refundable.`,
       icon: <Wallet className="h-4 w-4 text-muted-foreground" />,
     },
     cod: {
-      label: "Cash on Delivery",
-      desc: "Pay in full when your order arrives",
+      label: "Cash on delivery",
+      desc: "Pay the courier in full when your order arrives.",
       icon: <Truck className="h-4 w-4 text-muted-foreground" />,
     },
     direct: {
-      label: "Customised Order",
-      desc: "No payment now — we'll contact you to finalise your custom piece. Customised orders are non-refundable.",
+      label: "Arrange with us",
+      desc: "No payment now — we'll contact you to finalise your made-to-order piece. These are non-refundable once production starts.",
       icon: <MessageCircle className="h-4 w-4 text-muted-foreground" />,
     },
   };
@@ -571,19 +574,24 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
             {/* Coupon Code Section */}
             {!appliedCoupon ? (
               <div>
-                <div className="flex gap-2">
+                {/* `min-w-0` is what stops the overflow: an input's default
+                    `min-width:auto` resolves to its intrinsic size (~200px),
+                    which with a non-shrinking Apply button exceeded the 232px
+                    available inside the summary card at 320px. */}
+                <div className="flex flex-col gap-2 sm:flex-row">
                   <input
                     type="text"
                     value={couponCode}
                     onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
                     placeholder="Discount code"
-                    className="input w-full uppercase"
+                    className="input w-full min-w-0 uppercase"
                   />
                   <Button
                     type="button"
                     variant="outline"
                     onClick={handleApplyCoupon}
                     disabled={applyingCoupon || !couponCode}
+                    className="shrink-0"
                   >
                     {applyingCoupon ? "..." : "Apply"}
                   </Button>

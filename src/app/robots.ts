@@ -14,6 +14,9 @@ export default function robots(): MetadataRoute.Robots {
           "/account",
           "/checkout",
           "/cart",
+          // Was missing, and the wishlist page carried no noindex either — so
+          // it was the one private surface that was fully indexable.
+          "/wishlist",
           "/order",
           "/api",
         ],

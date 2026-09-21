@@ -2,18 +2,20 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { User, Package, Star, Info, Phone } from "lucide-react";
+import { User, Package, Star, Info, Phone, MapPin } from "lucide-react";
 import { AccountProfile } from "@/components/store/account-profile";
 import { AccountOrders, type AccountOrder } from "@/components/store/account-orders";
+import { AddressBook, type SavedAddress } from "@/components/store/address-book";
 import { PortfolioSection, type ReviewItem } from "@/components/store/portfolio-section";
 import { cn } from "@/lib/utils";
 
-type Tab = "profile" | "orders" | "portfolio";
+type Tab = "profile" | "orders" | "addresses" | "portfolio";
 
 export function AccountView({
   user,
   orders,
   reviews,
+  addresses,
 }: {
   user: {
     name: string;
@@ -26,6 +28,7 @@ export function AccountView({
   };
   orders: AccountOrder[];
   reviews: ReviewItem[];
+  addresses: SavedAddress[];
 }) {
   const [activeTab, setActiveTab] = useState<Tab>("profile");
 
@@ -63,6 +66,25 @@ export function AccountView({
           My Orders
           <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
             {orders.length}
+          </span>
+        </button>
+
+        {/* Addresses Tab — the AddressBook component existed but was rendered
+            nowhere, so saved addresses could not be managed at all. */}
+        <button
+          type="button"
+          onClick={() => setActiveTab("addresses")}
+          className={cn(
+            "flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap cursor-pointer",
+            activeTab === "addresses"
+              ? "bg-accent/15 text-accent shadow-sm"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground"
+          )}
+        >
+          <MapPin className="h-4 w-4" />
+          Addresses
+          <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+            {addresses.length}
           </span>
         </button>
 
@@ -126,6 +148,15 @@ export function AccountView({
               My Orders ({orders.length})
             </h2>
             <AccountOrders orders={orders} />
+          </div>
+        )}
+
+        {activeTab === "addresses" && (
+          <div className="max-w-2xl">
+            <h2 className="mb-4 font-serif text-2xl">
+              Saved addresses ({addresses.length})
+            </h2>
+            <AddressBook addresses={addresses} />
           </div>
         )}
 

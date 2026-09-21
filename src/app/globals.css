@@ -72,8 +72,19 @@
 }
 
 /* ---------------- Base ---------------- */
-* {
-  border-color: var(--border);
+/*
+ * This MUST stay inside `@layer base`.
+ *
+ * `@import "tailwindcss"` puts utilities in `@layer utilities`, and an
+ * UNLAYERED rule outranks every layered rule regardless of specificity. While
+ * this sat outside a layer it silently defeated every border-colour utility in
+ * the codebase — `border-accent`, `border-primary`, `border-foreground` and
+ * friends all rendered as the default hairline, with no error to explain why.
+ */
+@layer base {
+  * {
+    border-color: var(--border);
+  }
 }
 
 html {
@@ -152,39 +163,51 @@ body {
   }
 }
 
-/* Form inputs (shared across storefront + admin) */
-.input {
-  width: 100%;
-  height: 2.75rem;
-  border-radius: 0.625rem;
-  border: 1px solid var(--input);
-  background: var(--card);
-  padding: 0 0.875rem;
-  font-size: 0.875rem;
-  color: var(--foreground);
-  outline: none;
-  transition: box-shadow 0.15s, border-color 0.15s;
-}
-textarea.input {
-  height: auto;
-  padding: 0.625rem 0.875rem;
-  line-height: 1.5;
-}
-.input:focus {
-  border-color: var(--ring);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 30%, transparent);
-}
-.input::placeholder {
-  color: var(--muted-foreground);
-}
-select.input {
-  cursor: pointer;
-}
-.label {
-  display: block;
-  margin-bottom: 0.375rem;
-  font-size: 0.8125rem;
-  color: var(--muted-foreground);
+/*
+ * Form inputs (shared across storefront + admin).
+ *
+ * Inside `@layer components` so Tailwind utilities can still override them —
+ * unlayered, these beat every utility, which made `class="input pl-9"` put the
+ * text under the icon and `class="input h-10"` a silent no-op. `padding` is
+ * written as longhands for the same reason: the shorthand would reset
+ * `padding-left` even when a `pl-*` utility wins the cascade.
+ */
+@layer components {
+  .input {
+    width: 100%;
+    height: 2.75rem;
+    border-radius: 0.625rem;
+    border: 1px solid var(--input);
+    background: var(--card);
+    padding-block: 0;
+    padding-inline: 0.875rem;
+    font-size: 0.875rem;
+    color: var(--foreground);
+    outline: none;
+    transition: box-shadow 0.15s, border-color 0.15s;
+  }
+  textarea.input {
+    height: auto;
+    padding-block: 0.625rem;
+    padding-inline: 0.875rem;
+    line-height: 1.5;
+  }
+  .input:focus {
+    border-color: var(--ring);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 30%, transparent);
+  }
+  .input::placeholder {
+    color: var(--muted-foreground);
+  }
+  select.input {
+    cursor: pointer;
+  }
+  .label {
+    display: block;
+    margin-bottom: 0.375rem;
+    font-size: 0.8125rem;
+    color: var(--muted-foreground);
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -200,7 +223,10 @@ select.input {
    Do NOT "fix" this with `maximum-scale=1` / `user-scalable=no` in the viewport
    meta — that disables pinch-zoom for everyone and is a WCAG failure.
 --------------------------------------------------------------------------- */
-@media (max-width: 767px) {
+/* `(pointer: coarse)` is included because the width query alone stopped at
+   767px, leaving iPad portrait (exactly 768px) to zoom on every field focus.
+   Touch is the actual trigger, not screen width. */
+@media (max-width: 767px), (pointer: coarse) {
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
   select,
   textarea {

@@ -1,4 +1,8 @@
 import { Reveal } from "@/components/store/reveal";
+import {
+  ExpandableText,
+  type ClampLines,
+} from "@/components/store/expandable-text";
 
 /**
  * Shared shell for the policy / legal pages (privacy, terms, shipping &
@@ -47,17 +51,36 @@ export function PolicyLayout({
   );
 }
 
+/**
+ * One titled block of policy prose.
+ *
+ * Long sections are clamped behind a "View more" so the page reads as a list of
+ * answers rather than a wall — but the clamp is deliberately generous, and
+ * `ExpandableText` only grows a toggle when the copy genuinely overruns it, so
+ * the many three-line sections here are untouched. The full text always stays
+ * in the DOM: these pages have to remain crawlable and Ctrl-F-able.
+ */
 export function PolicySection({
   title,
+  clamp = 10,
   children,
 }: {
   title: string;
+  /** Lines shown before "View more". `false` renders the section in full. */
+  clamp?: ClampLines | false;
   children: React.ReactNode;
 }) {
+  const proseClass = "space-y-3 text-sm md:text-base";
   return (
     <section>
       <h2 className="font-serif text-xl text-foreground md:text-2xl">{title}</h2>
-      <div className="mt-3 space-y-3 text-sm md:text-base">{children}</div>
+      {clamp === false ? (
+        <div className={`mt-3 ${proseClass}`}>{children}</div>
+      ) : (
+        <ExpandableText lines={clamp} className="mt-3" contentClassName={proseClass}>
+          {children}
+        </ExpandableText>
+      )}
     </section>
   );
 }

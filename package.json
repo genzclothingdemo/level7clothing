@@ -13,7 +13,8 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
     "db:backup": "tsx scripts/backup-db.ts",
-    "shipping:free": "tsx scripts/set-free-shipping.ts"
+    "shipping:free": "tsx scripts/set-free-shipping.ts",
+    "pwa:icons": "node scripts/build-pwa-icons.mjs"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

@@ -141,14 +141,14 @@ export function AddressBook({ addresses }: { addresses: SavedAddress[] }) {
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => startEdit(a)}
-                    className="grid h-7 w-7 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+                    className="grid h-11 w-11 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
                     aria-label="Edit address"
                   >
                     <Pencil className="h-3.5 w-3.5" />
                   </button>
                   <button
                     onClick={() => onDelete(a.id)}
-                    className="grid h-7 w-7 place-items-center rounded-md text-muted-foreground hover:bg-danger/10 hover:text-danger cursor-pointer"
+                    className="grid h-11 w-11 place-items-center rounded-md text-muted-foreground hover:bg-danger/10 hover:text-danger cursor-pointer"
                     aria-label="Delete address"
                   >
                     <Trash2 className="h-3.5 w-3.5" />

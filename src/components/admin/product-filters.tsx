@@ -1,8 +1,28 @@
 "use client";
 
+/**
+ * ProductFilters — the bar above the admin product table.
+ *
+ * It used to open into a three-column grid of labelled fields, roughly 260px of
+ * chrome pushing the table below the fold on a laptop and off the screen on a
+ * phone. The rewrite keeps every filter and removes the height:
+ *
+ *  - **One wrapping row, no stacked labels.** Each select names itself in its
+ *    own placeholder option ("All categories", "Any status"), so the label and
+ *    the control are the same 40px instead of two stacked boxes.
+ *  - **Collapsed by default, with a count badge.** The row only appears when
+ *    the admin asks for it, and the badge says how many filters are live while
+ *    it is shut — so closing it never hides state.
+ *  - **A set filter is tinted violet**, which is the other half of not hiding
+ *    state: on a row of six selects, "which of these is doing something?" has
+ *    to be answerable at a glance.
+ */
+
 import { useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Search, SlidersHorizontal, X } from "lucide-react";
+import { CountBadge, MiniButton } from "@/components/admin/form-kit";
+import { cn } from "@/lib/utils";
 
 type SubcategoryOption = { id: string; name: string; categoryName: string };
 
@@ -90,148 +110,129 @@ export function ProductFilters({
     router.replace(pathname);
   }
 
+  /** Shared look for the compact selects — tinted while the filter is live. */
+  const select = (live: boolean) =>
+    cn(
+      "input h-11 w-full min-w-0 sm:h-10 sm:w-auto sm:max-w-[13rem]",
+      live && "border-accent text-accent"
+    );
+
   return (
     <div className="rounded-2xl border border-border bg-card">
-      {/* Always-visible search + toggle */}
-      <div className="flex flex-wrap items-center gap-3 p-3">
-        <div className="relative min-w-0 flex-1">
+      {/* Always visible: search + the Filters disclosure. */}
+      <div className="flex flex-wrap items-center gap-2 p-2.5">
+        <div className="relative min-w-[10rem] flex-1">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <input
             value={f.q}
             onChange={(e) => set("q", e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && apply()}
-            placeholder="Search products by name, tag, or description…"
-            className="input h-10 pl-9"
+            aria-label="Search products"
+            placeholder="Search by name, tag or description…"
+            className="input h-11 pl-9 sm:h-10"
           />
         </div>
-        <button
+
+        <MiniButton
           onClick={() => setOpen((v) => !v)}
-          className="inline-flex items-center gap-2 rounded-full border border-border px-3.5 py-2 text-sm hover:bg-muted"
+          active={open || activeCount > 0}
+          aria-expanded={open}
+          className="h-11 sm:h-10"
         >
-          <SlidersHorizontal className="h-4 w-4" />
-          Filters & Sort
-          {activeCount > 0 && (
-            <span className="grid h-5 min-w-5 place-items-center rounded-full bg-foreground px-1 text-xs text-background">
-              {activeCount}
-            </span>
-          )}
-        </button>
+          <SlidersHorizontal className="h-3.5 w-3.5" />
+          Filters
+          {activeCount > 0 && <CountBadge>{activeCount}</CountBadge>}
+        </MiniButton>
+
         <button
+          type="button"
           onClick={apply}
-          className="rounded-full bg-foreground px-4 py-2 text-sm font-medium text-background"
+          className="inline-flex h-11 shrink-0 cursor-pointer items-center rounded-lg bg-foreground px-4 text-[11px] font-medium uppercase tracking-widest text-background transition-opacity hover:opacity-90 sm:h-10"
         >
           Search
         </button>
       </div>
 
       {open && (
-        <div className="border-t border-border p-4">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <Field label="Category">
-              <select
-                value={f.category}
-                onChange={(e) => setCategory(e.target.value)}
-                className="input h-10"
-              >
-                <option value="">All Categories</option>
-                {categories.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </Field>
+        <div className="flex flex-wrap items-center gap-2 border-t border-border p-2.5">
+          <select
+            value={f.category}
+            onChange={(e) => setCategory(e.target.value)}
+            aria-label="Filter by category"
+            className={select(!!f.category)}
+          >
+            <option value="">All categories</option>
+            {categories.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
 
-            <Field label="Subcategory">
-              <select
-                value={f.subcategoryId}
-                onChange={(e) => set("subcategoryId", e.target.value)}
-                className="input h-10"
-                disabled={subcategories.length === 0}
-              >
-                <option value="">All Subcategories</option>
-                <option value="__none">Not in any subcategory</option>
-                {groupChoices.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {f.category ? s.name : `${s.categoryName} › ${s.name}`}
-                  </option>
-                ))}
-              </select>
-            </Field>
+          <select
+            value={f.subcategoryId}
+            onChange={(e) => set("subcategoryId", e.target.value)}
+            aria-label="Filter by subcategory"
+            disabled={subcategories.length === 0}
+            className={select(!!f.subcategoryId)}
+          >
+            <option value="">All subcategories</option>
+            <option value="__none">Not in any subcategory</option>
+            {groupChoices.map((s) => (
+              <option key={s.id} value={s.id}>
+                {f.category ? s.name : `${s.categoryName} › ${s.name}`}
+              </option>
+            ))}
+          </select>
 
-            <Field label="Status">
-              <select
-                value={f.status}
-                onChange={(e) => set("status", e.target.value)}
-                className="input h-10"
-              >
-                <option value="">Any Status</option>
-                <option value="active">Active</option>
-                <option value="hidden">Hidden</option>
-              </select>
-            </Field>
+          <select
+            value={f.status}
+            onChange={(e) => set("status", e.target.value)}
+            aria-label="Filter by status"
+            className={select(!!f.status)}
+          >
+            <option value="">Any status</option>
+            <option value="active">Active</option>
+            <option value="hidden">Hidden</option>
+          </select>
 
-            <Field label="Stock Level">
-              <select
-                value={f.stock}
-                onChange={(e) => set("stock", e.target.value)}
-                className="input h-10"
-              >
-                <option value="">Any Stock Level</option>
-                <option value="instock">In Stock ({">"}0)</option>
-                <option value="lowstock">Low Stock (≤ 5)</option>
-                <option value="outofstock">Out of Stock (0)</option>
-              </select>
-            </Field>
+          <select
+            value={f.stock}
+            onChange={(e) => set("stock", e.target.value)}
+            aria-label="Filter by stock level"
+            className={select(!!f.stock)}
+          >
+            <option value="">Any stock level</option>
+            <option value="instock">In stock ({">"}0)</option>
+            <option value="lowstock">Low stock (≤ 5)</option>
+            <option value="outofstock">Out of stock (0)</option>
+          </select>
 
-            <Field label="Sort By">
-              <select
-                value={f.sort}
-                onChange={(e) => set("sort", e.target.value)}
-                className="input h-10"
-              >
-                <option value="newest">Newest First</option>
-                <option value="price-asc">Price: Low to High</option>
-                <option value="price-desc">Price: High to Low</option>
-                <option value="stock-asc">Stock: Low to High</option>
-                <option value="stock-desc">Stock: High to Low</option>
-              </select>
-            </Field>
-          </div>
+          <select
+            value={f.sort}
+            onChange={(e) => set("sort", e.target.value)}
+            aria-label="Sort products"
+            className={select(f.sort !== "newest")}
+          >
+            <option value="newest">Newest first</option>
+            <option value="price-asc">Price: low to high</option>
+            <option value="price-desc">Price: high to low</option>
+            <option value="stock-asc">Stock: low to high</option>
+            <option value="stock-desc">Stock: high to low</option>
+          </select>
 
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
-            <button
-              onClick={clearAll}
-              className="inline-flex items-center gap-1.5 rounded-full px-3.5 py-2 text-sm text-muted-foreground hover:bg-muted"
-            >
-              <X className="h-4 w-4" /> Clear All
-            </button>
-            <button
-              onClick={apply}
-              className="rounded-full bg-foreground px-4 py-2 text-sm font-medium text-background"
-            >
-              Apply filters
-            </button>
+          <div className="ml-auto flex items-center gap-2">
+            {(activeCount > 0 || f.q) && (
+              <MiniButton onClick={clearAll} className="h-11 sm:h-10">
+                <X className="h-3.5 w-3.5" /> Clear
+              </MiniButton>
+            )}
+            <MiniButton onClick={apply} active className="h-11 sm:h-10">
+              Apply
+            </MiniButton>
           </div>
         </div>
       )}
     </div>
-  );
-}
-
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="block">
-      <span className="mb-1.5 block text-xs uppercase tracking-wider text-muted-foreground">
-        {label}
-      </span>
-      {children}
-    </label>
   );
 }

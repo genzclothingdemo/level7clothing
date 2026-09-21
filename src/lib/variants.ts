@@ -186,6 +186,34 @@ function coverStill(product: { images: string[]; media?: MediaDTO[] }): string |
 }
 
 /**
+ * The product's own photos, in order, for a piece with no per-value imagery.
+ *
+ * Common media first (that's the curated order the admin set), then anything
+ * left in the flat `images` list, de-duplicated. Used as the card fallback so a
+ * product without variants still has something to swipe through instead of one
+ * frozen cover shot.
+ */
+function ownStills(
+  product: { images: string[]; media?: MediaDTO[] },
+  limit: number
+): string[] {
+  const out: string[] = [];
+  const push = (url: string) => {
+    if (isStill(url) && !out.includes(url)) out.push(url);
+  };
+
+  for (const m of (product.media ?? []).filter((m) => m.variantValue == null).sort(bySortOrder)) {
+    push(m.url);
+    if (out.length >= limit) return out;
+  }
+  for (const url of product.images ?? []) {
+    push(url);
+    if (out.length >= limit) return out;
+  }
+  return out;
+}
+
+/**
  * The gallery a *listing card* swipes through: exactly one preview per value of
  * the visual attribute — the same thumbnails the product page's picker shows.
  *
@@ -223,6 +251,13 @@ export function variantPreviewImages(
     if (out.length >= limit) break;
   }
   if (out.length > 0) return out;
+
+  // No visual attribute, or no value has its own photo. Rather than freezing
+  // on a single cover shot, let the card swipe through the product's own
+  // gallery — capped at 4, which is enough to show the piece from a few angles
+  // without turning a listing card into the full product gallery.
+  const own = ownStills(product, Math.min(4, limit));
+  if (own.length > 0) return own;
 
   const cover = coverStill(product);
   return cover ? [cover] : [];

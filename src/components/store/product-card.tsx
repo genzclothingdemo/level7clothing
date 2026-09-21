@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useMemo } from "react";
+import { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { Star, ChevronLeft, ChevronRight } from "lucide-react";
@@ -8,6 +8,7 @@ import { formatINR, cn } from "@/lib/utils";
 import { variantPreviewImages } from "@/lib/variants";
 import type { ProductDTO } from "@/lib/types";
 import { WhatsAppProductButton } from "./product-actions";
+import { WishlistButton } from "./wishlist-button";
 
 // ─── Badge logic ──────────────────────────────────────────────────────────────
 type BadgeKind =
@@ -89,12 +90,84 @@ export function ProductCard({
     scrollRef.current.scrollTo({ left: width * idx, behavior: "smooth" });
   }
 
+  // ── Press-and-hold preview (touch) ─────────────────────────────────────────
+  // Holding a tile cycles its photos in place, so a shopper can look through
+  // the gallery without opening the product. Desktop already has hover arrows,
+  // so this is touch-only.
+  //
+  // Two things it must not break: a long press must not also follow the card's
+  // link, and a vertical page scroll that merely *starts* on the image must
+  // still scroll rather than being captured as a hold.
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cycleTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const didHold = useRef(false);
+  const startPt = useRef<{ x: number; y: number } | null>(null);
+
+  const stopHold = useCallback(() => {
+    if (holdTimer.current) clearTimeout(holdTimer.current);
+    if (cycleTimer.current) clearInterval(cycleTimer.current);
+    holdTimer.current = null;
+    cycleTimer.current = null;
+    startPt.current = null;
+  }, []);
+
+  useEffect(() => stopHold, [stopHold]);
+
+  function handlePointerDown(e: React.PointerEvent) {
+    if (!many || e.pointerType === "mouse") return;
+    startPt.current = { x: e.clientX, y: e.clientY };
+    didHold.current = false;
+    holdTimer.current = setTimeout(() => {
+      didHold.current = true;
+      cycleTimer.current = setInterval(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        const next = (Math.round(el.scrollLeft / el.clientWidth) + 1) % images.length;
+        el.scrollTo({ left: el.clientWidth * next, behavior: "smooth" });
+      }, 800);
+    }, 350);
+  }
+
+  function handlePointerMove(e: React.PointerEvent) {
+    const start = startPt.current;
+    if (!start || didHold.current) return;
+    // Moved before the hold threshold — treat it as a scroll, not a hold.
+    if (Math.abs(e.clientX - start.x) > 8 || Math.abs(e.clientY - start.y) > 8) {
+      stopHold();
+    }
+  }
+
+  function handleClickCapture(e: React.MouseEvent) {
+    if (!didHold.current) return;
+    // Swallow the click the browser fires after a long press.
+    e.preventDefault();
+    e.stopPropagation();
+    didHold.current = false;
+  }
+
   return (
     <div className="group flex flex-col">
       {/* ── Image area (Swappable gallery) ── */}
-      <div className="card-lift relative block aspect-[4/5] overflow-hidden rounded-2xl bg-muted ring-1 ring-border/60 transition-shadow group-hover:ring-primary/25">
+      <div
+        className="card-lift relative block aspect-[4/5] overflow-hidden rounded-2xl bg-muted ring-1 ring-border/60 transition-shadow group-hover:ring-primary/25"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={stopHold}
+        onPointerCancel={stopHold}
+        onPointerLeave={stopHold}
+        onClickCapture={handleClickCapture}
+      >
         <Link href={`/product/${product.slug}`} className="absolute inset-0 z-10" aria-label={product.name} />
-        
+
+        {/* Above the z-20 gallery strip, or the scroll container swallows the
+            tap. The wishlist page tells shoppers to "tap the heart on any
+            style", so this has to exist on the tile. */}
+        <WishlistButton
+          slug={product.slug}
+          name={product.name}
+          className="absolute right-2.5 top-2.5 z-30"
+        />
+
         {images.length > 0 ? (
           <div 
             ref={scrollRef}
@@ -189,7 +262,7 @@ export function ProductCard({
       {/* ── Info area ── */}
       <div className="mt-2 flex flex-1 flex-col sm:mt-3">
         {/* Category — subtle */}
-        <p className="truncate text-[9px] uppercase tracking-widest gold-text sm:text-[10px]">
+        <p className="truncate text-[10px] uppercase tracking-widest gold-text sm:text-xs">
           {product.category}
         </p>
 

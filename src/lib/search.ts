@@ -28,3 +28,32 @@ export function searchProducts(
   const results = fuse.search(q).map((r) => r.item);
   return limit ? results.slice(0, limit) : results;
 }
+
+/**
+ * The same typo tolerance for anything that isn't a `ProductDTO` — admin
+ * tables of orders, media rows, customers.
+ *
+ * The admin panels used SQL `contains`, which is a substring test: "hoodei"
+ * found nothing, and neither did "tshirt" against "T-Shirt". Ranking in memory
+ * is fine at this catalogue's scale (tens to low thousands of rows); if a table
+ * ever outgrows that, page it in the database first and fuzzy-rank the page.
+ */
+export function fuzzyFilter<T>(
+  items: T[],
+  query: string,
+  keys: { name: string; weight?: number }[],
+  limit?: number
+): T[] {
+  const q = query.trim();
+  if (!q) return limit ? items.slice(0, limit) : items;
+
+  const fuse = new Fuse(items, {
+    includeScore: true,
+    ignoreLocation: true,
+    threshold: 0.36,
+    minMatchCharLength: 2,
+    keys,
+  });
+  const results = fuse.search(q).map((r) => r.item);
+  return limit ? results.slice(0, limit) : results;
+}

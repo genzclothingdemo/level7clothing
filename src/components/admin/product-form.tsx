@@ -3,12 +3,35 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, X, Star, Plus, Trash2, GripVertical, Video } from "lucide-react";
+import {
+  Loader2,
+  X,
+  Star,
+  Plus,
+  Trash2,
+  GripVertical,
+  Video,
+  Wand2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { createProduct, updateProduct } from "@/app/actions/admin";
 import { VariantMediaTab, type VisualGalleryState } from "@/components/admin/variant-media-tab";
+import { VariantTable, type VariantEntry } from "@/components/admin/variant-table";
+import {
+  Card,
+  Check,
+  CountBadge,
+  Field,
+  MiniButton,
+  SwitchRow,
+} from "@/components/admin/form-kit";
+import {
+  StoreDefaultChoice,
+  StoreDefaultText,
+} from "@/components/admin/store-default-field";
+import { InfoTip } from "@/components/store/info-tip";
 import { allCombinations, comboKey } from "@/lib/options";
-import { formatINR } from "@/lib/utils";
+import { formatINR, cn } from "@/lib/utils";
 import type { ProductDTO, ProductOption, ProductVideo } from "@/lib/types";
 
 type SubcategoryOption = { id: string; name: string; categoryName: string };
@@ -30,28 +53,73 @@ type Props = {
     shippingInfo: string;
     returnsInfo: string;
   };
-  /** Store-wide returnable default, so "Use store default" can say which it is. */
+  /** Store-wide returnable default, so "Store default" can say which it is. */
   returnDefault?: boolean;
 };
 
 /** Which top-level tab of the editor is showing. */
 type EditorTab = "optvar" | "pricing" | "media";
 
+type Mode = "prepaid" | "cod" | "partial" | "direct";
+
+/**
+ * The four checkout modes in plain English. The label is what the admin picks
+ * from; the tip carries the consequence, which is the part that actually needs
+ * explaining and used to sit in a paragraph nobody read.
+ */
+const MODE_COPY: { mode: Mode; label: string; tip: string }[] = [
+  {
+    mode: "prepaid",
+    label: "Pay full amount online",
+    tip: "The whole amount is taken at checkout by UPI, card or net banking. Nothing is owed on delivery, and the parcel goes out as soon as you pack it.",
+  },
+  {
+    mode: "cod",
+    label: "Cash on delivery",
+    tip: "The customer pays the courier at the door — nothing is taken online. Available on serviceable pin codes only, and it carries the usual risk of a refused parcel.",
+  },
+  {
+    mode: "partial",
+    label: "Pay part now, rest on delivery",
+    tip: "A percentage is taken online to confirm the order and the balance is collected by the courier. Set that percentage below. It keeps COD convenience while filtering out unserious orders.",
+  },
+  {
+    mode: "direct",
+    label: "No online payment — arrange directly",
+    tip: "Checkout records the order without taking any money; you settle it with the customer yourself (UPI, bank transfer, in person). Used for made-to-order work where the amount is agreed after a conversation. Nothing is refundable through the site.",
+  },
+];
+
+const EMPTY_ENTRY: VariantEntry = { available: true, price: "", stock: "" };
+
 /**
  * ProductForm — the admin product editor.
  *
- * A persistent section (Basic Info, Organisation, Checkout modes, Shipping) sits
- * above three top-level tabs: "Options & Variants" (the option builder +
- * combination generation), "Price & Stock" (base price / discount / stock plus
- * the per-combination pricing table) and "Media" (the gallery manager). Pricing
- * uses a "Discount %" model (compareAtPrice is derived from it) and, when
- * variants exist, the product price is the minimum available variant price.
+ * A persistent section (Product details, Organisation, Made to order, Checkout,
+ * Shipping, Product page info) sits above three tabs: "Options & Variants" (the
+ * option builder), "Price & Stock" (base price / discount / stock plus the
+ * per-combination table) and "Media" (the gallery manager). Pricing uses a
+ * "Discount %" model (compareAtPrice is derived from it) and, when variants
+ * exist, the product price is the minimum available variant price.
  *
  * Photos are managed ONLY in the Media tab. The details form used to carry its
  * own "Images" picker writing to `Product.images`, which meant two systems
  * feeding one gallery and no way to tell which one won. `Product.images` is now
  * derived on save (union of every gallery) and kept purely as the flat list that
  * OG tags / JSON-LD / listing cards read.
+ *
+ * ── UX rules this file is expected to keep ──
+ *
+ * 1. **Explanation goes in an `InfoTip`, never a paragraph.** The editor is a
+ *    form, not a manual; a wall of helper text under every field is why nothing
+ *    was read. The tip is the storefront's — portalled, tap-driven, Escape-
+ *    closing. Do not write a second one.
+ * 2. **Nullable "inherit from the store" columns get an explicit two-position
+ *    control** (see store-default-field.tsx). Returning to "Store default" must
+ *    write `null`, not `""` — they are different rows in the database.
+ * 3. **Nothing may overflow 320px.** Tables scroll inside their own box, the tab
+ *    bar scrolls horizontally, controls stack. Fields keep `.input`, which is
+ *    raised to 16px on touch so iOS does not zoom the page on focus.
  */
 export function ProductForm({
   product,
@@ -75,6 +143,15 @@ export function ProductForm({
   // Which top-level tab is visible.
   const [tab, setTab] = useState<EditorTab>("optvar");
 
+  // `isCustomisable` / `customisationNote` are real Product columns, and both
+  // the edit and the duplicate page hand the whole row through. Read through a
+  // widening cast rather than straight off ProductDTO: the editor is the only
+  // writer of these two, and it should not stop compiling over the shape of a
+  // read model it does not own.
+  const extras = product as
+    | (ProductDTO & { isCustomisable?: boolean | null; customisationNote?: string | null })
+    | undefined;
+
   // Derive the "Discount %" field from an existing compare-at price:
   // discount = compareAtPrice > price ? round((cap - price) / cap * 100) : 0.
   const initialDiscount = (() => {
@@ -97,9 +174,16 @@ export function ProductForm({
     isFeatured: product?.isFeatured ?? false,
     isActive: product?.isActive ?? true,
   });
+
+  // Made-to-order / personalised piece, and what the buyer has to supply.
+  const [isCustomisable, setIsCustomisable] = useState<boolean>(
+    extras?.isCustomisable ?? false
+  );
+  const [customisationNote, setCustomisationNote] = useState<string>(
+    extras?.customisationNote ?? ""
+  );
+
   // Which checkout modes this product allows.
-  const ALL_MODES = ["prepaid", "cod", "partial", "direct"] as const;
-  type Mode = (typeof ALL_MODES)[number];
   const [paymentModes, setPaymentModes] = useState<Mode[]>(
     (product?.paymentModes as Mode[]) ?? ["prepaid", "cod"]
   );
@@ -126,6 +210,7 @@ export function ProductForm({
       prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]
     );
   }
+
   // Product-page info blocks. null = inherit the store default; a string (even
   // an empty one) is this product's own copy.
   const [info, setInfo] = useState({
@@ -159,8 +244,7 @@ export function ProductForm({
     product?.propertyModules?.images?.[0] ?? ""
   );
 
-  // ---- Variants (Flipkart-style: price / stock / availability per combo) ----
-  type VariantEntry = { available: boolean; price: string; stock: string };
+  // ---- Variants (price / stock / availability per combo) ----
   const [useVariants, setUseVariants] = useState<boolean>(
     (product?.variants?.length ?? 0) > 0 ||
       (product?.variantPrices?.length ?? 0) > 0
@@ -177,7 +261,7 @@ export function ProductForm({
           map[comboKey(v.combo)] = {
             available: v.available,
             // Preserve an "inherit base" (blank) price so the per-row
-            // "Use Product Price" toggle round-trips.
+            // "Base price" toggle round-trips.
             price: rawPrice === "" || rawPrice == null ? "" : String(rawPrice),
             stock: rawStock === "" || rawStock == null ? "" : String(rawStock),
           };
@@ -196,21 +280,46 @@ export function ProductForm({
     }
   );
 
-  // Per-option filter for the variant table (option name → value, "" = all).
-  const [variantFilter, setVariantFilter] = useState<Record<string, string>>({});
-  // Bulk-update inputs applied to every currently-filtered row.
-  const [bulk, setBulk] = useState<{ price: string; stock: string; available: string }>({
-    price: "",
-    stock: "",
-    available: "",
-  });
-
   // ---- Visual Gallery state (Media tab) ----
   // Initialise from existing variants so editing an existing product keeps its images.
   const [visualGallery, setVisualGallery] = useState<VisualGalleryState>(() => {
     const galleries: Record<string, string[]> = {};
     const previews: Record<string, string> = {};
     const commonSet = new Set<string>();
+
+    // Preferred path: the persisted ProductImage rows. `slot` + `variantValue`
+    // + `sortOrder` are exactly what syncProductImages() writes, so reading
+    // them back round-trips losslessly.
+    //
+    // The legacy path below reconstructs from the `Product.variants` JSON
+    // mirror instead, where each variant's `images` already has the common
+    // photos appended. That put the common shots under every variant value,
+    // left Common empty, and the next save deleted the slot="common" rows —
+    // and it dropped a hand-picked preview, because it always took images[0].
+    const rows = product?.media ?? [];
+    if (rows.length > 0) {
+      const ordered = [...rows].sort(
+        (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0)
+      );
+      for (const r of ordered) {
+        if (r.slot === "common") {
+          commonSet.add(r.url);
+          continue;
+        }
+        const val = r.variantValue;
+        if (!val) continue;
+        if (r.slot === "preview") {
+          // Kept out of `galleries` on purpose: the editor treats the preview
+          // as its own field, and folding it in would silently add it to the
+          // gallery on the next save.
+          if (!previews[val]) previews[val] = r.url;
+        } else if (r.slot === "gallery") {
+          galleries[val] = galleries[val] ?? [];
+          if (!galleries[val].includes(r.url)) galleries[val].push(r.url);
+        }
+      }
+      return { galleries, previews, common: [...commonSet] };
+    }
     // Galleries are keyed by the image-driving option's value. Use the stored
     // choice (propertyModules.images) when present, else the first option.
     const imgOpt =
@@ -236,7 +345,7 @@ export function ProductForm({
     return { galleries, previews, common: [...commonSet] };
   });
 
-  // Cleaned option matrix — the shape both `combos` and the filter dropdowns need.
+  // Cleaned option matrix — the shape both `combos` and the variant table need.
   const optionMatrix = useMemo(
     () =>
       options
@@ -258,15 +367,6 @@ export function ProductForm({
   // All combinations of the current options (recomputed as options change).
   const combos = useMemo(() => allCombinations(optionMatrix), [optionMatrix]);
 
-  // Combos currently visible in the table after the per-option filter.
-  const filteredCombos = useMemo(
-    () =>
-      combos.filter((c) =>
-        Object.entries(variantFilter).every(([name, val]) => !val || c[name] === val)
-      ),
-    [combos, variantFilter]
-  );
-
   const base = Number(form.price || 0);
 
   // Product price = MIN of the available variant prices when variants exist,
@@ -274,11 +374,10 @@ export function ProductForm({
   const variantMinPrice = useMemo(() => {
     if (!useVariants || combos.length === 0) return base;
     const prices = combos
-      .map((c) => variantMap[comboKey(c)] ?? { available: true, price: "", stock: "" })
+      .map((c) => variantMap[comboKey(c)] ?? EMPTY_ENTRY)
       .filter((v) => v.available)
       .map((v) => (v.price === "" ? base : Number(v.price) || 0));
     return prices.length ? Math.min(...prices) : base;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [useVariants, combos, variantMap, base]);
 
   const hasVariants = useVariants && combos.length > 0;
@@ -303,36 +402,33 @@ export function ProductForm({
     );
   }, [visualValues, combos, imageDrivingOption, variantMap, hasVariants]);
 
+  // Total photo count, shown on the Media tab so an empty gallery is visible
+  // without opening the tab.
+  const photoCount = useMemo(() => {
+    const all = new Set(visualGallery.common);
+    for (const imgs of Object.values(visualGallery.galleries)) {
+      for (const img of imgs) all.add(img);
+    }
+    return all.size;
+  }, [visualGallery]);
+
   function variantOf(key: string): VariantEntry {
-    return variantMap[key] ?? { available: true, price: "", stock: "" };
-  }
-  function setVariantField(key: string, patch: Partial<VariantEntry>) {
-    setVariantMap((prev) => ({
-      ...prev,
-      [key]: { ...variantOf(key), ...patch },
-    }));
+    return variantMap[key] ?? EMPTY_ENTRY;
   }
 
-  // Apply the bulk-update inputs to every currently-filtered combo.
-  function applyBulk() {
-    const patch: Partial<VariantEntry> = {};
-    if (bulk.price !== "") patch.price = bulk.price;
-    if (bulk.stock !== "") patch.stock = bulk.stock;
-    if (bulk.available === "yes") patch.available = true;
-    if (bulk.available === "no") patch.available = false;
-    if (Object.keys(patch).length === 0) {
-      toast.error("Enter a price, stock or availability to apply.");
-      return;
-    }
+  /**
+   * One patch across any number of rows, in a single state update — the bulk
+   * editor would otherwise queue N updates and re-render the table N times.
+   */
+  function patchVariants(keys: string[], patch: Partial<VariantEntry>) {
+    if (keys.length === 0) return;
     setVariantMap((prev) => {
       const next = { ...prev };
-      for (const c of filteredCombos) {
-        const key = comboKey(c);
-        next[key] = { ...(next[key] ?? { available: true, price: "", stock: "" }), ...patch };
+      for (const key of keys) {
+        next[key] = { ...(next[key] ?? EMPTY_ENTRY), ...patch };
       }
       return next;
     });
-    toast.success(`Updated ${filteredCombos.length} combination${filteredCombos.length !== 1 ? "s" : ""}.`);
   }
 
   // ---- Options CRUD ----
@@ -609,6 +705,11 @@ export function ProductForm({
       media: cleanMedia,
       isFeatured: form.isFeatured,
       isActive: form.isActive,
+      isCustomisable,
+      // The note only means anything for a made-to-order piece; a leftover note
+      // on a switched-off product would show on the storefront as an instruction
+      // for details nobody is being asked for.
+      customisationNote: isCustomisable ? customisationNote.trim() || null : null,
       paymentModes: (paymentModes.length ? paymentModes : ["prepaid", "cod"]) as (
         | "prepaid"
         | "cod"
@@ -654,175 +755,72 @@ export function ProductForm({
     }
   }
 
-  const TABS: { id: EditorTab; label: string }[] = [
-    { id: "optvar", label: "Options & Variants" },
+  const TABS: { id: EditorTab; label: string; count?: number }[] = [
+    { id: "optvar", label: "Options & Variants", count: combos.length || undefined },
     { id: "pricing", label: "Price & Stock" },
-    { id: "media", label: "Media" },
+    { id: "media", label: "Media", count: photoCount || undefined },
   ];
 
   return (
-    <form onSubmit={onSubmit} className="space-y-6">
-      {/* ── Persistent section — Basic Info, Organisation, Images, Checkout
-          modes and Shipping stay visible above the tab bar. ── */}
-      <div className="grid gap-6 lg:grid-cols-2">
-          <Card title="Product details">
-            <label className="block">
-              <span className="label">Name *</span>
+    <form onSubmit={onSubmit} className="space-y-4 sm:space-y-6">
+      {/* ── Persistent section — stays visible above the tab bar. ── */}
+      <div className="grid gap-4 sm:gap-6 lg:grid-cols-2">
+        <Card title="Product details">
+          <Field label="Name" required>
+            {(id) => (
               <input
+                id={id}
                 value={form.name}
                 onChange={(e) => set("name", e.target.value)}
                 className="input"
                 placeholder="LEVEL7 Core Unisex Oversized T-Shirt"
               />
-            </label>
-            <label className="block">
-              <span className="label">Description *</span>
+            )}
+          </Field>
+
+          <Field
+            label="Description"
+            required
+            tip={
+              <>
+                Shown as <b>Product Details</b> on the product page and unique to
+                this piece. Materials, shipping and returns are separate blocks
+                further down — don&apos;t repeat them here.
+              </>
+            }
+          >
+            {(id) => (
               <textarea
+                id={id}
                 rows={5}
                 value={form.description}
                 onChange={(e) => set("description", e.target.value)}
-                className="input resize-none"
+                className="input resize-y"
               />
-              <span className="mt-1 block text-xs text-muted-foreground">
-                Shown as <b>Product Details</b> on the product page — unique to
-                this piece. The other info sections come from Settings &gt;
-                Product defaults unless you override them below.
-              </span>
-            </label>
-            <label className="block">
-              <span className="label">Tags (comma separated)</span>
+            )}
+          </Field>
+
+          <Field
+            label="Tags"
+            tip="Comma separated. Tags feed search and the 'you may also like' rail — colours, occasions and materials work better than repeating the product name."
+          >
+            {(id) => (
               <input
+                id={id}
                 value={form.tags}
                 onChange={(e) => set("tags", e.target.value)}
                 className="input"
-                placeholder="ocean, blue, gift"
+                placeholder="oversized, black, streetwear"
               />
-            </label>
-          </Card>
+            )}
+          </Field>
+        </Card>
 
-          <div className="lg:col-span-2">
-            <Card title="Product information">
-              <p className="text-xs text-muted-foreground">
-                The info sections below the Buy button. Every product uses the
-                store-wide copy from <b>Settings &gt; Product defaults</b> — only
-                switch a block to custom when this piece genuinely differs (a
-                preservation order that ships in 20 days, a non-returnable
-                customised piece). One point per line.
-              </p>
-              <label className="block max-w-sm">
-                <span className="label">Can this be returned?</span>
-                <select
-                  value={returnable === null ? "inherit" : returnable ? "yes" : "no"}
-                  onChange={(e) =>
-                    setReturnable(
-                      e.target.value === "inherit"
-                        ? null
-                        : e.target.value === "yes"
-                    )
-                  }
-                  className="input"
-                >
-                  <option value="inherit">
-                    Use store default
-                    {returnDefault === undefined
-                      ? ""
-                      : ` — currently ${returnDefault ? "returnable" : "not returnable"}`}
-                  </option>
-                  <option value="yes">Yes — returnable</option>
-                  <option value="no">No — made to order, not returnable</option>
-                </select>
-                <span className="mt-1 block text-xs text-muted-foreground">
-                  Set in <b>Returns</b> for the whole store. A &quot;No&quot; here
-                  hides the return request form for this piece only.
-                </span>
-              </label>
-
-              <div className="grid gap-4 md:grid-cols-3">
-                <InfoOverride
-                  label="Materials & Care"
-                  value={info.materialsCare}
-                  fallback={infoDefaults?.materialsCare ?? ""}
-                  onChange={(v) => setInfoField("materialsCare", v)}
-                />
-                <InfoOverride
-                  label="Shipping & Delivery"
-                  value={info.shippingInfo}
-                  fallback={infoDefaults?.shippingInfo ?? ""}
-                  onChange={(v) => setInfoField("shippingInfo", v)}
-                />
-                <InfoOverride
-                  label="Returns & Refunds"
-                  value={info.returnsInfo}
-                  fallback={infoDefaults?.returnsInfo ?? ""}
-                  onChange={(v) => setInfoField("returnsInfo", v)}
-                />
-              </div>
-
-              {/* ── Video links ── */}
-              <div className="border-t border-border pt-4">
-                <p className="flex items-center gap-2 text-sm font-medium">
-                  <Video className="h-4 w-4" /> Video links
-                </p>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  Customer reviews, the making process, packaging — paste the link
-                  straight from YouTube or Instagram and give it a title. They show
-                  as a scrollable <b>Video previews</b> row under the info sections
-                  on the product page. Shorts and Reels are framed portrait
-                  automatically.
-                </p>
-
-                {videos.length > 0 && (
-                  <div className="mt-3 space-y-2">
-                    {videos.map((v, i) => (
-                      <div key={i} className="flex flex-wrap items-start gap-2">
-                        <input
-                          value={v.title}
-                          onChange={(e) => setVideoField(i, "title", e.target.value)}
-                          className="input h-9 w-full sm:w-[13rem]"
-                          placeholder="Title (e.g. Packaging walkthrough)"
-                        />
-                        <input
-                          value={v.url}
-                          onChange={(e) => setVideoField(i, "url", e.target.value)}
-                          className="input h-9 flex-1"
-                          placeholder="https://youtube.com/… or https://instagram.com/reel/…"
-                        />
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setVideos((prev) => prev.filter((_, idx) => idx !== i))
-                          }
-                          className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-danger/10 hover:text-danger"
-                          title="Remove this video"
-                          aria-label="Remove video"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => setVideos((prev) => [...prev, { title: "", url: "" }])}
-                  className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted"
-                >
-                  <Plus className="h-3.5 w-3.5" /> Add video link
-                </button>
-                {videos.length === 0 && (
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    No videos — the Video previews row is hidden on this product.
-                  </p>
-                )}
-              </div>
-            </Card>
-          </div>
-
-          <Card title="Organisation">
-            <label className="block">
-              <span className="label">Category *</span>
+        <Card title="Organisation">
+          <Field label="Category" required>
+            {(id) => (
               <select
+                id={id}
                 value={form.category}
                 onChange={(e) => onCategoryChange(e.target.value)}
                 className="input"
@@ -833,11 +831,22 @@ export function ProductForm({
                   </option>
                 ))}
               </select>
-            </label>
+            )}
+          </Field>
 
-            <label className="block">
-              <span className="label">Subcategory (optional)</span>
+          <Field
+            label="Subcategory"
+            tip={
+              <>
+                Groups this piece under something like <b>Oversized Tees</b>.
+                Leave it as None for a one-off that should appear on the category
+                page directly.
+              </>
+            }
+          >
+            {(id) => (
               <select
+                id={id}
                 value={form.subcategoryId}
                 onChange={(e) => set("subcategoryId", e.target.value)}
                 className="input"
@@ -854,324 +863,479 @@ export function ProductForm({
                   </option>
                 ))}
               </select>
-              <span className="mt-1 block text-xs text-muted-foreground">
-                Group this product under e.g. <b>Oversized Tees</b>. Leave as
-                None for a one-off that should show on the category page directly.
-              </span>
-            </label>
+            )}
+          </Field>
 
-            <label className="block">
-              <span className="label">Secondary category (optional)</span>
+          <Field
+            label="Secondary category"
+            tip="Lists this piece under a second category as well — useful for something that is both a tee and a gift item. It still belongs to its primary category for breadcrumbs and SEO."
+          >
+            {(id) => (
               <select
+                id={id}
                 value={form.secondaryCategory}
                 onChange={(e) => set("secondaryCategory", e.target.value)}
                 className="input"
               >
                 <option value="">None</option>
-                {categories.filter((c) => c !== form.category).map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
+                {categories
+                  .filter((c) => c !== form.category)
+                  .map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
               </select>
-              <span className="mt-1 block text-xs text-muted-foreground">
-                Also list this piece under a second category (e.g. a gift item).
-              </span>
-            </label>
+            )}
+          </Field>
 
-            <Toggle
+          <div className="space-y-2 pt-1">
+            <SwitchRow
               label="Featured on homepage"
-              icon={<Star className="h-4 w-4" />}
+              icon={<Star className="h-4 w-4 shrink-0 text-muted-foreground" />}
+              tip="Featured pieces fill the homepage rail. Six or so is the sweet spot — everything featured is nothing featured."
               checked={form.isFeatured}
               onChange={(v) => set("isFeatured", v)}
             />
-            <Toggle
-              label="Active (visible in shop)"
+            <SwitchRow
+              label="Visible in shop"
+              tip="Off hides the product everywhere on the storefront — shop grid, search, sitemap — without deleting it. Existing orders and reviews are untouched."
               checked={form.isActive}
               onChange={(v) => set("isActive", v)}
             />
-          </Card>
+          </div>
+        </Card>
 
+        {/* ── Made to order ── */}
+        <Card title="Made to order">
+          <SwitchRow
+            label="This is a made-to-order / customised product"
+            icon={<Wand2 className="h-4 w-4 shrink-0 text-muted-foreground" />}
+            tip={
+              <>
+                Turn this on for a piece produced after the order is placed —
+                personalised names, numbers, made-to-measure. The product page
+                says so, the order is flagged for you with the customer&apos;s
+                details, and you will usually want to set Returns below to
+                &ldquo;Not returnable&rdquo; and offer the &ldquo;arrange
+                directly&rdquo; checkout mode.
+              </>
+            }
+            checked={isCustomisable}
+            onChange={setIsCustomisable}
+          />
 
-          <Card title="Checkout modes">
-            <p className="text-xs text-muted-foreground">
-              Choose which payment options this product offers at checkout.
-              At least one must be selected.
-            </p>
-            {([
-              { mode: "prepaid" as Mode, label: "Prepaid — Pay Online (full amount)" },
-              { mode: "cod" as Mode, label: "Cash on Delivery" },
-              { mode: "partial" as Mode, label: "Advance Payment (advance online + COD)" },
-              { mode: "direct" as Mode, label: "Customised Order (pay to owner, non-refundable)" },
-            ] as { mode: Mode; label: string }[]).map(({ mode, label }) => (
-              <label key={mode} className="flex items-center gap-3 text-sm cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={paymentModes.includes(mode)}
-                  onChange={() => toggleMode(mode)}
-                  className="h-4 w-4 accent-[var(--accent)]"
+          {isCustomisable && (
+            <Field
+              label="What should the customer tell you?"
+              tip={
+                <>
+                  Shown next to a required note box on the product page and
+                  copied onto the order. Be specific and ask for everything at
+                  once — every missing detail is a message you have to chase.
+                  One request per line.
+                </>
+              }
+              hint={
+                customisationNote.trim()
+                  ? undefined
+                  : "Leave empty for a free-form note box with no prompt."
+              }
+            >
+              {(id) => (
+                <textarea
+                  id={id}
+                  rows={3}
+                  value={customisationNote}
+                  onChange={(e) => setCustomisationNote(e.target.value)}
+                  className="input resize-y"
+                  placeholder={"Name to print (max 12 characters)\nJersey number\nChest measurement in inches"}
                 />
-                {label}
-              </label>
+              )}
+            </Field>
+          )}
+        </Card>
+
+        {/* ── Checkout ── */}
+        <Card
+          title="Checkout"
+          tip="Which ways a customer may pay for this piece. At least one must be on, and the store-wide switches in Settings still apply on top of these — a mode turned off there never appears, however it is set here."
+        >
+          <div className="space-y-2">
+            {MODE_COPY.map(({ mode, label, tip }) => (
+              <ModeRow
+                key={mode}
+                label={label}
+                tip={tip}
+                checked={paymentModes.includes(mode)}
+                onChange={() => toggleMode(mode)}
+              />
             ))}
-            {paymentModes.includes("partial") && (
-              <label className="block">
-                <span className="label">Advance % (for partial mode)</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={99}
-                  value={advancePercent}
-                  onChange={(e) => setAdvancePercent(e.target.value)}
-                  className="input"
-                  placeholder="e.g. 30  (30% online, 70% on delivery)"
-                />
-              </label>
-            )}
-          </Card>
+          </div>
 
-          <div className="lg:col-span-2">
-            <Card title="Shipping settings & Parcel size">
-              <p className="text-xs text-muted-foreground">
-                Configure how shipping is charged for this product.
-                Used when creating a NimbusPost shipment or calculating fees at checkout.
-              </p>
+          {paymentModes.length === 0 && (
+            <p className="rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger">
+              Nothing is selected — checkout will fall back to online + cash on
+              delivery.
+            </p>
+          )}
 
-              <label className="block mb-4">
-                <span className="label">Shipping Type</span>
-                <select
-                  value={shipping.shippingType}
-                  onChange={(e) => setShippingField("shippingType", e.target.value)}
-                  className="input bg-card"
-                >
-                  <option value="free">Free Shipping (Always ₹0)</option>
-                  <option value="fixed">Fixed Shipping (Flat rate per qty)</option>
-                  <option value="nimbus">NimbusAPI + Markup (Dynamic calculation)</option>
-                </select>
-              </label>
+          {paymentModes.includes("partial") && (
+            <Field
+              label="Advance taken online"
+              tip="The share collected at checkout; the courier collects the rest. 20–30% is the usual range — enough to confirm intent without being a second full checkout."
+            >
+              {(id) => (
+                <div className="relative max-w-[10rem]">
+                  <input
+                    id={id}
+                    type="number"
+                    min={1}
+                    max={99}
+                    value={advancePercent}
+                    onChange={(e) => setAdvancePercent(e.target.value)}
+                    className="input pr-8"
+                    placeholder="30"
+                  />
+                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
+                    %
+                  </span>
+                </div>
+              )}
+            </Field>
+          )}
+        </Card>
+
+        {/* ── Shipping ── */}
+        <div className="min-w-0 lg:col-span-2">
+          <Card
+            title="Shipping"
+            tip="How postage is charged for this piece, and the parcel it ships in. Free shipping skips the courier rate call entirely, so a courier outage cannot block checkout."
+          >
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Shipping charge">
+                {(id) => (
+                  <select
+                    id={id}
+                    value={shipping.shippingType}
+                    onChange={(e) => setShippingField("shippingType", e.target.value)}
+                    className="input"
+                  >
+                    <option value="free">Free — customer pays ₹0</option>
+                    <option value="fixed">Flat rate per item</option>
+                    <option value="nimbus">Live courier rate + markup</option>
+                  </select>
+                )}
+              </Field>
 
               {shipping.shippingType === "fixed" && (
-                <label className="block mb-4">
-                  <span className="label">Fixed Shipping Fee (₹ per qty)</span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={shipping.shippingFee}
-                    onChange={(e) => setShippingField("shippingFee", e.target.value)}
-                    className="input"
-                  />
-                </label>
+                <Field
+                  label="Flat rate (₹ per item)"
+                  tip="Charged once per unit, so two of this piece is twice the fee."
+                >
+                  {(id) => (
+                    <input
+                      id={id}
+                      type="number"
+                      min={0}
+                      value={shipping.shippingFee}
+                      onChange={(e) => setShippingField("shippingFee", e.target.value)}
+                      className="input"
+                    />
+                  )}
+                </Field>
               )}
 
               {shipping.shippingType === "nimbus" && (
-                <label className="block mb-4">
-                  <span className="label">Shipping Markup (₹ added to API rate per qty)</span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={shipping.shippingMarkup}
-                    onChange={(e) => setShippingField("shippingMarkup", e.target.value)}
-                    className="input"
-                  />
-                </label>
+                <Field
+                  label="Markup (₹ per item)"
+                  tip="Added on top of whatever NimbusPost quotes for the destination pin code, per unit. Covers packaging and the handling you don't want to itemise."
+                >
+                  {(id) => (
+                    <input
+                      id={id}
+                      type="number"
+                      min={0}
+                      value={shipping.shippingMarkup}
+                      onChange={(e) => setShippingField("shippingMarkup", e.target.value)}
+                      className="input"
+                    />
+                  )}
+                </Field>
               )}
+            </div>
 
-              <p className="text-xs text-muted-foreground mb-2 mt-4">
-                Dimensions and weight. Weight is per unit (multiplied by quantity).
-              </p>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="block">
-                  <span className="label">Weight (grams)</span>
-                  <input
-                    type="number"
-                    min={1}
-                    value={parcel.weightGrams}
-                    onChange={(e) => setParcelField("weightGrams", e.target.value)}
-                    className="input"
-                    placeholder="e.g. 500"
-                  />
-                </label>
-                <label className="block">
-                  <span className="label">Length (cm)</span>
-                  <input
-                    type="number"
-                    min={1}
-                    value={parcel.lengthCm}
-                    onChange={(e) => setParcelField("lengthCm", e.target.value)}
-                    className="input"
-                    placeholder="e.g. 15"
-                  />
-                </label>
-                <label className="block">
-                  <span className="label">Breadth (cm)</span>
-                  <input
-                    type="number"
-                    min={1}
-                    value={parcel.breadthCm}
-                    onChange={(e) => setParcelField("breadthCm", e.target.value)}
-                    className="input"
-                    placeholder="e.g. 15"
-                  />
-                </label>
-                <label className="block">
-                  <span className="label">Height (cm)</span>
-                  <input
-                    type="number"
-                    min={1}
-                    value={parcel.heightCm}
-                    onChange={(e) => setParcelField("heightCm", e.target.value)}
-                    className="input"
-                    placeholder="e.g. 10"
-                  />
-                </label>
+            <div className="border-t border-border pt-4">
+              <div className="mb-3 flex items-center gap-1">
+                <h3 className="text-sm font-medium">Parcel size</h3>
+                <InfoTip term="Parcel size">
+                  Per unit, and sent to the courier for the AWB. Couriers bill the
+                  greater of the real weight and length × breadth × height ÷ 5000,
+                  so a light but bulky parcel is charged as a heavy one. A tee is
+                  about 300 g at 30×24×3 cm; a hoodie 750 g at 33×26×6 cm.
+                </InfoTip>
               </div>
-            </Card>
-          </div>
-        </div>
-
-      {/* ── Tab bar ── */}
-      <div className="flex flex-wrap gap-1 border-b border-border">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className={`-mb-px rounded-t-lg border-b-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-              tab === t.id
-                ? "border-accent text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {/* ── Price & Stock ── */}
-      {tab === "pricing" && (
-        <div className="grid gap-6 lg:grid-cols-2">
-          <Card title="Pricing & stock">
-            <label className="block">
-              <span className="label">Price (₹) *</span>
-              <input
-                type="number"
-                min={0}
-                value={form.price}
-                onChange={(e) => set("price", e.target.value)}
-                className="input"
-              />
-              <span className="mt-1 block text-xs text-muted-foreground">
-                {hasVariants
-                  ? "Base price — inherited by any variant set to \"Use Product Price\"."
-                  : "The product's selling price."}
-              </span>
-            </label>
-
-            {hasVariants && (
-              <div className="rounded-xl border border-border bg-muted/40 px-4 py-3">
-                <span className="label">Product price (from variants)</span>
-                <p className="text-lg font-semibold">{formatINR(effectivePrice)}</p>
-                <span className="mt-0.5 block text-xs text-muted-foreground">
-                  Lowest price across available combinations — shown to shoppers as
-                  the &ldquo;from&rdquo; price.
-                </span>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <Field label="Weight (g)">
+                  {(id) => (
+                    <input
+                      id={id}
+                      type="number"
+                      min={1}
+                      value={parcel.weightGrams}
+                      onChange={(e) => setParcelField("weightGrams", e.target.value)}
+                      className="input"
+                      placeholder="300"
+                    />
+                  )}
+                </Field>
+                <Field label="Length (cm)">
+                  {(id) => (
+                    <input
+                      id={id}
+                      type="number"
+                      min={1}
+                      value={parcel.lengthCm}
+                      onChange={(e) => setParcelField("lengthCm", e.target.value)}
+                      className="input"
+                      placeholder="30"
+                    />
+                  )}
+                </Field>
+                <Field label="Breadth (cm)">
+                  {(id) => (
+                    <input
+                      id={id}
+                      type="number"
+                      min={1}
+                      value={parcel.breadthCm}
+                      onChange={(e) => setParcelField("breadthCm", e.target.value)}
+                      className="input"
+                      placeholder="24"
+                    />
+                  )}
+                </Field>
+                <Field label="Height (cm)">
+                  {(id) => (
+                    <input
+                      id={id}
+                      type="number"
+                      min={1}
+                      value={parcel.heightCm}
+                      onChange={(e) => setParcelField("heightCm", e.target.value)}
+                      className="input"
+                      placeholder="3"
+                    />
+                  )}
+                </Field>
               </div>
-            )}
-
-            <label className="block">
-              <span className="label">Discount %</span>
-              <div className="relative">
-                <input
-                  type="number"
-                  min={0}
-                  max={99}
-                  value={form.discount}
-                  onChange={(e) => set("discount", e.target.value)}
-                  className="input pr-8"
-                  placeholder="0"
-                />
-                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
-                  %
-                </span>
-              </div>
-              <span className="mt-1 block text-xs text-muted-foreground">
-                Shows a &ldquo;Save X%&rdquo; badge. We store the implied original
-                price ({formatINR(effectivePrice)} at{" "}
-                {Math.min(99, Math.max(0, Number(form.discount) || 0))}% off ={" "}
-                {(() => {
-                  const p = Math.max(0, Math.round(effectivePrice));
-                  const d = Math.min(99, Math.max(0, Number(form.discount) || 0));
-                  return formatINR(d > 0 ? Math.round(p / (1 - d / 100)) : p);
-                })()}
-                ). Leave 0 for no discount.
-              </span>
-            </label>
-
-            <label className="block">
-              <span className="label">Stock *</span>
-              <input
-                type="number"
-                min={0}
-                value={form.stock}
-                onChange={(e) => set("stock", e.target.value)}
-                className="input"
-              />
-              {hasVariants && (
-                <span className="mt-1 block text-xs text-muted-foreground">
-                  Default stock — variants with a blank stock inherit this number.
-                </span>
-              )}
-            </label>
+            </div>
           </Card>
         </div>
-      )}
+
+        {/* ── Product page info ── */}
+        <div className="min-w-0 lg:col-span-2">
+          <Card
+            title="Product page info"
+            tip={
+              <>
+                The blocks under the Buy button. Each one either inherits the
+                store-wide copy from <b>Settings &gt; Product defaults</b> or
+                carries its own. Inheriting is the right answer for almost every
+                piece — switch to Custom only where this one genuinely differs.
+              </>
+            }
+          >
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <StoreDefaultChoice
+                label="Returns"
+                tip="Whether this piece can be returned at all. A 'Not returnable' answer hides the return request form for this product only — the usual reason is personalised work that cannot be resold."
+                value={returnable}
+                fallback={returnDefault}
+                fallbackLabel={
+                  returnDefault === undefined
+                    ? "the store setting"
+                    : returnDefault
+                      ? "returnable"
+                      : "not returnable"
+                }
+                onChange={setReturnable}
+                options={{ yes: "Returnable", no: "Not returnable" }}
+              />
+              <StoreDefaultText
+                label="Materials & Care"
+                tip="Fabric, GSM, fit and washing instructions. One point per line; each line becomes a bullet on the product page."
+                value={info.materialsCare}
+                fallback={infoDefaults?.materialsCare ?? ""}
+                onChange={(v) => setInfoField("materialsCare", v)}
+              />
+              <StoreDefaultText
+                label="Shipping & Delivery"
+                tip="Dispatch and delivery expectations. Override it for anything slower than usual — a made-to-order piece that takes three weeks belongs here, not in a surprise email."
+                value={info.shippingInfo}
+                fallback={infoDefaults?.shippingInfo ?? ""}
+                onChange={(v) => setInfoField("shippingInfo", v)}
+              />
+              <StoreDefaultText
+                label="Returns & Refunds"
+                tip="The wording shoppers read before buying. This is copy only — whether a return can actually be raised is the Returns switch to the left."
+                value={info.returnsInfo}
+                fallback={infoDefaults?.returnsInfo ?? ""}
+                onChange={(v) => setInfoField("returnsInfo", v)}
+              />
+            </div>
+
+            {/* ── Video links ── */}
+            <div className="border-t border-border pt-4">
+              <div className="mb-3 flex flex-wrap items-center gap-1">
+                <Video className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <h3 className="text-sm font-medium">Video links</h3>
+                <InfoTip term="Video links">
+                  Paste a YouTube or Instagram link and give it a title — reviews,
+                  the making process, packaging. They render as a scrollable
+                  &ldquo;Video previews&rdquo; row under the info blocks. Shorts
+                  and Reels are framed portrait automatically. Leave it empty and
+                  the row is hidden.
+                </InfoTip>
+                {videos.length > 0 && <CountBadge>{videos.length}</CountBadge>}
+              </div>
+
+              {videos.length > 0 && (
+                <div className="mb-3 space-y-2">
+                  {videos.map((v, i) => (
+                    <div key={i} className="flex flex-wrap items-center gap-2">
+                      <input
+                        value={v.title}
+                        onChange={(e) => setVideoField(i, "title", e.target.value)}
+                        className="input h-11 w-full min-w-0 sm:h-10 sm:w-[13rem]"
+                        aria-label={`Video ${i + 1} title`}
+                        placeholder="Title"
+                      />
+                      <input
+                        value={v.url}
+                        onChange={(e) => setVideoField(i, "url", e.target.value)}
+                        className="input h-11 min-w-0 flex-1 sm:h-10"
+                        aria-label={`Video ${i + 1} link`}
+                        placeholder="https://youtube.com/… or https://instagram.com/reel/…"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setVideos((prev) => prev.filter((_, idx) => idx !== i))
+                        }
+                        className="grid h-11 w-11 shrink-0 cursor-pointer place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-danger/10 hover:text-danger"
+                        aria-label={`Remove video ${i + 1}`}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <MiniButton
+                onClick={() => setVideos((prev) => [...prev, { title: "", url: "" }])}
+              >
+                <Plus className="h-3.5 w-3.5" /> Add video link
+              </MiniButton>
+            </div>
+          </Card>
+        </div>
+      </div>
+
+      {/* ── Tab bar — scrolls sideways rather than wrapping into two rows. ── */}
+      <div className="overflow-x-auto overscroll-x-contain border-b border-border">
+        <div className="flex w-max min-w-full gap-1">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              aria-current={tab === t.id ? "page" : undefined}
+              className={cn(
+                "-mb-px inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-t-lg border-b-2 px-4 text-sm font-medium transition-colors",
+                tab === t.id
+                  ? "border-accent text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {t.label}
+              {t.count !== undefined && (
+                <span
+                  className={cn(
+                    "rounded-full px-1.5 py-0.5 text-[10px] tabular-nums",
+                    tab === t.id
+                      ? "bg-accent/15 text-accent"
+                      : "bg-muted text-muted-foreground"
+                  )}
+                >
+                  {t.count}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* ── Options & Variants ── */}
       {tab === "optvar" && (
-        <Card title="Options">
-          <p className="-mt-1 text-xs text-muted-foreground">
-            Let customers choose e.g. <b>Size</b> or <b>Vatki</b>.{" "}
-            {useVariants ? (
-              <>
-                Prices and stock come from the <b>Price &amp; Stock</b> tab; photos
-                from the <b>Media</b> tab.
-              </>
-            ) : (
-              <>Each choice can add to the price (leave 0 for no change).</>
-            )}
-          </p>
+        <Card
+          title="Options"
+          tip={
+            <>
+              An option is a choice the customer makes — Size, Colour, Fit. Every
+              combination of every option becomes a variant you can price,
+              stock and photograph. Prices and stock live on the{" "}
+              <b>Price &amp; Stock</b> tab, photos on <b>Media</b>.
+            </>
+          }
+          aside={
+            combos.length > 0 ? (
+              <span className="text-xs text-muted-foreground">
+                {combos.length} combination{combos.length !== 1 ? "s" : ""}
+              </span>
+            ) : undefined
+          }
+        >
+          {options.length === 0 && (
+            <p className="rounded-lg bg-muted/50 px-3 py-2.5 text-xs text-muted-foreground">
+              No options — this piece is sold as a single item.
+            </p>
+          )}
 
           {options.map((group, gi) => (
-            <div key={gi} className="rounded-xl border border-border p-3.5">
+            <div key={gi} className="rounded-lg border border-border p-3">
               <div className="flex items-center gap-2">
-                <GripVertical className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <GripVertical className="hidden h-4 w-4 shrink-0 text-muted-foreground sm:block" />
                 <input
                   value={group.name}
                   onChange={(e) => setGroupName(gi, e.target.value)}
-                  className="input h-9"
-                  placeholder="Option name (e.g. Size, Type, Shape)"
+                  className="input h-11 min-w-0 sm:h-10"
+                  aria-label={`Option ${gi + 1} name`}
+                  placeholder="Option name (Size, Colour, Fit…)"
                 />
                 <button
                   type="button"
                   onClick={() => removeOptionGroup(gi)}
-                  className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-danger/10 hover:text-danger"
-                  title="Remove this option"
+                  className="grid h-11 w-11 shrink-0 cursor-pointer place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-danger/10 hover:text-danger"
+                  aria-label={`Remove option ${group.name || gi + 1}`}
                 >
                   <Trash2 className="h-4 w-4" />
                 </button>
               </div>
 
-              <div className="mt-3 space-y-2 pl-6">
+              <div className="mt-3 space-y-2 sm:pl-6">
                 {group.choices.map((choice, ci) => (
-                  <div key={ci} className="flex flex-wrap items-center gap-2">
+                  <div key={ci} className="flex items-center gap-2">
                     <input
                       value={choice.label}
                       onChange={(e) => setChoice(gi, ci, { label: e.target.value })}
-                      className="input h-9 min-w-[8rem] flex-1"
-                      placeholder="Choice (e.g. 4 inch)"
+                      className="input h-11 min-w-0 flex-1 sm:h-10"
+                      aria-label={`Choice ${ci + 1}`}
+                      placeholder="Choice (S, M, L…)"
                     />
                     {!useVariants && (
-                      <div className="relative w-28 shrink-0">
+                      <div className="relative w-24 shrink-0 sm:w-28">
                         <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
                           +₹
                         </span>
@@ -1184,9 +1348,9 @@ export function ProductForm({
                               priceDelta: Number(e.target.value) || 0,
                             })
                           }
-                          className="input h-9 pl-8"
+                          className="input h-11 pl-8 sm:h-10"
                           placeholder="0"
-                          title="Extra price for this choice"
+                          aria-label={`Extra price for choice ${ci + 1}`}
                         />
                       </div>
                     )}
@@ -1194,274 +1358,173 @@ export function ProductForm({
                       type="button"
                       onClick={() => removeChoice(gi, ci)}
                       disabled={group.choices.length <= 1}
-                      className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-30"
-                      title="Remove choice"
+                      className="grid h-11 w-11 shrink-0 cursor-pointer place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-30"
+                      aria-label={`Remove choice ${ci + 1}`}
                     >
                       <X className="h-4 w-4" />
                     </button>
                   </div>
                 ))}
-                <button
-                  type="button"
-                  onClick={() => addChoice(gi)}
-                  className="inline-flex items-center gap-1.5 text-xs text-accent hover:underline"
-                >
+                <MiniButton onClick={() => addChoice(gi)} className="border-dashed">
                   <Plus className="h-3.5 w-3.5" /> Add choice
-                </button>
+                </MiniButton>
               </div>
             </div>
           ))}
 
-          <button
-            type="button"
-            onClick={addOptionGroup}
-            className="inline-flex items-center gap-2 rounded-full border border-dashed border-border px-4 py-2.5 text-sm hover:bg-muted"
-          >
-            <Plus className="h-4 w-4" /> Add an option (Size, Type…)
-          </button>
-
-          {combos.length > 0 && (
-            <p className="text-xs text-muted-foreground">
-              {combos.length} combination{combos.length !== 1 ? "s" : ""} generated
-              from these options. Set each one&apos;s price, stock and availability
-              in the <b>Price &amp; Stock</b> tab.
-            </p>
-          )}
+          <MiniButton onClick={addOptionGroup} className="border-dashed">
+            <Plus className="h-3.5 w-3.5" /> Add an option
+          </MiniButton>
         </Card>
       )}
 
-      {/* ── Price & Stock: the per-combination table (renders in the same tab
-          as the base pricing card above). ── */}
+      {/* ── Price & Stock ── */}
       {tab === "pricing" && (
-            <Card title="Variant pricing & stock">
-              {optionMatrix.length === 0 ? (
-                <p className="rounded-lg bg-muted/60 px-4 py-3 text-xs text-muted-foreground">
-                  Add at least one option (with choices) in the <b>Options</b> tab to
-                  create variants.
-                </p>
-              ) : (
-                <>
-                  <div className="-mt-1 flex flex-wrap items-start justify-between gap-3">
-                    <p className="max-w-md text-xs text-muted-foreground">
-                      Give every combination (e.g. <b>4 inch</b> + <b>1 vatki</b>) its
-                      own price and stock, and mark which ones you actually make.
-                      Unavailable combos are greyed out for customers.
-                    </p>
-                    <Toggle
-                      label={useVariants ? "On" : "Off"}
-                      checked={useVariants}
-                      onChange={setUseVariants}
+        <div className="space-y-4 sm:space-y-6">
+          <Card title="Base price & stock">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Field
+                label="Price (₹)"
+                required
+                tip={
+                  hasVariants
+                    ? "The fallback price. Any combination set to \"Base price\" below is sold at this number, and the price shoppers see is the cheapest available combination."
+                    : "What the customer pays, before any discount badge."
+                }
+              >
+                {(id) => (
+                  <input
+                    id={id}
+                    type="number"
+                    min={0}
+                    value={form.price}
+                    onChange={(e) => set("price", e.target.value)}
+                    className="input"
+                  />
+                )}
+              </Field>
+
+              <Field
+                label="Discount %"
+                tip={
+                  <>
+                    Shows a &ldquo;Save X%&rdquo; badge. We store the implied
+                    original price rather than the percentage, so the badge and
+                    the struck-through price always agree. Leave it at 0 for no
+                    discount.
+                  </>
+                }
+                hint={
+                  Number(form.discount) > 0 ? (
+                    <>
+                      Shown as {formatINR(strikeThrough(effectivePrice, form.discount))}{" "}
+                      struck through, {formatINR(Math.max(0, Math.round(effectivePrice)))}{" "}
+                      paid.
+                    </>
+                  ) : undefined
+                }
+              >
+                {(id) => (
+                  <div className="relative">
+                    <input
+                      id={id}
+                      type="number"
+                      min={0}
+                      max={99}
+                      value={form.discount}
+                      onChange={(e) => set("discount", e.target.value)}
+                      className="input pr-8"
+                      placeholder="0"
                     />
+                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
+                      %
+                    </span>
                   </div>
+                )}
+              </Field>
 
-                  {useVariants && (
-                    <div className="space-y-4">
-                      {/* Filter */}
-                      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-muted/30 p-3">
-                        <span className="w-full text-xs font-medium text-muted-foreground">
-                          Filter combinations
-                        </span>
-                        {optionMatrix.map((g) => (
-                          <label key={g.name} className="block">
-                            <span className="mb-0.5 block text-[11px] text-muted-foreground">
-                              {g.name}
-                            </span>
-                            <select
-                              value={variantFilter[g.name] ?? ""}
-                              onChange={(e) =>
-                                setVariantFilter((prev) => ({
-                                  ...prev,
-                                  [g.name]: e.target.value,
-                                }))
-                              }
-                              className="input h-9"
-                            >
-                              <option value="">All</option>
-                              {g.values.map((val) => (
-                                <option key={val} value={val}>
-                                  {val}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        ))}
-                        {Object.values(variantFilter).some(Boolean) && (
-                          <button
-                            type="button"
-                            onClick={() => setVariantFilter({})}
-                            className="h-9 rounded-lg px-3 text-xs text-muted-foreground underline hover:text-foreground"
-                          >
-                            Clear filters
-                          </button>
-                        )}
-                      </div>
+              <Field
+                label="Stock"
+                required
+                tip={
+                  hasVariants
+                    ? "The fallback count. A combination with a blank stock box uses this number."
+                    : "Units on hand. At 0 the product shows as sold out but stays listed."
+                }
+              >
+                {(id) => (
+                  <input
+                    id={id}
+                    type="number"
+                    min={0}
+                    value={form.stock}
+                    onChange={(e) => set("stock", e.target.value)}
+                    className="input"
+                  />
+                )}
+              </Field>
+            </div>
 
-                      {/* Bulk update */}
-                      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-muted/30 p-3">
-                        <span className="w-full text-xs font-medium text-muted-foreground">
-                          Bulk update the {filteredCombos.length} shown combination
-                          {filteredCombos.length !== 1 ? "s" : ""}
-                        </span>
-                        <label className="block">
-                          <span className="mb-0.5 block text-[11px] text-muted-foreground">Price (₹)</span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={bulk.price}
-                            onChange={(e) => setBulk((b) => ({ ...b, price: e.target.value }))}
-                            className="input h-9 w-28"
-                            placeholder="—"
-                          />
-                        </label>
-                        <label className="block">
-                          <span className="mb-0.5 block text-[11px] text-muted-foreground">Stock</span>
-                          <input
-                            type="number"
-                            min={0}
-                            value={bulk.stock}
-                            onChange={(e) => setBulk((b) => ({ ...b, stock: e.target.value }))}
-                            className="input h-9 w-24"
-                            placeholder="—"
-                          />
-                        </label>
-                        <label className="block">
-                          <span className="mb-0.5 block text-[11px] text-muted-foreground">Availability</span>
-                          <select
-                            value={bulk.available}
-                            onChange={(e) => setBulk((b) => ({ ...b, available: e.target.value }))}
-                            className="input h-9"
-                          >
-                            <option value="">No change</option>
-                            <option value="yes">Available</option>
-                            <option value="no">Unavailable</option>
-                          </select>
-                        </label>
-                        <Button type="button" variant="outline" size="sm" onClick={applyBulk}>
-                          Apply
-                        </Button>
-                      </div>
+            {hasVariants && (
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-lg border border-border bg-muted/40 px-3 py-2.5">
+                <span className="text-xs text-muted-foreground">
+                  Shoppers see
+                </span>
+                <span className="text-lg font-semibold">
+                  {formatINR(effectivePrice)}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  — the cheapest available combination
+                </span>
+              </div>
+            )}
+          </Card>
 
-                      {/* Table */}
-                      <div className="overflow-x-auto rounded-xl border border-border">
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="border-b border-border bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
-                              <th className="px-3 py-2.5 font-medium">Combination</th>
-                              <th className="w-20 px-3 py-2.5 text-center font-medium">
-                                Available
-                              </th>
-                              <th className="w-28 px-3 py-2.5 text-center font-medium">
-                                Use base price
-                              </th>
-                              <th className="w-32 px-3 py-2.5 font-medium">Price (₹)</th>
-                              <th className="w-28 px-3 py-2.5 font-medium">Stock</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-border">
-                            {filteredCombos.map((combo) => {
-                              const key = comboKey(combo);
-                              const v = variantOf(key);
-                              const useBase = v.price === "";
-                              return (
-                                <tr key={key} className={v.available ? "" : "opacity-50"}>
-                                  <td className="px-3 py-2 align-top">
-                                    <div className="flex flex-wrap items-center gap-1.5 pt-1.5">
-                                      {Object.entries(combo).map(([name, value]) => (
-                                        <span
-                                          key={name}
-                                          className="rounded-full bg-muted px-2.5 py-0.5 text-xs"
-                                          title={name}
-                                        >
-                                          {value}
-                                        </span>
-                                      ))}
-                                    </div>
-                                  </td>
-                                  <td className="px-3 py-2 text-center align-top">
-                                    <input
-                                      type="checkbox"
-                                      checked={v.available}
-                                      onChange={(e) =>
-                                        setVariantField(key, {
-                                          available: e.target.checked,
-                                        })
-                                      }
-                                      className="mt-2 h-4 w-4 accent-[var(--accent)]"
-                                      title="Do you make this combination?"
-                                    />
-                                  </td>
-                                  <td className="px-3 py-2 text-center align-top">
-                                    <input
-                                      type="checkbox"
-                                      checked={useBase}
-                                      onChange={(e) =>
-                                        setVariantField(key, {
-                                          price: e.target.checked ? "" : String(base || 0),
-                                        })
-                                      }
-                                      disabled={!v.available}
-                                      className="mt-2 h-4 w-4 accent-[var(--accent)]"
-                                      title="Inherit the product base price"
-                                    />
-                                  </td>
-                                  <td className="px-3 py-2 align-top">
-                                    <div className="relative">
-                                      <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
-                                        ₹
-                                      </span>
-                                      <input
-                                        type="number"
-                                        min={0}
-                                        value={v.price}
-                                        onChange={(e) =>
-                                          setVariantField(key, { price: e.target.value })
-                                        }
-                                        className="input h-9 pl-6"
-                                        placeholder={form.price || "0"}
-                                        disabled={!v.available || useBase}
-                                      />
-                                    </div>
-                                  </td>
-                                  <td className="px-3 py-2 align-top">
-                                    <input
-                                      type="number"
-                                      min={0}
-                                      value={v.stock}
-                                      onChange={(e) =>
-                                        setVariantField(key, { stock: e.target.value })
-                                      }
-                                      className="input h-9"
-                                      placeholder={form.stock || "0"}
-                                      disabled={!v.available}
-                                      title="Blank inherits the product stock"
-                                    />
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        Showing {filteredCombos.length} of {combos.length}. Blank price →
-                        base price ({formatINR(base)}); blank stock → product stock.
-                      </p>
-                    </div>
-                  )}
-                </>
-              )}
-            </Card>
-          )}
+          <Card
+            title="Per-combination pricing"
+            tip="Give each combination its own price, stock and availability. Anything switched off here is greyed out on the storefront instead of disappearing, so a shopper can see it exists and is simply not made."
+            aside={
+              optionMatrix.length > 0 ? (
+                <SwitchRow
+                  tone="bare"
+                  label="Separate prices"
+                  checked={useVariants}
+                  onChange={setUseVariants}
+                  className="w-auto"
+                />
+              ) : undefined
+            }
+          >
+            {optionMatrix.length === 0 ? (
+              <p className="rounded-lg bg-muted/50 px-3 py-2.5 text-xs text-muted-foreground">
+                Add an option with at least one choice on the{" "}
+                <b>Options &amp; Variants</b> tab to create combinations.
+              </p>
+            ) : !useVariants ? (
+              <p className="rounded-lg bg-muted/50 px-3 py-2.5 text-xs text-muted-foreground">
+                Every combination is sold at the base price above. Switch this on
+                to price them separately.
+              </p>
+            ) : (
+              <VariantTable
+                optionMatrix={optionMatrix}
+                combos={combos}
+                entryOf={variantOf}
+                onPatch={patchVariants}
+                basePrice={form.price}
+                baseStock={form.stock}
+              />
+            )}
+          </Card>
+        </div>
+      )}
 
       {/* ── Media ── */}
       {tab === "media" && (
-        <Card title="Media">
-          <p className="-mt-1 mb-4 text-xs text-muted-foreground">
-            The only place this product&apos;s photos live. Galleries are filed by
-            one option&apos;s values (the <b>Image Controller</b>) rather than by
-            every combination, so you assign photos once per value — every
-            combination sharing that value reuses them.
-          </p>
+        <Card
+          title="Media"
+          tip="Every photo this product has. Galleries are filed by one option's values (the Image Controller) rather than by every combination, so you assign photos once per value and every combination sharing that value reuses them."
+        >
           <VariantMediaTab
             options={options}
             visualOptionName={imageDrivingOption}
@@ -1479,7 +1542,7 @@ export function ProductForm({
       )}
 
       {/* ── Actions (save / cancel — always visible) ── */}
-      <div className="flex gap-3">
+      <div className="flex flex-wrap gap-3">
         {/* Blocked while an upload is in flight — saving mid-upload would persist
             galleries missing the photos still being written. */}
         <Button
@@ -1515,109 +1578,41 @@ export function ProductForm({
   );
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-2xl border border-border bg-card p-5">
-      <h2 className="mb-4 font-serif text-lg">{title}</h2>
-      <div className="space-y-4">{children}</div>
-    </div>
-  );
+/** The implied original price a discount percentage is taken off. */
+function strikeThrough(price: number, discount: string) {
+  const p = Math.max(0, Math.round(price));
+  const d = Math.min(99, Math.max(0, Number(discount) || 0));
+  return d > 0 ? Math.round(p / (1 - d / 100)) : p;
 }
 
 /**
- * One product-page info block: inherit the store default (null) or override it
- * with this product's own copy. Switching to custom seeds the textarea with the
- * default so the admin edits from it rather than starting on a blank box;
- * switching back to default discards the custom text (that's the point — there's
- * no half state where both exist and you can't tell which is live).
+ * One checkout mode. The `(i)` sits OUTSIDE the `<label>` on purpose: a button
+ * inside a label folds its own accessible name ("What Cash on delivery means")
+ * into the checkbox's, so the checkbox ends up announced as two sentences.
  */
-function InfoOverride({
+function ModeRow({
   label,
-  value,
-  fallback,
-  onChange,
-}: {
-  label: string;
-  /** null = inherit the store default. */
-  value: string | null;
-  /** The store default, shown read-only while inheriting. */
-  fallback: string;
-  onChange: (next: string | null) => void;
-}) {
-  const custom = value !== null;
-  const shown = custom ? value : fallback;
-  const points = shown.split("\n").filter((l) => l.trim()).length;
-
-  return (
-    <div className="rounded-xl border border-border p-3">
-      <div className="flex items-start justify-between gap-2">
-        <span className="text-sm font-medium">{label}</span>
-        <button
-          type="button"
-          onClick={() => onChange(custom ? null : fallback)}
-          className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
-            custom
-              ? "bg-accent/10 text-accent hover:bg-accent/20"
-              : "bg-muted text-muted-foreground hover:bg-muted/70"
-          }`}
-        >
-          {custom ? "Using custom — revert" : "Store default"}
-        </button>
-      </div>
-
-      <textarea
-        rows={5}
-        value={shown}
-        readOnly={!custom}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder="One point per line"
-        className={`input mt-2 resize-y font-mono text-xs leading-relaxed ${
-          custom ? "" : "cursor-not-allowed opacity-60"
-        }`}
-      />
-
-      <p className="mt-1 text-[11px] text-muted-foreground">
-        {points === 0
-          ? "Empty — this section is hidden on the product page."
-          : `${points} bullet${points === 1 ? "" : "s"}`}
-        {!custom && " · edit under Settings > Product defaults"}
-      </p>
-    </div>
-  );
-}
-
-function Toggle({
-  label,
-  icon,
+  tip,
   checked,
   onChange,
 }: {
   label: string;
-  icon?: React.ReactNode;
+  tip: React.ReactNode;
   checked: boolean;
-  onChange: (v: boolean) => void;
+  onChange: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={() => onChange(!checked)}
-      className="flex w-full items-center justify-between rounded-xl border border-border px-4 py-3 text-sm"
+    <div
+      className={cn(
+        "flex min-h-11 items-center gap-1 rounded-lg border pr-2 transition-colors",
+        checked ? "border-accent/40 bg-accent/5" : "border-border"
+      )}
     >
-      <span className="flex items-center gap-2">
-        {icon}
-        {label}
-      </span>
-      <span
-        className={`relative h-6 w-11 rounded-full transition-colors ${
-          checked ? "bg-accent" : "bg-muted-foreground/30"
-        }`}
-      >
-        <span
-          className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
-            checked ? "left-0.5 translate-x-5" : "left-0.5"
-          }`}
-        />
-      </span>
-    </button>
+      <label className="flex min-h-11 flex-1 cursor-pointer items-center gap-1">
+        <Check checked={checked} onChange={onChange} label={label} />
+        <span className="py-2 text-sm">{label}</span>
+      </label>
+      <InfoTip term={label}>{tip}</InfoTip>
+    </div>
   );
 }

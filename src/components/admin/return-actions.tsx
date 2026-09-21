@@ -113,8 +113,10 @@ export function ReturnActions({
     });
   }
 
+  // 44px minimum height on every control: this queue is worked from a phone,
+  // and approve/reject sit next to each other.
   const btn =
-    "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50";
+    "inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border px-3 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50";
 
   /* ------------------------------------------------------ pending: decide it */
   if (status === "pending") {
@@ -142,7 +144,7 @@ export function ReturnActions({
 
     const approving = mode === "approve";
     return (
-      <div className="w-full max-w-md space-y-2 rounded-xl border border-border bg-background p-3">
+      <div className="w-full min-w-0 max-w-md space-y-2 rounded-xl border border-border bg-background p-3">
         <p className="text-xs font-medium">
           {approving ? "Approve this return" : "Reject this return"}
         </p>
@@ -161,25 +163,26 @@ export function ReturnActions({
 
         {approving && (
           <>
-            <div className="flex gap-2">
-              <label className="block flex-1">
+            <div className="flex flex-wrap gap-2">
+              <label className="block min-w-0 flex-1 basis-32">
                 <span className="label text-[11px]">Refund amount</span>
                 <input
                   type="number"
+                  inputMode="numeric"
                   min={0}
                   value={refund}
                   onChange={(e) => setRefund(e.target.value)}
-                  className="input h-9 text-xs"
+                  className="input text-xs"
                 />
               </label>
-              <label className="block flex-1">
+              <label className="block min-w-0 flex-1 basis-32">
                 <span className="label text-[11px]">Method</span>
                 <select
                   value={refundMethod}
                   onChange={(e) =>
                     setRefundMethod(e.target.value as typeof refundMethod)
                   }
-                  className="input h-9 text-xs"
+                  className="input text-xs"
                 >
                   <option value="original">Original payment</option>
                   <option value="upi">UPI</option>
@@ -220,7 +223,7 @@ export function ReturnActions({
             variant={approving ? "primary" : "outline"}
             disabled={pending || (!approving && !note.trim())}
             onClick={() => decide(approving)}
-            className="h-8 flex-1 text-xs"
+            className="min-h-11 flex-1 text-xs"
           >
             {pending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -235,7 +238,7 @@ export function ReturnActions({
             size="sm"
             variant="outline"
             onClick={() => setMode("idle")}
-            className="h-8 text-xs"
+            className="min-h-11 text-xs"
           >
             Cancel
           </Button>
@@ -279,7 +282,7 @@ export function ReturnActions({
             type="button"
             disabled={pending}
             onClick={retry}
-            className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-danger/40 px-2.5 py-1 font-medium hover:bg-danger/10"
+            className="mt-2 inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-danger/40 px-3 font-medium hover:bg-danger/10"
           >
             <RefreshCw className="h-3 w-3" /> Retry pickup
           </button>

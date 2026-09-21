@@ -3,18 +3,23 @@ import Image from "next/image";
 import { PackageX, ExternalLink, AlertTriangle, Clock } from "lucide-react";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { getSettings } from "@/lib/settings";
+import { DEFAULT_SETTINGS } from "@/lib/settings";
 import { formatINR } from "@/lib/utils";
-import { ReturnDefaults } from "@/components/admin/return-defaults";
+import { InfoTip } from "@/components/store/info-tip";
+import { ExpandableText } from "@/components/store/expandable-text";
+import { ReturnPolicyForm } from "@/components/admin/return-defaults";
 import { ReturnFilters } from "@/components/admin/return-filters";
 import { ReturnActions } from "@/components/admin/return-actions";
 import {
   OPEN_RETURN_STATUSES,
+  OUR_FAULT_PATTERNS,
   OUR_FAULT_REASONS,
   RETURN_STATUSES,
   RETURN_STATUS_COLOR,
   RETURN_STATUS_LABEL,
+  isOurFaultReason,
   isReturnStatus,
+  normaliseReturnReasons,
   returnReasonLabel,
   type ReturnStatus,
 } from "@/lib/returns";
@@ -24,6 +29,14 @@ export const metadata = { title: "Returns" };
 
 const PAGE_SIZE = 100;
 const DAY = 86_400_000;
+
+/** The two halves of this screen. Policy is set once; requests are worked daily. */
+const TABS = [
+  { key: "requests", label: "Return requests" },
+  { key: "policy", label: "Return policy" },
+] as const;
+
+type Tab = (typeof TABS)[number]["key"];
 
 /**
  * Wall clock for the age filters and the "waiting Nd" badges. Read through an
@@ -35,10 +48,46 @@ async function readClock(): Promise<number> {
   return Date.now();
 }
 
+/**
+ * The return policy, read straight from the settings row.
+ *
+ * Not `getSettings()`: that DTO predates `returnReasons` / `returnPolicyNote`,
+ * and this screen is their only editor. A failed read falls back to the same
+ * defaults the schema declares, so the form still renders during a DB blip —
+ * it just can't save until the database is back.
+ */
+async function readPolicy() {
+  const row = await prisma.siteSettings
+    .findUnique({
+      where: { id: "main" },
+      select: {
+        returnsEnabled: true,
+        defaultReturnable: true,
+        returnWindowDays: true,
+        defaultReturnsInfo: true,
+        returnReasons: true,
+        returnPolicyNote: true,
+        nimbusEnabled: true,
+      },
+    })
+    .catch(() => null);
+
+  return {
+    returnsEnabled: row?.returnsEnabled ?? DEFAULT_SETTINGS.returnsEnabled,
+    defaultReturnable: row?.defaultReturnable ?? DEFAULT_SETTINGS.defaultReturnable,
+    returnWindowDays: row?.returnWindowDays ?? DEFAULT_SETTINGS.returnWindowDays,
+    defaultReturnsInfo: row?.defaultReturnsInfo ?? DEFAULT_SETTINGS.defaultReturnsInfo,
+    returnReasons: normaliseReturnReasons(row?.returnReasons),
+    returnPolicyNote: row?.returnPolicyNote ?? "",
+    nimbusEnabled: row?.nimbusEnabled ?? DEFAULT_SETTINGS.nimbusEnabled,
+  };
+}
+
 export default async function AdminReturns({
   searchParams,
 }: {
   searchParams: Promise<{
+    tab?: string;
     status?: string;
     q?: string;
     reason?: string;
@@ -47,67 +96,94 @@ export default async function AdminReturns({
   }>;
 }) {
   const sp = await searchParams;
+  const tab: Tab = sp.tab === "policy" ? "policy" : "requests";
   const status = sp.status || "open";
   const now = await readClock();
 
-  const where: Prisma.ReturnRequestWhereInput = {};
-  if (status === "open") where.status = { in: OPEN_RETURN_STATUSES };
-  else if (status !== "all" && isReturnStatus(status)) where.status = status;
+  const policy = await readPolicy();
+
+  // Composed as AND parts rather than assigned onto one object: the search and
+  // the "our fault" filter both need their own OR, and the last writer would
+  // otherwise silently erase the other.
+  const and: Prisma.ReturnRequestWhereInput[] = [];
+
+  if (status === "open") and.push({ status: { in: OPEN_RETURN_STATUSES } });
+  else if (status !== "all" && isReturnStatus(status)) and.push({ status });
 
   if (sp.q) {
-    where.OR = [
-      { requestNumber: { contains: sp.q, mode: "insensitive" } },
-      { productName: { contains: sp.q, mode: "insensitive" } },
-      { order: { orderNumber: { contains: sp.q, mode: "insensitive" } } },
-      { order: { customerName: { contains: sp.q, mode: "insensitive" } } },
-      { order: { phone: { contains: sp.q, mode: "insensitive" } } },
-    ];
+    and.push({
+      OR: [
+        { requestNumber: { contains: sp.q, mode: "insensitive" } },
+        { productName: { contains: sp.q, mode: "insensitive" } },
+        { order: { orderNumber: { contains: sp.q, mode: "insensitive" } } },
+        { order: { customerName: { contains: sp.q, mode: "insensitive" } } },
+        { order: { phone: { contains: sp.q, mode: "insensitive" } } },
+      ],
+    });
   }
-  if (sp.reason === "our_fault") where.reason = { in: OUR_FAULT_REASONS };
-  else if (sp.reason) where.reason = sp.reason;
+
+  if (sp.reason === "our_fault") {
+    // Reasons are admin-authored text now, so this matches the same patterns
+    // `isOurFaultReason` uses for the badge — the list and the badge agree.
+    and.push({
+      OR: [
+        { reason: { in: OUR_FAULT_REASONS } },
+        ...OUR_FAULT_PATTERNS.map((p) => ({
+          reason: { contains: p, mode: "insensitive" as const },
+        })),
+      ],
+    });
+  } else if (sp.reason) {
+    and.push({ reason: sp.reason });
+  }
 
   // "Pickup failed" = approved, meant to have a courier, but none was booked.
   if (sp.issue === "pickup") {
-    where.status = "approved";
-    where.nimbusError = { not: null };
+    and.push({ status: "approved", nimbusError: { not: null } });
   }
 
-  if (sp.age === "today") where.createdAt = { gte: new Date(now - DAY) };
-  else if (sp.age === "7") where.createdAt = { gte: new Date(now - 7 * DAY) };
-  else if (sp.age === "30") where.createdAt = { gte: new Date(now - 30 * DAY) };
+  if (sp.age === "today") and.push({ createdAt: { gte: new Date(now - DAY) } });
+  else if (sp.age === "7") and.push({ createdAt: { gte: new Date(now - 7 * DAY) } });
+  else if (sp.age === "30") and.push({ createdAt: { gte: new Date(now - 30 * DAY) } });
   else if (sp.age === "stale") {
     // Only unresolved requests can be "waiting" — a refunded one isn't stale.
-    where.createdAt = { lte: new Date(now - 3 * DAY) };
-    where.resolvedAt = null;
+    and.push({ createdAt: { lte: new Date(now - 3 * DAY) }, resolvedAt: null });
   }
 
-  const [requests, grouped, settings, openCount] = await Promise.all([
-    prisma.returnRequest
-      .findMany({
-        where,
-        // Oldest first inside the action queue: the customer who has waited
-        // longest gets seen first. Audit views stay newest-first.
-        orderBy: status === "open" ? { createdAt: "asc" } : { createdAt: "desc" },
-        take: PAGE_SIZE,
-        include: {
-          order: {
-            select: {
-              orderNumber: true,
-              customerName: true,
-              phone: true,
-              city: true,
-              state: true,
-              pincode: true,
-              paymentMethod: true,
+  const where: Prisma.ReturnRequestWhereInput = and.length ? { AND: and } : {};
+
+  // The policy tab needs the queue count for its tab badge, nothing more —
+  // skip the list query entirely rather than paying for 100 rows nobody sees.
+  const [requests, grouped, openCount] = await Promise.all([
+    tab === "requests"
+      ? prisma.returnRequest
+          .findMany({
+            where,
+            // Oldest first inside the action queue: the customer who has waited
+            // longest gets seen first. Audit views stay newest-first.
+            orderBy: status === "open" ? { createdAt: "asc" } : { createdAt: "desc" },
+            take: PAGE_SIZE,
+            include: {
+              order: {
+                select: {
+                  orderNumber: true,
+                  customerName: true,
+                  phone: true,
+                  city: true,
+                  state: true,
+                  pincode: true,
+                  paymentMethod: true,
+                },
+              },
             },
-          },
-        },
-      })
-      .catch(() => []),
-    prisma.returnRequest
-      .groupBy({ by: ["status"], _count: { _all: true } })
-      .catch(() => [] as { status: string; _count: { _all: number } }[]),
-    getSettings(),
+          })
+          .catch(() => [])
+      : [],
+    tab === "requests"
+      ? prisma.returnRequest
+          .groupBy({ by: ["status"], _count: { _all: true } })
+          .catch(() => [] as { status: string; _count: { _all: number } }[])
+      : [],
     prisma.returnRequest
       .count({ where: { status: { in: OPEN_RETURN_STATUSES } } })
       .catch(() => 0),
@@ -123,191 +199,233 @@ export default async function AdminReturns({
   const narrowed = !!(sp.q || sp.reason || sp.issue || sp.age);
 
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="font-serif text-3xl">Returns</h1>
-        <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-          Set the store-wide policy, then review what customers send back.
-          Approving drafts a reverse pickup in NimbusPost — the courier collects
-          from the customer and brings it to your warehouse.
+    <div>
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <h1 className="font-serif text-2xl">Returns</h1>
+        <p className="text-sm text-muted-foreground">
+          {policy.returnsEnabled ? (
+            <>
+              Open · {policy.returnWindowDays}-day window
+              <InfoTip term="Return window">
+                Counted from the courier&apos;s delivery scan, or the order date
+                when an order was marked delivered by hand. Requests after it are
+                refused by the server, not just hidden.
+              </InfoTip>
+            </>
+          ) : (
+            <span className="text-danger">Returns are switched off</span>
+          )}
         </p>
       </div>
 
-      <ReturnDefaults
-        initial={{
-          returnsEnabled: settings.returnsEnabled,
-          defaultReturnable: settings.defaultReturnable,
-          returnWindowDays: settings.returnWindowDays,
-          defaultReturnsInfo: settings.defaultReturnsInfo,
-        }}
-      />
-
-      <div>
-        <h2 className="font-serif text-xl">Return requests</h2>
-        <div className="mt-4">
-          <ReturnFilters counts={counts} />
-        </div>
-
-        {requests.length === 0 ? (
-          <div className="mt-6 rounded-2xl border border-dashed border-border p-12 text-center">
-            <PackageX className="mx-auto h-10 w-10 text-muted-foreground" />
-            <p className="mt-4 font-serif text-xl">
-              {narrowed || status !== "open"
-                ? "No matching requests"
-                : "Nothing to action"}
-            </p>
-            <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
-              {narrowed || status !== "open"
-                ? "Try clearing the filters."
-                : counts.all === 0
-                  ? "Customers raise returns from their order page once an order is delivered. They'll appear here for you to approve or reject."
-                  : "Every request has been dealt with."}
-            </p>
-          </div>
-        ) : (
-          <div className="mt-6 space-y-3">
-            {requests.map((r) => {
-              const s = (isReturnStatus(r.status) ? r.status : "pending") as ReturnStatus;
-              const waitingDays = Math.floor((now - r.createdAt.getTime()) / DAY);
-              const stale = s === "pending" && waitingDays >= 3;
-              const lineTotal = r.unitPrice * r.quantity;
-
-              return (
-                <div
-                  key={r.id}
-                  className={`rounded-2xl border bg-card p-4 ${
-                    r.nimbusError && s === "approved"
-                      ? "border-danger/40"
-                      : stale
-                        ? "border-accent/40"
-                        : "border-border"
+      {/* Tab bar — a link each, so a filtered queue stays shareable and the
+          back button works. */}
+      <div className="mt-3 flex gap-1 border-b border-border">
+        {TABS.map((t) => {
+          const active = tab === t.key;
+          return (
+            <Link
+              key={t.key}
+              href={t.key === "requests" ? "/admin/returns" : "/admin/returns?tab=policy"}
+              className={`-mb-px inline-flex min-h-11 items-center gap-2 border-b-2 px-3 text-sm font-medium transition-colors ${
+                active
+                  ? "border-accent text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {t.label}
+              {t.key === "requests" && openCount > 0 && (
+                <span
+                  className={`rounded-full px-1.5 text-xs ${
+                    active ? "bg-accent/15 text-accent" : "bg-muted"
                   }`}
                 >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-mono text-sm font-medium">
-                          {r.requestNumber}
-                        </span>
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${RETURN_STATUS_COLOR[s]}`}
-                        >
-                          {RETURN_STATUS_LABEL[s]}
-                        </span>
-                        {OUR_FAULT_REASONS.includes(r.reason as never) && (
-                          <span className="rounded-full bg-danger/10 px-2 py-0.5 text-[10px] font-medium text-danger">
-                            Our fault
+                  {openCount}
+                </span>
+              )}
+            </Link>
+          );
+        })}
+      </div>
+
+      {tab === "policy" ? (
+        <div className="mt-4 max-w-2xl">
+          <ReturnPolicyForm
+            initial={{
+              returnsEnabled: policy.returnsEnabled,
+              defaultReturnable: policy.defaultReturnable,
+              returnWindowDays: policy.returnWindowDays,
+              defaultReturnsInfo: policy.defaultReturnsInfo,
+              returnReasons: policy.returnReasons,
+              returnPolicyNote: policy.returnPolicyNote,
+            }}
+            todayISO={new Date(now).toISOString()}
+          />
+        </div>
+      ) : (
+        <div className="mt-4">
+          <ReturnFilters counts={counts} reasons={policy.returnReasons} />
+
+          {requests.length === 0 ? (
+            <div className="mt-4 rounded-xl border border-dashed border-border p-10 text-center">
+              <PackageX className="mx-auto h-8 w-8 text-muted-foreground" />
+              <p className="mt-3 font-serif text-lg">
+                {narrowed || status !== "open"
+                  ? "No matching requests"
+                  : "Nothing to action"}
+              </p>
+              <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
+                {narrowed || status !== "open"
+                  ? "Try clearing the filters."
+                  : counts.all === 0
+                    ? "Customers raise returns from their order page, inside the return window."
+                    : "Every request has been dealt with."}
+              </p>
+            </div>
+          ) : (
+            <div className="mt-4 space-y-2.5">
+              {requests.map((r) => {
+                const s = (isReturnStatus(r.status) ? r.status : "pending") as ReturnStatus;
+                const waitingDays = Math.floor((now - r.createdAt.getTime()) / DAY);
+                const stale = s === "pending" && waitingDays >= 3;
+                const lineTotal = r.unitPrice * r.quantity;
+
+                return (
+                  <div
+                    key={r.id}
+                    className={`rounded-xl border bg-card p-3.5 ${
+                      r.nimbusError && s === "approved"
+                        ? "border-danger/40"
+                        : stale
+                          ? "border-accent/40"
+                          : "border-border"
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1 basis-64">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-mono text-sm font-medium">
+                            {r.requestNumber}
                           </span>
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${RETURN_STATUS_COLOR[s]}`}
+                          >
+                            {RETURN_STATUS_LABEL[s]}
+                          </span>
+                          {isOurFaultReason(r.reason) && (
+                            <span className="rounded-full bg-danger/10 px-2 py-0.5 text-[10px] font-medium text-danger">
+                              Our fault
+                            </span>
+                          )}
+                          {stale && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent">
+                              <Clock className="h-3 w-3" /> waiting {waitingDays}d
+                            </span>
+                          )}
+                          {r.nimbusError && s === "approved" && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-danger/15 px-2 py-0.5 text-[10px] font-medium text-danger">
+                              <AlertTriangle className="h-3 w-3" /> pickup failed
+                            </span>
+                          )}
+                        </div>
+
+                        <p className="mt-1.5 text-sm">
+                          <b>{r.productName}</b>
+                          {r.variantLabel && (
+                            <span className="text-muted-foreground"> · {r.variantLabel}</span>
+                          )}
+                          <span className="text-muted-foreground">
+                            {" "}
+                            × {r.quantity} · {formatINR(lineTotal)}
+                          </span>
+                        </p>
+
+                        <p className="mt-0.5 break-words text-xs text-muted-foreground">
+                          <Link
+                            href={`/admin/orders?q=${encodeURIComponent(r.order.orderNumber)}`}
+                            className="inline-flex items-center gap-1 hover:text-accent"
+                          >
+                            {r.order.orderNumber}
+                            <ExternalLink className="h-3 w-3" />
+                          </Link>
+                          {" · "}
+                          {r.order.customerName} · {r.order.phone} · {r.order.city},{" "}
+                          {r.order.state} {r.order.pincode} · {r.order.paymentMethod}
+                        </p>
+
+                        <div className="mt-2 text-xs">
+                          <span className="font-medium">{returnReasonLabel(r.reason)}</span>
+                          {r.customerNote && (
+                            <ExpandableText
+                              lines={2}
+                              contentClassName="text-muted-foreground"
+                              className="mt-0.5"
+                            >
+                              {`“${r.customerNote}”`}
+                            </ExpandableText>
+                          )}
+                        </div>
+
+                        {r.images.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {r.images.map((url) => (
+                              <a
+                                key={url}
+                                href={url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="relative h-14 w-14 overflow-hidden rounded-lg border border-border bg-muted"
+                                title="Open full size"
+                              >
+                                <Image
+                                  src={decodeURI(url)}
+                                  alt="Customer photo"
+                                  fill
+                                  sizes="56px"
+                                  className="object-cover"
+                                />
+                              </a>
+                            ))}
+                          </div>
                         )}
-                        {stale && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent">
-                            <Clock className="h-3 w-3" /> waiting {waitingDays}d
-                          </span>
+
+                        {r.adminNote && (
+                          <p className="mt-2 rounded-lg bg-muted/50 px-2.5 py-1.5 text-xs text-muted-foreground">
+                            <b>Sent to customer:</b> {r.adminNote}
+                          </p>
                         )}
-                        {r.nimbusError && s === "approved" && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-danger/15 px-2 py-0.5 text-[10px] font-medium text-danger">
-                            <AlertTriangle className="h-3 w-3" /> pickup failed
-                          </span>
+
+                        {r.refundAmount != null && (
+                          <p className="mt-1.5 text-xs text-muted-foreground">
+                            Refund recorded: <b>{formatINR(r.refundAmount)}</b>
+                            {r.refundMethod ? ` · ${r.refundMethod}` : ""}
+                          </p>
                         )}
                       </div>
 
-                      <p className="mt-1.5 text-sm">
-                        <b>{r.productName}</b>
-                        {r.variantLabel && (
-                          <span className="text-muted-foreground"> · {r.variantLabel}</span>
-                        )}
-                        <span className="text-muted-foreground">
-                          {" "}
-                          × {r.quantity} · {formatINR(lineTotal)}
-                        </span>
-                      </p>
-
-                      <p className="mt-0.5 text-xs text-muted-foreground">
-                        <Link
-                          href={`/admin/orders?q=${encodeURIComponent(r.order.orderNumber)}`}
-                          className="inline-flex items-center gap-1 hover:text-accent"
-                        >
-                          {r.order.orderNumber}
-                          <ExternalLink className="h-3 w-3" />
-                        </Link>
-                        {" · "}
-                        {r.order.customerName} · {r.order.phone} · {r.order.city},{" "}
-                        {r.order.state} {r.order.pincode} · paid by{" "}
-                        {r.order.paymentMethod}
-                      </p>
-
-                      <p className="mt-2 text-xs">
-                        <span className="font-medium">
-                          {returnReasonLabel(r.reason)}
-                        </span>
-                        {r.customerNote && (
-                          <span className="text-muted-foreground">
-                            {" — “"}
-                            {r.customerNote}
-                            {"”"}
-                          </span>
-                        )}
-                      </p>
-
-                      {r.images.length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1.5">
-                          {r.images.map((url) => (
-                            <a
-                              key={url}
-                              href={url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="relative h-14 w-14 overflow-hidden rounded-lg border border-border bg-muted"
-                              title="Open full size"
-                            >
-                              <Image
-                                src={decodeURI(url)}
-                                alt="Customer photo"
-                                fill
-                                sizes="56px"
-                                className="object-cover"
-                              />
-                            </a>
-                          ))}
-                        </div>
-                      )}
-
-                      {r.adminNote && (
-                        <p className="mt-2 rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
-                          <b>Sent to customer:</b> {r.adminNote}
-                        </p>
-                      )}
-
-                      {r.refundAmount != null && (
-                        <p className="mt-1.5 text-xs text-muted-foreground">
-                          Refund recorded: <b>{formatINR(r.refundAmount)}</b>
-                          {r.refundMethod ? ` · ${r.refundMethod}` : ""}
-                        </p>
-                      )}
+                      <ReturnActions
+                        id={r.id}
+                        status={s}
+                        suggestedRefund={lineTotal}
+                        nimbusError={r.nimbusError}
+                        nimbusOrderId={r.nimbusOrderId}
+                        nimbusEnabled={policy.nimbusEnabled}
+                      />
                     </div>
-
-                    <ReturnActions
-                      id={r.id}
-                      status={s}
-                      suggestedRefund={lineTotal}
-                      nimbusError={r.nimbusError}
-                      nimbusOrderId={r.nimbusOrderId}
-                      nimbusEnabled={settings.nimbusEnabled}
-                    />
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
 
-            {requests.length === PAGE_SIZE && (
-              <p className="pt-2 text-center text-xs text-muted-foreground">
-                Showing the first {PAGE_SIZE} matches — narrow the filters to see
-                the rest.
-              </p>
-            )}
-          </div>
-        )}
-      </div>
+              {requests.length === PAGE_SIZE && (
+                <p className="pt-1 text-center text-xs text-muted-foreground">
+                  Showing the first {PAGE_SIZE} matches — narrow the filters to
+                  see the rest.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -127,13 +127,13 @@ export function ProductGallery({
           <>
             <button
               onClick={() => paginate(-1)}
-              className="absolute left-4 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/80 p-2 text-black shadow-md backdrop-blur transition-all duration-300 hover:scale-110 hover:bg-white active:scale-95"
+              className="absolute left-4 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/80 p-3 text-black shadow-md backdrop-blur transition-colors hover:bg-white"
             >
               <ChevronLeft className="h-5 w-5" />
             </button>
             <button
               onClick={() => paginate(1)}
-              className="absolute right-4 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/80 p-2 text-black shadow-md backdrop-blur transition-all duration-300 hover:scale-110 hover:bg-white active:scale-95"
+              className="absolute right-4 top-1/2 z-10 -translate-y-1/2 rounded-full bg-white/80 p-3 text-black shadow-md backdrop-blur transition-colors hover:bg-white"
             >
               <ChevronRight className="h-5 w-5" />
             </button>

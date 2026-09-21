@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
 import {
@@ -17,6 +18,18 @@ import { InstagramSection } from "@/components/store/instagram-section";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * The homepage owns the site-root canonical.
+ *
+ * It used to sit on the root layout, where Next's shallow metadata merge
+ * handed it to every page that didn't override it — pointing thirteen routes
+ * at "/". Title, description and OG still come from the root layout; only the
+ * canonical belongs to this route.
+ */
+export function generateMetadata(): Metadata {
+  return { alternates: { canonical: "/" } };
+}
 
 // Real Level7 product photos used in the hero composition.
 const HERO_IMAGES = [
@@ -239,7 +252,11 @@ export default async function HomePage() {
         </Reveal>
 
         {featured.length > 0 ? (
-          <div className="mt-8 grid grid-cols-3 gap-x-3 gap-y-8 sm:gap-x-5 sm:gap-y-12 md:mt-10 md:grid-cols-3 lg:grid-cols-4">
+          /* 2-up on phones. At 3-up a 320px screen gives each tile ~85px,
+             which is narrower than the card's own CTA row can shrink to, so
+             the buttons spilled out. Matches /shop, wishlist and the loading
+             skeleton, which are all 2-up. */
+          <div className="mt-8 grid grid-cols-2 gap-x-3 gap-y-8 sm:grid-cols-3 sm:gap-x-5 sm:gap-y-12 md:mt-10 lg:grid-cols-4">
             {featured.map((p, i) => (
               <Reveal key={p.id} delay={(i % 4) * 0.06}>
                 <ProductCard product={p} />

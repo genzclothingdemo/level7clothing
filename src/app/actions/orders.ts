@@ -289,6 +289,13 @@ export async function placeOrder(input: PlaceOrderInput) {
 
   const number = orderNumber();
 
+  // Denormalised so Admin → Orders can badge and filter made-to-order baskets
+  // without re-reading the catalogue for every row. The per-item flags are
+  // still read live in the admin, so this only has to be right at checkout.
+  const needsCustomisation = validItems.some(
+    (i) => productById.get(i.productId)?.isCustomisable === true
+  );
+
   const order = await prisma.$transaction(async (tx) => {
     const created = await tx.order.create({
       data: {
@@ -311,6 +318,7 @@ export async function placeOrder(input: PlaceOrderInput) {
         total,
         amountPaid: 0,
         balanceDue,
+        needsCustomisation,
         statusHistory: [
           { status: "pending", note: "Order placed", at: new Date().toISOString() },
         ],

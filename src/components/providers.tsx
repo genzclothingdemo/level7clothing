@@ -3,6 +3,7 @@
 import { ThemeProvider } from "next-themes";
 import { Toaster } from "sonner";
 import { CartProvider } from "@/context/cart";
+import { WishlistProvider } from "@/context/wishlist";
 import { SettingsProvider, type ClientSettings } from "@/context/settings";
 
 export function Providers({
@@ -23,7 +24,10 @@ export function Providers({
     >
       <SettingsProvider value={settings}>
         <CartProvider initialLead={initialLead}>
-          {children}
+          {/* WishlistProvider was missing from the tree entirely, so every
+              `useWishlist()` call threw — which took out the whole /wishlist
+              page, not just the save button. */}
+          <WishlistProvider>{children}</WishlistProvider>
           <Toaster
             position="bottom-right"
             toastOptions={{

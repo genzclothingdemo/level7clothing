@@ -179,7 +179,7 @@ export function ReviewPanel({
                       aria-label={`${n} star${n === 1 ? "" : "s"}`}
                       onMouseEnter={() => setHover(n)}
                       onClick={() => setForm((p) => ({ ...p, rating: n }))}
-                      className="p-0.5"
+                      className="p-2 -m-1"
                     >
                       <Star
                         className={cn(
@@ -200,7 +200,7 @@ export function ReviewPanel({
                   <input
                     value={form.name}
                     onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
-                    className="input h-10"
+                    className="input"
                     placeholder="Priya S."
                   />
                 </label>
@@ -210,7 +210,7 @@ export function ReviewPanel({
                     type="email"
                     value={form.email}
                     onChange={(e) => setForm((p) => ({ ...p, email: e.target.value }))}
-                    className="input h-10"
+                    className="input"
                     placeholder="you@example.com"
                   />
                 </label>
@@ -221,7 +221,7 @@ export function ReviewPanel({
                 <input
                   value={form.title}
                   onChange={(e) => setForm((p) => ({ ...p, title: e.target.value }))}
-                  className="input h-10"
+                  className="input"
                   placeholder="Beautiful finish, arrived safely"
                 />
               </label>

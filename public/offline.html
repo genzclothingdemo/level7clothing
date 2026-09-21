@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <title>Offline — Level7 Clothing</title>
+    <!--
+      Deliberately self-contained: no webfont, no stylesheet, no script from the
+      network. This file is served by the service worker when a navigation
+      fails, so anything it references externally would fail too.
+    -->
+    <style>
+      :root {
+        --bg: #fafafa;
+        --ink: #0a0a0a;
+        --muted: #6b7280;
+        --accent: #7c3aed;
+        --line: rgba(10, 10, 10, 0.12);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #09090b;
+          --ink: #fafafa;
+          --muted: #a1a1aa;
+          --accent: #a78bfa;
+          --line: rgba(250, 250, 250, 0.14);
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap { width: 100%; max-width: 30rem; text-align: center; }
+      .mark {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 56px;
+        height: 56px;
+        border-radius: 12px;
+        background: var(--ink);
+        color: var(--accent);
+        font-weight: 700;
+        font-size: 22px;
+        letter-spacing: 0.02em;
+        margin-bottom: 28px;
+      }
+      .eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.22em;
+        font-size: 11px;
+        color: var(--muted);
+        margin: 0 0 12px;
+      }
+      h1 {
+        font-size: clamp(1.5rem, 6vw, 2rem);
+        line-height: 1.15;
+        letter-spacing: -0.02em;
+        font-weight: 600;
+        margin: 0 0 12px;
+      }
+      p {
+        margin: 0 auto 28px;
+        max-width: 26rem;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.6;
+      }
+      button {
+        font: inherit;
+        cursor: pointer;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 14px 28px;
+        min-height: 44px;
+        border-radius: 8px;
+        border: 1px solid var(--ink);
+        background: var(--ink);
+        color: var(--bg);
+        transition: background-color 0.18s ease, color 0.18s ease;
+      }
+      button:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+      .hint { margin-top: 22px; font-size: 12px; color: var(--muted); }
+      .rule { height: 1px; background: var(--line); margin: 28px 0; border: 0; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="mark">L7</div>
+      <p class="eyebrow">No connection</p>
+      <h1>You&rsquo;re offline</h1>
+      <p>
+        This page needs a connection to load. Check your network and try again —
+        pages you&rsquo;ve already visited will still open.
+      </p>
+      <button type="button" onclick="location.reload()">Try again</button>
+      <hr class="rule" />
+      <p class="hint">Level7 Clothing</p>
+    </div>
+  </body>
+</html>

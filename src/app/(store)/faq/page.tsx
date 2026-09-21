@@ -51,7 +51,7 @@ export default function FaqPage() {
           <p className="text-xs uppercase tracking-widest text-muted-foreground">
             Need help?
           </p>
-          <h1 className="mt-3 font-serif text-5xl leading-tight">
+          <h1 className="mt-3 font-serif text-4xl leading-tight md:text-5xl">
             Frequently asked questions
           </h1>
           <p className="mx-auto mt-4 max-w-xl text-muted-foreground">

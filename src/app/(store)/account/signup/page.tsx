@@ -120,7 +120,7 @@ function SignupForm() {
 
 export default function SignupPage() {
   return (
-    <div className="container-px mx-auto flex min-h-[70vh] items-center justify-center py-16">
+    <div className="container-px mx-auto flex min-h-[70dvh] items-center justify-center py-16">
       <Suspense>
         <SignupForm />
       </Suspense>

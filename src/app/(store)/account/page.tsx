@@ -20,6 +20,15 @@ export default async function AccountPage() {
 
   if (!user) redirect("/account/login");
 
+  // Saved addresses. Default first, then most recently updated — the same
+  // order the checkout address picker uses.
+  const addresses = await prisma.address
+    .findMany({
+      where: { userId: user.id },
+      orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }],
+    })
+    .catch(() => []);
+
   // Orders
   const raw = await prisma.order
     .findMany({
@@ -52,7 +61,12 @@ export default async function AccountPage() {
     city: o.city,
     state: o.state,
     pincode: o.pincode,
-    note: o.note,
+    // `o.note` is the admin's INTERNAL note and must never reach the customer.
+    // It starts life as the shopper's own checkout note and is then overwritten
+    // by admin-only text, so it cannot be treated as safe. The customer-facing
+    // message is `customerNote`; per-status messages are filtered out of
+    // statusHistory by the `forCustomer` flag inside OrderTimeline.
+    note: o.customerNote,
   }));
 
   // Reviews — approved for portfolio display
@@ -95,7 +109,22 @@ export default async function AccountPage() {
       </div>
 
       {/* ── Tabbed View ── */}
-      <AccountView user={user} orders={orders} reviews={reviews} />
+      <AccountView
+        user={user}
+        orders={orders}
+        reviews={reviews}
+        addresses={addresses.map((a) => ({
+          id: a.id,
+          label: a.label,
+          fullName: a.fullName,
+          phone: a.phone,
+          address: a.address,
+          city: a.city,
+          state: a.state,
+          pincode: a.pincode,
+          isDefault: a.isDefault,
+        }))}
+      />
     </div>
   );
 }

@@ -164,6 +164,31 @@ misleads you locally.
 so it is not a leak — just a trap. If a local build's sitemap drops to 9 URLs,
 check for this file before believing the database is down.
 
+## SiteSettings has three editors — keep them apart
+
+`SiteSettings` is one table written from three screens, and that is deliberate:
+
+| Columns | Owned by |
+|---|---|
+| Brand, contact, copy, payments, shipping, product defaults, email | **Admin → Settings** |
+| `returnsEnabled`, `defaultReturnable`, `returnWindowDays`, `returnReasons`, `returnPolicyNote`, `defaultReturnsInfo`, and the five `refund*` columns | **Admin → Returns → Return policy** |
+| `orderConfirmMode`, `autoConfirm{Prepaid,Partial,Cod}`, `autoShipOnConfirm`, `autoShipCourier` | **Admin → Orders → Order automation** |
+
+Settings shows the other two groups **read-only, with a link**. Never add a
+second editable control: `defaultReturnsInfo` had two writers — Returns owned
+it, but the settings form echoed `initial.defaultReturnsInfo` back on every
+save, so two tabs open meant a silent lost update with no error anywhere.
+
+**`currency` is dead.** It is on the model and in the DTO, but `formatINR`
+(`lib/utils.ts`) and the Razorpay order (`lib/razorpay.ts`) both hardcode
+`"INR"`. It is shown read-only rather than given an input, because a control
+that changes nothing is worse than no control. Wire those two call sites first
+if multi-currency is ever wanted.
+
+Also guarded server-side: turning **all four** payment methods off is refused,
+because `resolveAllowedModes` falls back to `["direct"]` and would silently
+turn every order into a pay-the-owner request.
+
 ## Turbopack workspace root
 
 There is a stray `package.json` + `package-lock.json` in the user's home

@@ -44,7 +44,7 @@ export function ReviewRowActions({
             approved ? "Review hidden" : "Review approved"
           )
         }
-        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 cursor-pointer"
+        className="inline-flex h-11 w-11 -m-1.5 sm:h-9 sm:w-9 sm:m-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 cursor-pointer"
         title={approved ? "Hide from storefront" : "Approve & publish"}
       >
         {approved ? <EyeOff className="h-4 w-4" /> : <Check className="h-4 w-4" />}
@@ -57,7 +57,7 @@ export function ReviewRowActions({
             featured ? "Unfeatured" : "Featured"
           )
         }
-        className={`inline-flex h-8 w-8 items-center justify-center rounded-md transition-colors hover:bg-muted disabled:opacity-50 cursor-pointer ${
+        className={`inline-flex h-11 w-11 -m-1.5 sm:h-9 sm:w-9 sm:m-0 items-center justify-center rounded-md transition-colors hover:bg-muted disabled:opacity-50 cursor-pointer ${
           featured ? "text-accent" : "text-muted-foreground hover:text-foreground"
         }`}
         title={featured ? "Remove from featured" : "Show first (featured)"}
@@ -70,7 +70,7 @@ export function ReviewRowActions({
           if (!confirm("Delete this review permanently?")) return;
           run(() => deleteReview(id), "Review deleted");
         }}
-        className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-50 cursor-pointer"
+        className="inline-flex h-11 w-11 -m-1.5 sm:h-9 sm:w-9 sm:m-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-50 cursor-pointer"
         title="Delete review"
       >
         <Trash className="h-4 w-4" />

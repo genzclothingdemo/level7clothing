@@ -639,73 +639,196 @@ export async function setProductSubcategory(
 }
 
 
-// -------- Settings (branding + contact) --------
+/* ------------------------------------------------------------------ */
+/*  Settings (Admin → Branding & settings)                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The columns Admin → Settings owns. Deliberately **not** every column on
+ * `SiteSettings`:
+ *
+ * - The returns/refund policy (`returnsEnabled`, `defaultReturnable`,
+ *   `returnWindowDays`, `returnReasons`, `returnPolicyNote`,
+ *   `defaultReturnsInfo`, and the five refund columns) is written by
+ *   `updateReturnDefaults` in `actions/returns.ts`.
+ * - The six order-pipeline columns are written by
+ *   `updateOrderPipelineSettings` below.
+ *
+ * Settings renders both groups read-only with a link. A field must have
+ * exactly one writer — `defaultReturnsInfo` used to be echoed back through
+ * this payload "unchanged", which is a lost update waiting to happen the
+ * moment two tabs are open.
+ *
+ * `currency` is also absent: nothing renders it (`formatINR` and the Razorpay
+ * order are both hard-wired to INR), so there is no editor for it and this
+ * action must not accept one from the browser either.
+ *
+ * Every bound is repeated here rather than left to the browser. A server
+ * action is a public endpoint reachable by id — the `maxLength` on an input
+ * is a courtesy, this is the rule.
+ */
+
+/** Empty string ⇒ `null`, i.e. "not set". Trimmed first so " " counts as empty. */
+const optionalText = (max: number) =>
+  z
+    .string()
+    .max(max, `Keep this under ${max} characters`)
+    .trim()
+    .nullable()
+    .optional()
+    .transform((v) => (v ? v : null));
+
+/**
+ * A link the storefront will render in an `href`. Absolute http(s) or a
+ * site-relative path — never `javascript:` or `data:`.
+ */
+const optionalUrl = (label: string) =>
+  optionalText(500).refine(
+    (v) => v === null || /^(https?:\/\/|\/)/i.test(v),
+    `${label} must start with https:// or /`
+  );
+
 const settingsSchema = z.object({
-  brandName: z.string().min(1),
-  tagline: z.string().default(""),
-  logoUrl: z.string().nullable().optional(),
-  heroHeadline: z.string().default(""),
-  heroSubtext: z.string().default(""),
-  aboutText: z.string().default(""),
-  contactEmail: z.string().email(),
-  contactPhone: z.string().default(""),
-  whatsapp: z.string().nullable().optional(),
-  address: z.string().nullable().optional(),
-  instagram: z.string().nullable().optional(),
-  facebook: z.string().nullable().optional(),
-  adminNotifyEmail: z.string().email(),
-  currency: z.string().default("INR"),
+  // ---- Brand & identity ----
+  brandName: z.string().trim().min(1, "Brand name is required").max(60),
+  tagline: z.string().trim().max(120).default(""),
+  logoUrl: optionalUrl("Logo URL"),
+  announcement: optionalText(200),
+
+  // ---- Storefront copy ----
+  heroHeadline: z.string().trim().max(120).default(""),
+  heroSubtext: z.string().trim().max(400).default(""),
+  aboutText: z.string().trim().max(2000).default(""),
+
+  // ---- Contact & social ----
+  contactEmail: z.string().trim().email("Contact email is not a valid address"),
+  contactPhone: z.string().trim().max(40).default(""),
+  whatsapp: optionalText(24).refine(
+    (v) => v === null || /^[+\d][\d\s()-]*$/.test(v),
+    "WhatsApp number can only contain digits, spaces, +, - and ()"
+  ),
+  address: optionalText(240),
+  instagram: optionalUrl("Instagram URL"),
+  facebook: optionalUrl("Facebook URL"),
+
+  // ---- Notifications ----
+  adminNotifyEmail: z
+    .string()
+    .trim()
+    .email("Notification email is not a valid address"),
+
+  // ---- Shipping ----
   freeShippingThreshold: z.coerce
     .number()
-    .int()
+    .int("Free shipping threshold must be a whole number of rupees")
     .nonnegative()
+    .max(1_000_000)
     .nullable()
     .optional(),
-  // Per-method availability.
+
+  // ---- Payments: per-method availability ----
   codEnabled: z.boolean().default(true),
   prepaidEnabled: z.boolean().default(true),
   partialEnabled: z.boolean().default(true),
   directEnabled: z.boolean().default(true),
-  // Integration master switches.
+
+  // ---- Integration master switches ----
   razorpayEnabled: z.boolean().default(false),
   nimbusEnabled: z.boolean().default(false),
-  announcement: z.string().nullable().optional(),
+
+  // ---- Product defaults ----
   // Store-wide product-page copy. Every product inherits these unless it
   // overrides them; blank hides that section on every product page.
-  defaultMaterialsCare: z.string().default(""),
-  defaultShippingInfo: z.string().default(""),
-  defaultReturnsInfo: z.string().default(""),
+  // `defaultReturnsInfo` is the third block and is owned by Returns.
+  defaultMaterialsCare: z.string().max(4000).default(""),
+  defaultShippingInfo: z.string().max(4000).default(""),
 });
 
 export type SettingsInput = z.input<typeof settingsSchema>;
+/** Exactly what was written, so the form can rebase its "unsaved" baseline. */
+export type SettingsSaved = z.output<typeof settingsSchema> & {
+  freeShippingThreshold: number | null;
+};
+
+/** Field → the label the admin actually sees, so an error names the control. */
+const SETTINGS_FIELD_LABEL: Record<string, string> = {
+  brandName: "Brand name",
+  tagline: "Tagline",
+  logoUrl: "Logo",
+  announcement: "Announcement bar",
+  heroHeadline: "Hero headline",
+  heroSubtext: "Hero subtext",
+  aboutText: "About text",
+  contactEmail: "Contact email",
+  contactPhone: "Contact phone",
+  whatsapp: "WhatsApp number",
+  address: "Studio address",
+  instagram: "Instagram URL",
+  facebook: "Facebook URL",
+  adminNotifyEmail: "Send order & lead emails to",
+  freeShippingThreshold: "Free shipping above",
+  defaultMaterialsCare: "Materials & Care",
+  defaultShippingInfo: "Shipping & Delivery",
+};
 
 export async function updateSettings(input: SettingsInput) {
   await requireAdmin();
+
   const parsed = settingsSchema.safeParse(input);
   if (!parsed.success) {
-    return { ok: false as const, error: parsed.error.issues[0].message };
+    const issue = parsed.error.issues[0];
+    const label = SETTINGS_FIELD_LABEL[String(issue.path[0])];
+    return {
+      ok: false as const,
+      error: label ? `${label}: ${issue.message}` : issue.message,
+    };
   }
-  const data = parsed.data;
 
-  await prisma.siteSettings.upsert({
-    where: { id: "main" },
-    update: {
-      ...data,
-      freeShippingThreshold: data.freeShippingThreshold ?? null,
-      razorpayEnabled: data.razorpayEnabled ?? false,
-      nimbusEnabled: data.nimbusEnabled ?? false,
-    },
-    create: {
-      id: "main",
-      ...data,
-      freeShippingThreshold: data.freeShippingThreshold ?? null,
-      razorpayEnabled: data.razorpayEnabled ?? false,
-      nimbusEnabled: data.nimbusEnabled ?? false,
-    },
-  });
+  const data: SettingsSaved = {
+    ...parsed.data,
+    freeShippingThreshold: parsed.data.freeShippingThreshold ?? null,
+  };
 
+  /**
+   * All four methods off does not close the store — `resolveAllowedModes`
+   * falls back to `["direct"]` when the intersection is empty, so every order
+   * would silently become a pay-the-owner request. Refuse it here rather than
+   * let the storefront quietly reinterpret it.
+   */
+  if (
+    !data.codEnabled &&
+    !data.prepaidEnabled &&
+    !data.partialEnabled &&
+    !data.directEnabled
+  ) {
+    return {
+      ok: false as const,
+      error:
+        "Leave at least one payment method on. With all four off, checkout silently falls back to Customised order (pay to owner).",
+    };
+  }
+
+  try {
+    await prisma.siteSettings.upsert({
+      where: { id: "main" },
+      update: data,
+      // Omitted columns (returns, refunds, pipeline, currency) fall to their
+      // schema defaults — this action never writes them.
+      create: { id: "main", ...data },
+    });
+  } catch (err) {
+    console.error("[admin] updateSettings failed:", err);
+    return {
+      ok: false as const,
+      error: "Could not save — please try again.",
+    };
+  }
+
+  // Branding is in the layout shell (header, footer, manifest), so the whole
+  // tree has to be revalidated, not just the home page.
   revalidatePath("/", "layout");
-  return { ok: true as const };
+  revalidatePath("/admin/settings");
+  return { ok: true as const, settings: data };
 }
 
 // -------- Orders --------

@@ -12,13 +12,13 @@ import {
 } from "@/lib/analytics";
 import { ColumnChart } from "@/components/admin/finance-chart";
 import {
-  ActionRow,
   Caveat,
   Empty,
   NotMeasured,
   Panel,
   StatTile,
   TileGrid,
+  WorkQueue,
   formatCount,
   formatINR,
   formatPercent,
@@ -31,9 +31,15 @@ export const metadata = { title: "Dashboard" };
 /**
  * Admin → Dashboard → Overview.
  *
- * The executive view, and the first of the workspace's six sections. It
- * answers three questions in the order an owner actually asks them: what did
- * the store take, where is it going, and what is waiting for me.
+ * The executive view, and the first of the workspace's six sections.
+ *
+ * **Work first, then money.** The queue used to be a half-width panel below
+ * the headline tiles and a full-width chart — roughly 1,100px down, under the
+ * fold at every size. That is the wrong order for the screen an owner opens at
+ * nine in the morning: revenue is a report you consult, the queue is work you
+ * clear, and it is the only block here with an action behind it. So the order
+ * is now what needs doing → what the store took → how it is trending → the
+ * shape of the business.
  *
  * Two deliberate scoping decisions, both stated on screen rather than only
  * here:
@@ -41,12 +47,13 @@ export const metadata = { title: "Dashboard" };
  * - The tiles and the chart are scoped by the range control above them.
  * - **"Needs attention" is not.** An order that has been waiting a month to be
  *   confirmed is more urgent than one from this morning, so filtering that
- *   panel by the same window would hide precisely the rows that matter.
+ *   strip by the same window would hide precisely the rows that matter.
  *
- * The fourth panel is the list of things this workspace *cannot* compute. It
- * sits on Overview in full rather than tucked into a sub-page, because the
+ * The last panel is the list of things this workspace *cannot* compute — the
  * most expensive mistake available on a screen like this is believing a figure
- * exists when it does not — and every row doubles as the next thing to build.
+ * exists when it does not, and every row doubles as the next thing to build.
+ * It stays on Overview in full, but collapsed: it is read once and never
+ * changes, and expanded it outweighed every live figure on the page.
  */
 export default async function AdminOverview({
   searchParams,
@@ -76,60 +83,68 @@ export default async function AdminOverview({
   const vs = previous ? `vs ${previous.label}` : undefined;
   const nothing = revenue.orders === 0 && revenue.cancelledOrders === 0;
 
+  /**
+   * The queue, as chips.
+   *
+   * `short` is a noun phrase, not a sentence — these sit side by side in a
+   * strip, so "orders waiting to be confirmed" and "cart leads nobody has
+   * followed up" would wrap to two lines each and turn six chips into a
+   * paragraph. `alert` is reserved for the three queues that cost money while
+   * they sit there: an unconfirmed order, an open return and a live product
+   * nobody can buy. Colouring all eight red would make none of them read as
+   * urgent.
+   */
   const queueRows = [
     {
       count: queue.pendingOrders,
-      label: "orders waiting to be confirmed",
-      detail: "Nothing reaches a courier until one of these is accepted.",
+      short: "to confirm",
       href: "/admin/orders?status=pending",
       tone: "alert" as const,
     },
     {
       count: queue.awaitingDispatch,
-      label: "confirmed orders with no AWB yet",
-      detail:
-        queue.draftStaged > 0
-          ? `${queue.draftStaged} already ${queue.draftStaged === 1 ? "has" : "have"} a NimbusPost draft staged, waiting to be booked — that is the review gate, not a backlog.`
-          : "None have a NimbusPost draft staged yet.",
+      short: "to dispatch",
       href: "/admin/orders?status=confirmed",
       tone: "neutral" as const,
     },
     {
       count: queue.openReturns,
-      label: "return requests still open",
-      detail: "Pending, approved, picked up or received — none of them finished.",
+      short: "returns open",
+      one: "return open",
       href: "/admin/returns?status=all",
       tone: "alert" as const,
     },
     {
       count: queue.outOfStock,
-      label: "live product pages that cannot be bought",
-      detail: "Active on the storefront with no stock left.",
+      short: "out of stock",
       href: "/admin/products",
       tone: "alert" as const,
     },
     {
       count: queue.unreadChats,
-      label: "chats with an unread message",
+      short: "unread chats",
+      one: "unread chat",
       href: "/admin/messages",
       tone: "neutral" as const,
     },
     {
       count: queue.unreadInquiries,
-      label: "unread contact-form inquiries",
+      short: "inquiries",
+      one: "inquiry",
       href: "/admin/messages",
       tone: "neutral" as const,
     },
     {
       count: queue.unapprovedReviews,
-      label: "reviews awaiting moderation",
-      detail: "Not visible on the storefront until approved.",
+      short: "reviews to approve",
+      one: "review to approve",
       href: "/admin/reviews",
       tone: "neutral" as const,
     },
     {
       count: queue.interestedLeads,
-      label: "cart leads nobody has followed up",
+      short: "leads to follow up",
+      one: "lead to follow up",
       href: "/admin/leads",
       tone: "neutral" as const,
     },
@@ -145,6 +160,14 @@ export default async function AdminOverview({
             connection before acting on anything here.
           </p>
         )}
+
+        {/* ---- What needs doing ------------------------------------------
+            First, above the money. This is the only block on the page with an
+            action behind it, and it is the question the admin is opened to
+            answer. It is also the one thing here the range control does not
+            touch — see the (i) on it. */}
+
+        <WorkQueue rows={queueRows} />
 
         {/* ---- Headline --------------------------------------------------- */}
 
@@ -244,32 +267,13 @@ export default async function AdminOverview({
           />
         </Panel>
 
-        {/* ---- The queue + the shape of the business ---------------------- */}
+        {/* ---- The shape of the business ---------------------------------
+            Two panels of four tiles each, side by side: who is buying, and
+            how fast the store gets their parcel out. They pair because they
+            are the same shape and the same question asked from two ends —
+            demand and delivery. */}
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <Panel
-            title="Needs attention"
-            tip="Everything currently sitting in a queue, across the whole store. Deliberately NOT filtered by the time range above: an order that has been waiting a month to be confirmed is more urgent than one placed this morning, and scoping this panel to the last 30 days would hide it."
-            subtitle="Right now, not this period. Every row links to the screen where you can clear it."
-          >
-            {queueRows.length === 0 ? (
-              <Empty>Nothing is waiting. Every queue in the store is empty.</Empty>
-            ) : (
-              <ul className="-my-1">
-                {queueRows.map((r) => (
-                  <ActionRow
-                    key={r.label}
-                    count={formatCount(r.count)}
-                    label={r.label}
-                    detail={r.detail}
-                    href={r.href}
-                    tone={r.tone}
-                  />
-                ))}
-              </ul>
-            )}
-          </Panel>
-
           <Panel
             title="Who is buying"
             tip={METRIC.newVsReturning}
@@ -325,19 +329,19 @@ export default async function AdminOverview({
               has the segments and the cohort retention behind these.
             </Caveat>
           </Panel>
-        </div>
 
-        {/* ---- Operations at a glance ------------------------------------- */}
-
-        <Panel
-          title="Getting orders out"
-          tip={METRIC.dispatchTime}
-          subtitle={`Measured over orders placed in ${win.phrase} that have actually shipped.`}
-        >
-          {nothing ? (
-            <Empty>No orders placed in this period.</Empty>
-          ) : (
-            <TileGrid>
+          <Panel
+            title="Getting orders out"
+            tip={METRIC.dispatchTime}
+            subtitle={`Measured over orders placed in ${win.phrase} that have actually shipped.`}
+          >
+            {nothing ? (
+              <Empty>No orders placed in this period.</Empty>
+            ) : (
+              // Two up, not `TileGrid`: this panel is now a half-width column,
+              // where four tiles across would put "Median delivery" on three
+              // lines. It matches "Who is buying" beside it.
+              <div className="grid grid-cols-2 gap-3">
               <StatTile
                 label="Median dispatch"
                 value={formatHours(report.fulfilment.dispatch.medianHours)}
@@ -373,16 +377,17 @@ export default async function AdminOverview({
                 good="down"
                 sub={`${report.returnRate.ordersWithReturn} of ${revenue.orders} orders`}
               />
-            </TileGrid>
-          )}
-          <Caveat>
-            <Link href="/admin/finance/fulfilment" className="underline hover:text-accent">
-              Fulfilment
-            </Link>{" "}
-            has the distributions behind these medians, the courier split and
-            the full returns breakdown.
-          </Caveat>
-        </Panel>
+              </div>
+            )}
+            <Caveat>
+              <Link href="/admin/finance/fulfilment" className="underline hover:text-accent">
+                Fulfilment
+              </Link>{" "}
+              has the distributions behind these medians, the courier split and
+              the full returns breakdown.
+            </Caveat>
+          </Panel>
+        </div>
 
         {/* ---- The honest blank ------------------------------------------- */}
 

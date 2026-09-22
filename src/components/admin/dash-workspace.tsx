@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import { WorkspaceNav } from "@/components/admin/finance-nav";
+import { InfoTip } from "@/components/store/info-tip";
 
 /**
  * The chrome every section of the analytics workspace wears: one heading, one
@@ -22,13 +23,23 @@ import { WorkspaceNav } from "@/components/admin/finance-nav";
 export function Workspace({ children }: { children: React.ReactNode }) {
   return (
     <div>
-      <h1 className="font-serif text-3xl">Dashboard</h1>
-      <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-        Every figure here states its own definition behind the (i) beside it —
-        if you cannot reproduce a number from that sentence, treat it as a bug.
-        Money is in whole rupees, and orders count from when they were placed,
-        not when they were paid.
-      </p>
+      {/* The conventions this workspace runs on used to sit here as three
+          lines of prose above every section, on every visit. They are true
+          forever and change nothing day to day, so they are behind the (i)
+          instead — which is also the thing they are describing. */}
+      <h1 className="flex items-center gap-1.5 font-serif text-3xl">
+        Dashboard
+        <InfoTip term="How to read this workspace">
+          Every figure states its own definition behind the (i) beside it — if
+          you cannot reproduce a number from that sentence, treat it as a bug.
+          Money is in whole rupees. Orders count from when they were{" "}
+          <strong className="font-medium">placed</strong>, not when they were
+          paid, and days start at midnight IST. Two things sit outside the
+          range control and say so where they appear: refunds, dated by when
+          the money left, and the lifetime customer figures, which are
+          all-time.
+        </InfoTip>
+      </h1>
 
       <div className="mt-4">
         <Suspense

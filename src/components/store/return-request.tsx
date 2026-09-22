@@ -409,12 +409,21 @@ export function ReturnRequest({
                           )}
 
                           {/* What they get back, before they commit to it.
-                              Updates as the reason changes — the our-fault
-                              waiver is the whole reason this isn't static. */}
-                          <RefundPreview
-                            refund={refundFor(line, form.reason, form.quantity)}
-                            note={policy?.refund?.note ?? ""}
-                          />
+                              Withheld until a reason is chosen: the figure
+                              depends on it (damaged and wrong-item returns can
+                              waive the fee), so quoting one against a blank
+                              reason shows a number that is about to change. */}
+                          {form.reason ? (
+                            <RefundPreview
+                              refund={refundFor(line, form.reason, form.quantity)}
+                              note={policy?.refund?.note ?? ""}
+                            />
+                          ) : (
+                            <p className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                              Pick a reason and we&apos;ll show you exactly what
+                              comes back.
+                            </p>
+                          )}
 
                           <label className="block">
                             <span className="label">Anything else we should know?</span>

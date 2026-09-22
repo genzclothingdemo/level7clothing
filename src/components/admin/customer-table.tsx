@@ -1,13 +1,19 @@
 import Link from "next/link";
-import { ChevronRight, Mail, Phone } from "lucide-react";
+import { ChevronRight, Mail, MapPin, Phone } from "lucide-react";
 import { formatINR } from "@/lib/utils";
 import { TableScroll } from "@/components/admin/form-kit";
-import { adminLink, type CustomerRecord } from "@/lib/customers";
+import {
+  adminLink,
+  customerSignals,
+  type CustomerRecord,
+} from "@/lib/customers";
 import {
   CustomerStatusBadge,
-  SourceLine,
+  MergeTip,
+  SignalBadges,
   formatAgo,
   formatDayTime,
+  sourceSummary,
 } from "@/components/admin/customer-ui";
 
 /**
@@ -16,8 +22,27 @@ import {
  * Duplicated markup rather than a table squeezed into 320px, because the two
  * want opposite things. A table wants a row to be scannable across six
  * columns; a phone wants the name and the money first and the rest folded
- * underneath. Both render the same data from the same record, so there is no
- * second source of truth — only a second arrangement.
+ * underneath. Both render the same record, so there is no second source of
+ * truth — only a second arrangement.
+ *
+ * ── What a row is for ────────────────────────────────────────────────────────
+ *
+ * Five questions, in the order somebody actually asks them: **who**, **how do
+ * I reach them**, **did they buy**, **how much**, **how recently** — plus a
+ * sixth column for anything that wants doing about them.
+ *
+ * What is deliberately *not* here is the provenance line ("Account + 4 account
+ * orders + 1 cart lead + 1 chat + 1 return"). It was the longest string on
+ * every row and it answers a second-impression question: *how do you know this
+ * is one person?* It now lives behind the "(i)" beside the name, and only on
+ * records that actually merged something.
+ *
+ * ── Why the card is not one big link ─────────────────────────────────────────
+ *
+ * It used to be, which made the email and the phone number un-tappable: an
+ * `<a>` inside an `<a>` is invalid, so they had to render as dead text on the
+ * screen where reaching someone matters most. The card is a plain container
+ * now, with the name, each contact detail and the chevron as separate targets.
  */
 export function CustomerTable({
   customers,
@@ -31,49 +56,91 @@ export function CustomerTable({
     <>
       {/* ---------------- phones: stacked cards ---------------- */}
       <ul className="space-y-2 md:hidden">
-        {customers.map((c) => (
-          <li key={c.id}>
-            <Link
-              href={adminLink.customer(c.id)}
-              className="block rounded-lg border border-border bg-card p-3 transition-colors hover:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        {customers.map((c) => {
+          const signals = customerSignals(c);
+          return (
+            <li
+              key={c.id}
+              className="rounded-lg border border-border bg-card p-3"
             >
               <div className="flex items-start gap-2">
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{c.displayName}</p>
-                  <SourceLine
-                    parts={c.sourceParts}
-                    className="mt-0.5 block max-w-full text-[11px] text-muted-foreground"
-                  />
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-1">
+                  <Link
+                    href={adminLink.customer(c.id)}
+                    title={sourceSummary(c)}
+                    className="min-w-0 max-w-full truncate text-sm font-medium transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {c.displayName}
+                  </Link>
+                  <CustomerStatusBadge status={c.status} />
+                  <MergeTip customer={c} />
                 </div>
-                <CustomerStatusBadge status={c.status} />
+                <Link
+                  href={adminLink.customer(c.id)}
+                  aria-label={`Open ${c.displayName}`}
+                  className="-mr-1 -mt-1 grid h-11 w-11 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                </Link>
               </div>
 
-              <div className="mt-2 space-y-0.5 text-xs text-muted-foreground">
+              {/* Real links: this is the screen you open to contact somebody. */}
+              <div className="mt-1 flex flex-col text-xs text-muted-foreground">
                 {c.email && (
-                  <p className="flex items-center gap-1.5">
-                    <Mail className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  <a
+                    href={`mailto:${c.email}`}
+                    className="flex min-h-11 items-center gap-2 hover:text-accent"
+                  >
+                    <Mail className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                     <span className="truncate">{c.email}</span>
-                  </p>
+                  </a>
                 )}
                 {c.phone && (
-                  <p className="flex items-center gap-1.5">
-                    <Phone className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  <a
+                    href={`tel:${c.phone}`}
+                    className="flex min-h-11 items-center gap-2 hover:text-accent"
+                  >
+                    <Phone className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                     <span className="truncate">{c.phone}</span>
+                  </a>
+                )}
+                {c.location && (
+                  <p className="flex items-center gap-2 py-1">
+                    <MapPin className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    <span className="truncate">{c.location}</span>
                   </p>
+                )}
+                {!c.email && !c.phone && !c.location && (
+                  <p className="py-1">No contact details on record.</p>
                 )}
               </div>
 
-              <div className="mt-2.5 grid grid-cols-3 gap-2 border-t border-border pt-2.5">
-                <MiniStat label="Orders" value={c.stats.orderCount} />
-                <MiniStat label="Spend" value={formatINR(c.stats.lifetimeSpend)} />
+              <div className="mt-2 grid grid-cols-2 gap-2 border-t border-border pt-2">
+                <MiniStat
+                  label={c.stats.orderCount > 0 ? "Spend" : "Status"}
+                  value={
+                    c.stats.orderCount > 0
+                      ? formatINR(c.stats.lifetimeSpend)
+                      : "Never ordered"
+                  }
+                  sub={
+                    c.stats.orderCount > 0
+                      ? `${c.stats.orderCount} order${c.stats.orderCount === 1 ? "" : "s"}`
+                      : undefined
+                  }
+                />
                 <MiniStat
                   label="Last seen"
                   value={formatAgo(c.stats.lastActivityAt, now)}
                 />
               </div>
-            </Link>
-          </li>
-        ))}
+
+              {signals.length > 0 && (
+                <SignalBadges signals={signals} className="mt-2" />
+              )}
+            </li>
+          );
+        })}
       </ul>
 
       {/* ---------------- md and up: the table ---------------- */}
@@ -83,96 +150,105 @@ export function CustomerTable({
             <tr className="border-b border-border text-left">
               <Th>Customer</Th>
               <Th>Contact</Th>
-              <Th>Status</Th>
-              <Th align="right">Orders</Th>
               <Th align="right">Spend</Th>
-              <Th align="right">Last activity</Th>
+              <Th>Needs attention</Th>
+              <Th align="right">Last seen</Th>
               <th className="w-10" />
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {customers.map((c) => (
-              <tr key={c.id} className="align-top hover:bg-muted/40">
-                <td className="max-w-64 px-3 py-3">
-                  <Link
-                    href={adminLink.customer(c.id)}
-                    className="block truncate font-medium transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            {customers.map((c) => {
+              const signals = customerSignals(c);
+              return (
+                <tr key={c.id} className="align-top hover:bg-muted/40">
+                  <td className="max-w-60 px-3 py-3">
+                    <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1">
+                      <Link
+                        href={adminLink.customer(c.id)}
+                        title={sourceSummary(c)}
+                        className="min-w-0 max-w-full truncate font-medium transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        {c.displayName}
+                      </Link>
+                      <MergeTip customer={c} />
+                    </div>
+                    <CustomerStatusBadge status={c.status} className="mt-1" />
+                  </td>
+
+                  <td className="max-w-56 px-3 py-3 text-xs text-muted-foreground">
+                    {c.email && (
+                      <a
+                        href={`mailto:${c.email}`}
+                        className="block truncate hover:text-accent"
+                        title={c.email}
+                      >
+                        {c.email}
+                      </a>
+                    )}
+                    {c.phone && (
+                      <a
+                        href={`tel:${c.phone}`}
+                        className="block truncate hover:text-accent"
+                      >
+                        {c.phone}
+                      </a>
+                    )}
+                    {!c.email && !c.phone && <span>—</span>}
+                    {c.location && (
+                      <span className="block truncate">{c.location}</span>
+                    )}
+                  </td>
+
+                  <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums">
+                    {c.stats.orderCount > 0 ? (
+                      <>
+                        <span className="font-medium">
+                          {formatINR(c.stats.lifetimeSpend)}
+                        </span>
+                        <span className="block text-[11px] text-muted-foreground">
+                          {c.stats.orderCount} order
+                          {c.stats.orderCount === 1 ? "" : "s"}
+                          {c.stats.cancelledCount > 0 &&
+                            ` · ${c.stats.cancelledCount} cancelled`}
+                        </span>
+                      </>
+                    ) : (
+                      <span
+                        className="text-muted-foreground"
+                        title="No order has ever been placed, so there is nothing to total."
+                      >
+                        —
+                      </span>
+                    )}
+                  </td>
+
+                  <td className="max-w-56 px-3 py-3">
+                    {signals.length > 0 ? (
+                      <SignalBadges signals={signals} />
+                    ) : (
+                      <span className="text-xs text-muted-foreground">—</span>
+                    )}
+                  </td>
+
+                  <td
+                    className="whitespace-nowrap px-3 py-3 text-right text-xs text-muted-foreground"
+                    title={formatDayTime(c.stats.lastActivityAt)}
                   >
-                    {c.displayName}
-                  </Link>
-                  <SourceLine
-                    parts={c.sourceParts}
-                    className="mt-0.5 block max-w-full text-xs text-muted-foreground"
-                  />
-                </td>
+                    {formatAgo(c.stats.lastActivityAt, now)}
+                  </td>
 
-                <td className="max-w-56 px-3 py-3 text-xs text-muted-foreground">
-                  {c.email && (
-                    <a
-                      href={`mailto:${c.email}`}
-                      className="block truncate hover:text-accent"
-                      title={c.email}
+                  <td className="px-2 py-3 text-right">
+                    <Link
+                      href={adminLink.customer(c.id)}
+                      aria-label={`Open ${c.displayName}`}
+                      className="inline-grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                     >
-                      {c.email}
-                    </a>
-                  )}
-                  {c.phone && (
-                    <a
-                      href={`tel:${c.phone}`}
-                      className="block truncate hover:text-accent"
-                    >
-                      {c.phone}
-                    </a>
-                  )}
-                  {!c.email && !c.phone && <span>—</span>}
-                  {c.location && (
-                    <span className="block truncate">{c.location}</span>
-                  )}
-                </td>
-
-                <td className="px-3 py-3">
-                  <CustomerStatusBadge status={c.status} />
-                </td>
-
-                <td className="px-3 py-3 text-right tabular-nums">
-                  {c.stats.orderCount}
-                  {c.stats.cancelledCount > 0 && (
-                    <span
-                      className="block text-[11px] text-muted-foreground"
-                      title="Cancelled orders are excluded from spend"
-                    >
-                      {c.stats.cancelledCount} cancelled
-                    </span>
-                  )}
-                </td>
-
-                <td className="px-3 py-3 text-right font-medium tabular-nums">
-                  {formatINR(c.stats.lifetimeSpend)}
-                  {c.stats.stillDue > 0 && (
-                    <span className="block text-[11px] font-normal text-orange-600 dark:text-orange-400">
-                      {formatINR(c.stats.stillDue)} due
-                    </span>
-                  )}
-                </td>
-
-                <td
-                  className="whitespace-nowrap px-3 py-3 text-right text-xs text-muted-foreground"
-                  title={formatDayTime(c.stats.lastActivityAt)}
-                >
-                  {formatAgo(c.stats.lastActivityAt, now)}
-                </td>
-
-                <td className="px-2 py-3 text-right">
-                  <Link
-                    href={adminLink.customer(c.id)}
-                    aria-label={`Open ${c.displayName}`}
-                    className="inline-grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  >
-                    <ChevronRight className="h-4 w-4" aria-hidden="true" />
-                  </Link>
-                </td>
-              </tr>
-            ))}
+                      <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                    </Link>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </TableScroll>
@@ -198,11 +274,22 @@ function Th({
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: React.ReactNode }) {
+function MiniStat({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: React.ReactNode;
+  sub?: React.ReactNode;
+}) {
   return (
     <div className="min-w-0">
       <p className="eyebrow truncate">{label}</p>
       <p className="mt-0.5 truncate text-xs font-medium tabular-nums">{value}</p>
+      {sub && (
+        <p className="truncate text-[11px] text-muted-foreground">{sub}</p>
+      )}
     </div>
   );
 }

@@ -262,6 +262,40 @@ export function resolveReturnPolicy(
   };
 }
 
+/**
+ * What the product page's **Returns & Refunds** block should say — or `null`
+ * when it must say nothing at all.
+ *
+ * The bug this exists to close: the block used to be driven purely by whether
+ * `resolveProductInfo()` produced any copy, so a piece marked non-returnable
+ * (or a made-to-order piece, or the whole store with returns switched off) still
+ * advertised "7-day easy returns". The copy and the rule were resolved by two
+ * different functions and nothing made them agree.
+ *
+ * `null` means render no block. A caller that wants to explain the silence can
+ * read `resolveReturnPolicy().reason` itself; the default is to stay quiet,
+ * because "this is final sale" belongs next to the buy button, not in an
+ * accordion the shopper has to open.
+ */
+export function productReturnsBlock(
+  product: {
+    returnable?: boolean | null;
+    returnsInfo?: string | null;
+    isCustomisable?: boolean | null;
+  },
+  settings: {
+    returnsEnabled: boolean;
+    defaultReturnable: boolean;
+    returnWindowDays: number;
+    defaultReturnsInfo?: string;
+  }
+): { text: string; windowDays: number } | null {
+  const policy = resolveReturnPolicy(product, settings);
+  if (!policy.returnable) return null;
+  const text = policy.text.trim();
+  return text ? { text, windowDays: policy.windowDays } : null;
+}
+
 const DAY_MS = 86_400_000;
 
 export type ReturnWindow = {
@@ -496,6 +530,61 @@ export type RefundSettings = {
 };
 
 /**
+ * How much of the money comes back, as one decision rather than two numbers.
+ *
+ * There is **no `refundMode` column** and there must not be one: the mode is
+ * entirely determined by the two fee fields, so storing it as well would create
+ * a second source of truth that can disagree with the arithmetic
+ * `computeRefund` actually performs.
+ *
+ *   `full` — both fees are zero. Every approved return pays the goods value back.
+ *   `fee`  — at least one fee is set, so the store keeps a slice.
+ *
+ * The admin UI is the only thing that needs the distinction, and it needs it
+ * badly: "0 and 0" is not a policy an owner recognises as "full refund", which
+ * is most of why the refund block read as confusing.
+ */
+export type RefundMode = "full" | "fee";
+
+export function refundModeOf(
+  settings: Pick<RefundSettings, "refundFeePercent" | "refundFeeFlat">
+): RefundMode {
+  return settings.refundFeePercent > 0 || settings.refundFeeFlat > 0
+    ? "fee"
+    : "full";
+}
+
+/**
+ * What picking a mode does to the two columns.
+ *
+ * Switching to `full` must **zero** the fees rather than merely hide them: a
+ * hidden non-zero fee would keep being deducted while the screen claimed full
+ * refunds, which is precisely the class of bug the conditional UI exists to
+ * remove.
+ *
+ * Switching to `fee` must **seed** one, which is less obvious but just as
+ * necessary. The mode is derived from the fees and deliberately not stored, so
+ * returning the settings untouched would leave `refundModeOf` still answering
+ * `full` and the control would refuse to move — the fields that let you enter a
+ * fee only exist in fee mode, so nothing could ever reach it. The seed is a
+ * starting point the owner immediately sees and edits, not a decision made for
+ * them, and an existing fee is never overwritten.
+ */
+export const REFUND_FEE_SEED_PERCENT = 10;
+
+export function applyRefundMode<T extends Pick<RefundSettings, "refundFeePercent" | "refundFeeFlat">>(
+  mode: RefundMode,
+  settings: T
+): T {
+  if (mode === "full") {
+    return { ...settings, refundFeePercent: 0, refundFeeFlat: 0 };
+  }
+  return refundModeOf(settings) === "fee"
+    ? settings
+    : { ...settings, refundFeePercent: REFUND_FEE_SEED_PERCENT };
+}
+
+/**
  * Mirrors the `@default(...)` values on SiteSettings — keep the two in step.
  * Used when the settings row can't be read, so a DB blip charges no fee rather
  * than inventing one.
@@ -564,6 +653,17 @@ export type RefundBreakdown = {
   alreadyRefunded: number;
   /** The reason was our mistake and the fee was waived. */
   feeWaived: boolean;
+  /**
+   * What the fee *would* have been, had it not been waived. Zero whenever no
+   * fee was configured in the first place.
+   *
+   * `feeWaived` alone can't be shown to anyone: it is true for a damaged item
+   * even on a store that charges nothing, where "the fee is waived" names a fee
+   * that never existed. This is the number that makes the waiver worth saying —
+   * both to the owner ("this one is full refund because it's our fault") and to
+   * the shopper.
+   */
+  waivedFee: number;
   /** The fee came out bigger than the gross and was clamped to it. */
   feeCapped: boolean;
 };
@@ -698,10 +798,14 @@ export function computeRefund(input: {
   const ourFault = isOurFaultReason(reason);
   const feeWaived = ourFault && settings.waiveRefundFeeOnOurFault;
   const percentFee = Math.round((gross * rupees(settings.refundFeePercent)) / 100);
-  const rawFee = feeWaived ? 0 : percentFee + rupees(settings.refundFeeFlat);
+  const fullFee = percentFee + rupees(settings.refundFeeFlat);
+  const rawFee = feeWaived ? 0 : fullFee;
   const fee = Math.min(Math.max(0, rawFee), gross);
   const feeCapped = rawFee > gross;
   const net = Math.max(0, gross - fee);
+  // Clamped the same way the real fee is, so "we waived ₹200" can never quote
+  // more than the refund it was going to come out of.
+  const waivedFee = feeWaived ? Math.min(fullFee, gross) : 0;
 
   /* ---- the same numbers, in sentences a customer can read ---- */
   if (collected <= 0) {
@@ -726,8 +830,10 @@ export function computeRefund(input: {
         `Capped at ${formatINR(payable)} — the rest of this order's refundable amount has already been paid back.`
       );
     }
-    if (feeWaived) {
-      why.push("This one is on us, so no return fee is charged.");
+    if (waivedFee > 0) {
+      why.push(
+        `This one is on us, so the ${formatINR(waivedFee)} return fee is waived — you get the full amount back.`
+      );
     } else if (fee > 0) {
       why.push(`Less a ${formatINR(fee)} return fee.`);
     }
@@ -762,6 +868,7 @@ export function computeRefund(input: {
     payable,
     alreadyRefunded,
     feeWaived,
+    waivedFee,
     feeCapped,
   };
 }
@@ -776,6 +883,12 @@ export function refundPreviewLine(b: RefundBreakdown): string {
   }
   if (b.net <= 0) {
     return `You'll receive nothing back — the ${formatINR(b.fee)} return fee covers the whole amount.`;
+  }
+  // The waiver is named, not just applied. A shopper who has read the policy
+  // knows a fee exists; seeing the full amount with no explanation reads as a
+  // mistake about to be corrected, which is exactly when they write in.
+  if (b.waivedFee > 0) {
+    return `You'll receive ${formatINR(b.net)} in full — this one's our fault, so the ${formatINR(b.waivedFee)} return fee is waived`;
   }
   return b.fee > 0
     ? `You'll receive ${formatINR(b.net)} — ${formatINR(b.fee)} return fee applies`

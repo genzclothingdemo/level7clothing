@@ -191,20 +191,50 @@ misleads you locally.
 so it is not a leak — just a trap. If a local build's sitemap drops to 9 URLs,
 check for this file before believing the database is down.
 
-## SiteSettings has three editors — keep them apart
+## SiteSettings — Admin → Settings is now the only editor
 
-`SiteSettings` is one table written from three screens, and that is deliberate:
+This used to say "three editors, keep them apart". It is now **one**, at
+`/admin/settings`, in seven tabs: `store · orders · payments · shipping ·
+returns · storefront · email`. Returns and Order automation were editable on
+their own screens and are now *mounted into* Settings; those screens keep a
+**read-only strip with a link** ("Order automation · AUTO-CONFIRM: MANUAL ·
+DRAFT ONLY · Change in settings").
 
-| Columns | Owned by |
-|---|---|
-| Brand, contact, copy, payments, shipping, product defaults, email | **Admin → Settings** |
-| `returnsEnabled`, `defaultReturnable`, `returnWindowDays`, `returnReasons`, `returnPolicyNote`, `defaultReturnsInfo`, and the five `refund*` columns | **Admin → Returns → Return policy** |
-| `orderConfirmMode`, `autoConfirm{Prepaid,Partial,Cod}`, `autoShipOnConfirm`, `autoShipCourier` | **Admin → Orders → Order automation** |
+| Columns | Tab | Form component | Server action |
+|---|---|---|---|
+| Brand, contact, copy, payments, shipping, product defaults, email | store / payments / shipping / storefront / email | `settings-form.tsx` | `updateSettings` |
+| `returnsEnabled`, `defaultReturnable`, `returnWindowDays`, `returnReasons`, `returnPolicyNote`, `defaultReturnsInfo`, five `refund*` | returns | `return-policy-form.tsx` (`ReturnPolicyCard`) | `updateReturnDefaults` |
+| `orderConfirmMode`, `autoConfirm{Prepaid,Partial,Cod}`, `autoShipOnConfirm`, `autoShipCourier` | orders | `settings-sections.tsx` | `updateOrderPipelineSettings` |
 
-Settings shows the other two groups **read-only, with a link**. Never add a
-second editable control: `defaultReturnsInfo` had two writers — Returns owned
-it, but the settings form echoed `initial.defaultReturnsInfo` back on every
-save, so two tabs open meant a silent lost update with no error anywhere.
+**One save bar, three writers, and each key only ever goes to the action that
+owns it** — and only when dirty. Nothing is round-tripped through an action
+that doesn't own it, which is the rule that matters: `defaultReturnsInfo` once
+had two writers (Returns owned it, and the settings form echoed
+`initial.defaultReturnsInfo` back on every save), so two tabs open meant a
+silent lost update with no error anywhere.
+
+`ReturnPolicyCard` renders a `<div>` with a `type="button"` submit rather than
+a `<form>`, specifically so it nests inside the settings form. A controlled
+`ReturnPolicyFields` is exported alongside it for a caller that wants to own
+the draft. **Adding a tab means adding the key to `TABS` in
+`src/lib/settings-tabs.ts`** — that module has no `"use client"` directive on
+purpose, because the server page calls `isTabKey()` (see the RSC traps above);
+an unknown `?tab=` falls back to the first tab rather than 404ing.
+
+## Returns copy and the returns *rule* must be resolved together
+
+`resolveProductInfo()` only picks copy — product text, else the store default.
+It has never known whether a piece can actually be returned, so a product
+marked non-returnable still rendered "7-day easy returns" on its page. The copy
+and the rule were resolved by two different functions and nothing made them
+agree.
+
+The product page must use **`productReturnsBlock(product, settings)`**
+(`lib/returns.ts`), which returns `null` when the piece is non-returnable —
+explicit `false`, made-to-order, or returns off store-wide — and otherwise the
+resolved copy. `ProductInfoSections` already hides on an empty string.
+Reproduced and verified both ways: `returnable: false` → the heading and the
+copy both vanish; back to `null` → both return.
 
 **`currency` is dead.** It is on the model and in the DTO, but `formatINR`
 (`lib/utils.ts`) and the Razorpay order (`lib/razorpay.ts`) both hardcode
@@ -269,6 +299,53 @@ states and validation; the customer never names a thread id, it is resolved from
 the session or the `level7_chat_guest` cookie. Claiming happens lazily inside
 thread resolution rather than in the login action, so it also catches someone who
 signs up after chatting or logs in in another tab.
+
+## Admin table selection — one primitive, and one rule that is a safety gate
+
+`src/components/admin/selection.tsx` is the only multi-select in the admin.
+Products, media, portfolio and orders had each grown their own, each supporting
+a different subset — some had select-all, none had shift-range, none had drag.
+
+**The rule that matters: a selection is always intersected with what is
+currently visible.** Narrowing a filter must narrow what a bulk action can
+reach. Media got this wrong and it was a live hazard, not a nicety — its bulk
+bar deletes, `selectedPhotos` was derived from *all loaded* photos, so
+selecting 30, filtering to 3 and pressing Delete removed 30. Proven fixed on
+`/admin/products`: 3 selected, filter to `?q=hoodie`, selection → 0 and the
+bulk bar disappears.
+
+**The one deliberate exception is `photo-picker.tsx`**, which still accumulates
+across filters. That is not an oversight — picking photos for a product means
+browsing several filters and collecting from each, and nothing there destroys
+anything. Bulk-acting and picking want opposite rules.
+
+Two interaction details that are easy to get wrong:
+
+- **Use `SelectHandle` for rows, not `rowSelectionProps` on the row.** Every
+  admin row carries controls (hide, duplicate, edit, delete), and a
+  `pointerdown` listener on the row fires for those too — pressing Delete
+  toggled the row's selection on the way. `rowSelectionProps` now also ignores
+  presses that land on `a,button,input,select,textarea,label`.
+- **A row toggles on `pointerdown`, not `click`.** A sweep that starts on row A
+  and releases on row C never fires a click on A, so a click-driven toggle
+  leaves the first row of every drag unselected. The keyboard path survives via
+  `e.detail === 0`, which a Space/Enter-generated click reports and a real
+  pointer click never does.
+
+## Media "used by" gates the delete button — so it must list every owner
+
+`/api/admin/media` builds the `usage` map, and the library's bulk delete splits
+the selection on `usage[url].length`. A photo that no owner claims is deleted
+without a second prompt.
+
+It used to query `ProductImage` alone, with a comment asserting products were
+the only owner. That stopped being true: **portfolio items, category and
+subcategory covers, the site logo and the legacy `Product.images` array** all
+reference a media URL and none is a join table. Three category covers on this
+store were affected. All six reads now run in one `Promise.all`, bounded to the
+URLs on the current page, and each use links to the screen that owns it
+(`usageHref` in `media-library.tsx`). **Add a new owner there when you add a
+column that stores a media URL.**
 
 ## The component-orphan trap
 
@@ -419,6 +496,29 @@ NimbusPost as an unbooked draft so a human can review it before any wallet charg
 `createShipment()` (the one-shot create+book) is kept for API completeness but is
 marked **intentionally unused** — wiring it back in defeats the review gate.
 
+### What the admin shows is decided by `shipmentGateFor()`, not by the panel
+
+One pure function in `lib/orders-pipeline.ts`, **enforced by the server actions
+and used by the panel**, so the button offered and the rule applied cannot
+diverge:
+
+| gate | screen |
+|---|---|
+| `booked` — an AWB exists, tested first | **tracking only**: courier, AWB, tracking link, latest scan, Sync. Hand-editing folded away. **No booking controls at all.** |
+| `pending` | one sentence, zero controls |
+| `closed` — cancelled / payment failed | one sentence, zero controls |
+| otherwise | Ship now + Draft in NimbusPost (+ Sync once drafted) |
+
+Three bugs this replaced, all money-shaped: **one button meant two things** —
+its label flipped between "Send draft" (free) and "Book & generate AWB"
+(charges the wallet) on hidden state, same colour, no confirmation on the
+single-order path; **`booked` was `Boolean(order.trackingNumber)`**, so typing
+into the manual tracking box made the whole draft/book UI vanish as if
+NimbusPost had booked it; and **pending orders were offered "Send draft"**,
+with no status check in `dispatchOrder` either. The manual courier inputs also
+stayed editable after booking — a second writer for columns NimbusPost owns,
+the same shape as the `defaultReturnsInfo` trap above.
+
 ### Two things that will block a real booking
 
 - **Wallet is ₹0.00.** Drafts are free; booking needs a top-up.
@@ -431,6 +531,15 @@ marked **intentionally unused** — wiring it back in defeats the review gate.
 `getProductBySlug` intentionally **does not** catch DB errors. Callers turn `null`
 into `notFound()`, so swallowing an error told Google a live product was deleted.
 Let it throw → 500 → crawlers retry instead of deindexing. Don't add a try/catch back.
+
+> **It came back once already.** The upstream V2 port (`851c099`) reintroduced
+> the try/catch, and it sat there while `promotions.ts` and `getProductsBySlugs`
+> both carried comments reading "unlike `getProductBySlug`, this DOES swallow
+> errors" — the surrounding code was relying on a rule the function had stopped
+> keeping. Removed again on 2026-09-22, along with the missing `cache()` wrapper
+> this file already claimed it had: the product page asks for the same row twice
+> (`generateMetadata` and the body), which without it is two round trips to
+> Mumbai per page view.
 
 ## Commands
 

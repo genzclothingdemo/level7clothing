@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { DEFAULT_SETTINGS } from "@/lib/settings";
 import { isRazorpayConfigured } from "@/lib/razorpay";
 import { isNimbusPostConfigured } from "@/lib/nimbuspost";
-import { normaliseReturnReasons } from "@/lib/returns";
+import { DEFAULT_REFUND_SETTINGS, normaliseReturnReasons } from "@/lib/returns";
 import { normalisePipelineSettings } from "@/lib/orders-pipeline";
 import { SettingsForm } from "@/components/admin/settings-form";
 // Runtime values come from lib/, NOT from settings-ui — that file is
@@ -23,13 +23,13 @@ const PAYMENT_MODES: PaymentMode[] = ["prepaid", "cod", "partial", "direct"];
  * The settings row, read whole.
  *
  * Not `getSettings()`: that DTO is the storefront's branding shape and stops
- * short of the returns, refund and pipeline columns. This screen renders those
- * read-only — it is the only screen that shows all of them at once — so it
- * needs the row itself.
+ * short of the returns, refund and pipeline columns. This screen is now the
+ * single home for all three — the order pipeline moved in from `/admin/orders`
+ * and the return policy from `/admin/returns` — so it needs the row itself.
  *
  * A failed read falls back to the same defaults the schema declares, so the
  * form still renders during a database blip. It just cannot save until the
- * database is back, which the action reports honestly.
+ * database is back, which the actions report honestly.
  */
 async function readRow() {
   return prisma.siteSettings
@@ -38,38 +38,52 @@ async function readRow() {
 }
 
 /**
- * How much of the catalogue allows each payment method.
+ * How much of the catalogue allows each payment method, and how it answers
+ * "returnable?".
  *
- * The point is requirement 5's trap: a switch on this screen can remove an
- * option that every product in the store offers, and the admin has no way to
- * know that without these numbers. Counted over active products only —
- * a draft product's opinion does not affect a live checkout.
+ * The payment counts exist because a switch on this screen can remove an option
+ * that every product in the store offers, and the admin has no way to know that
+ * without these numbers. Counted over active products only — a draft product's
+ * opinion does not affect a live checkout.
  *
  * `paymentModes` empty is counted as Prepaid + COD, matching the fallback in
  * `checkout-client.tsx` and `resolveAllowedModes`.
+ *
+ * `returnable` is deliberately counted over the WHOLE catalogue, not just
+ * active products: a draft product inherits the store default too, and the
+ * split is there to say what changing that default would actually do.
  */
-async function readCatalogue(): Promise<SettingsFacts["catalogue"]> {
+async function readCatalogue(): Promise<{
+  catalogue: SettingsFacts["catalogue"];
+  returnableSplit: { inherit: number; yes: number; no: number; total: number };
+}> {
   const byMode = { prepaid: 0, cod: 0, partial: 0, direct: 0 } as Record<
     PaymentMode,
     number
   >;
+  const empty = { inherit: 0, yes: 0, no: 0, total: 0 };
+
   const rows = await prisma.product
-    .findMany({ where: { isActive: true }, select: { paymentModes: true } })
+    .findMany({ select: { paymentModes: true, isActive: true, returnable: true } })
     .catch(() => null);
 
-  if (!rows) return { active: 0, byMode };
+  if (!rows) return { catalogue: { active: 0, byMode }, returnableSplit: empty };
+
+  const split = { ...empty, total: rows.length };
+  let active = 0;
 
   for (const row of rows) {
-    const modes = row.paymentModes.length
-      ? row.paymentModes
-      : ["prepaid", "cod"];
+    if (row.returnable == null) split.inherit += 1;
+    else if (row.returnable) split.yes += 1;
+    else split.no += 1;
+
+    if (!row.isActive) continue;
+    active += 1;
+    const modes = row.paymentModes.length ? row.paymentModes : ["prepaid", "cod"];
     for (const m of PAYMENT_MODES) if (modes.includes(m)) byMode[m] += 1;
   }
-  return { active: rows.length, byMode };
-}
 
-function countBullets(text: string): number {
-  return text.split("\n").filter((l) => l.trim()).length;
+  return { catalogue: { active, byMode }, returnableSplit: split };
 }
 
 export default async function AdminSettings({
@@ -77,7 +91,7 @@ export default async function AdminSettings({
 }: {
   searchParams: Promise<{ tab?: string }>;
 }) {
-  const [{ tab: rawTab }, row, catalogue] = await Promise.all([
+  const [{ tab: rawTab }, row, { catalogue, returnableSplit }] = await Promise.all([
     searchParams,
     readRow(),
     readCatalogue(),
@@ -85,6 +99,9 @@ export default async function AdminSettings({
 
   const tab: TabKey = isTabKey(rawTab) ? rawTab : DEFAULT_TAB;
   const d = DEFAULT_SETTINGS;
+  // Narrowed once, so the six pipeline columns arrive as their real unions
+  // rather than as the plain `String` the schema stores them in.
+  const pipeline = normalisePipelineSettings(row);
 
   // Nullable columns are handed over as "" so the client's dirty comparison is
   // an exact string compare — see the note on SettingsDraft.
@@ -113,6 +130,7 @@ export default async function AdminSettings({
     nimbusEnabled: row?.nimbusEnabled ?? d.nimbusEnabled,
     defaultMaterialsCare: row?.defaultMaterialsCare ?? d.defaultMaterialsCare,
     defaultShippingInfo: row?.defaultShippingInfo ?? d.defaultShippingInfo,
+    ...pipeline,
   };
 
   const facts: SettingsFacts = {
@@ -120,28 +138,43 @@ export default async function AdminSettings({
     nimbusConfigured: isNimbusPostConfigured(),
     currency: row?.currency ?? d.currency,
     catalogue,
-    returns: {
+    // The return policy's starting values. `ReturnPolicyCard` owns the draft
+    // and the save from here on — these columns are deliberately NOT part of
+    // `SettingsDraft`, so the shared save bar can never write them.
+    returnPolicy: {
       returnsEnabled: row?.returnsEnabled ?? d.returnsEnabled,
       defaultReturnable: row?.defaultReturnable ?? d.defaultReturnable,
       returnWindowDays: row?.returnWindowDays ?? d.returnWindowDays,
-      returnReasonCount: normaliseReturnReasons(row?.returnReasons).length,
-      returnsInfoBullets: countBullets(
-        row?.defaultReturnsInfo ?? d.defaultReturnsInfo
-      ),
-      refundFeePercent: row?.refundFeePercent ?? 0,
-      refundFeeFlat: row?.refundFeeFlat ?? 0,
-      partialAdvanceRefundable: row?.partialAdvanceRefundable ?? false,
-      waiveRefundFeeOnOurFault: row?.waiveRefundFeeOnOurFault ?? true,
+      returnReasons: normaliseReturnReasons(row?.returnReasons),
+      returnPolicyNote: row?.returnPolicyNote ?? "",
+      refundFeePercent:
+        row?.refundFeePercent ?? DEFAULT_REFUND_SETTINGS.refundFeePercent,
+      refundFeeFlat: row?.refundFeeFlat ?? DEFAULT_REFUND_SETTINGS.refundFeeFlat,
+      partialAdvanceRefundable:
+        row?.partialAdvanceRefundable ??
+        DEFAULT_REFUND_SETTINGS.partialAdvanceRefundable,
+      waiveRefundFeeOnOurFault:
+        row?.waiveRefundFeeOnOurFault ??
+        DEFAULT_REFUND_SETTINGS.waiveRefundFeeOnOurFault,
+      refundPolicyNote: row?.refundPolicyNote ?? "",
+      defaultReturnsInfo: row?.defaultReturnsInfo ?? d.defaultReturnsInfo,
     },
-    pipeline: normalisePipelineSettings(row),
+    returnFacts: {
+      partialEnabled: row?.partialEnabled ?? d.partialEnabled,
+      returnableSplit,
+    },
+    // Stamped on the server so the policy card's "closes on" preview cannot
+    // differ between the server render and hydration.
+    todayISO: new Date().toISOString(),
   };
 
   return (
     <div>
       <h1 className="font-serif text-2xl sm:text-3xl">Branding &amp; settings</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        Your brand, your contact details and how checkout behaves. Saved
-        changes appear on the storefront immediately.
+        Everything the store is configured by, in one place — your brand, how
+        checkout behaves, what happens to an order automatically, and your
+        return policy. Saved changes appear on the storefront immediately.
       </p>
 
       <div className="mt-5">

@@ -15,6 +15,7 @@ import { VideoPreviews } from "@/components/store/video-previews";
 import { ProductViewProvider } from "@/context/product-view";
 import { priceRange, firstAvailableSelection } from "@/lib/variants";
 import { getSettings, resolveProductInfo } from "@/lib/settings";
+import { productReturnsBlock } from "@/lib/returns";
 import { siteUrl } from "@/lib/site-url";
 import { resolveVideos } from "@/lib/videos";
 import {
@@ -107,6 +108,10 @@ export default async function ProductPage({
   // Info-accordion copy: this product's own text where set, otherwise the
   // store-wide default from Settings > Product defaults.
   const info = resolveProductInfo(product, settings);
+
+  // Returns is resolved separately, because it is the one section whose copy
+  // must agree with a *rule*. See the comment where it is passed below.
+  const returnsBlock = productReturnsBlock(product, settings);
 
   // Physical specs, shown inside the Materials & Care panel when the admin has
   // filled the parcel fields.
@@ -297,7 +302,14 @@ export default async function ProductPage({
           description={product.description}
           materialsCare={info.materialsCare}
           shippingInfo={info.shippingInfo}
-          returnsInfo={info.returnsInfo}
+          /* NOT `info.returnsInfo`. `resolveProductInfo` only picks copy —
+             it has never known whether this piece can actually be returned,
+             so a product marked non-returnable still advertised "7-day easy
+             returns". `productReturnsBlock` resolves the copy and the rule
+             together and returns null when the piece is non-returnable
+             (explicit false, made-to-order, or returns off store-wide).
+             `ProductInfoSections` already hides on an empty string. */
+          returnsInfo={returnsBlock?.text ?? ""}
           rating={summary?.average ?? null}
           reviewCount={summary?.count ?? 0}
           specs={specs}

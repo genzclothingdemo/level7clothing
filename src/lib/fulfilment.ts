@@ -6,6 +6,7 @@ import {
   normalisePipelineSettings,
   pickCourier,
   resolveCollection,
+  shipmentGateFor,
   shouldAutoConfirm,
   PIPELINE_DEFAULTS,
   type Collection,
@@ -160,6 +161,12 @@ export async function createDraftForOrder(
     return { ok: true, skipped: "already staged", nimbusOrderId: order.nimbusShipmentId ?? undefined };
   }
 
+  // Enforced here rather than only in the UI, because a server action is a
+  // public endpoint reachable by id. `runConfirmationPipeline` always sets the
+  // order to confirmed before it calls this, so the confirm path is unaffected.
+  const gate = shipmentGateFor(order);
+  if (!gate.allowed) return { ok: false, error: gate.reason };
+
   const built = await buildShipmentInput(orderId);
   if (!built) return { ok: false, error: "Order not found" };
 
@@ -286,11 +293,23 @@ export async function draftReturnPickup(
  * The couriers that will carry this order, cheapest first, for the admin to
  * review before booking. Quoted from the order's real pincode and parcel, so
  * the prices shown are the prices the wallet gets charged.
+ *
+ * `collection` comes straight back out of {@link resolveCollection} — it is not
+ * recomputed here. The point is that the admin sees *what the courier will be
+ * told to collect* on the same screen where they authorise the charge: a
+ * prepaid order that somehow quoted as COD is then visible before the money
+ * moves rather than after the customer has paid at the door twice.
  */
 export async function getCourierOptionsForOrder(
   orderId: string
 ): Promise<
-  | { ok: true; options: CourierOption[]; pincode: string; paymentType: "prepaid" | "cod" }
+  | {
+      ok: true;
+      options: CourierOption[];
+      pincode: string;
+      paymentType: "prepaid" | "cod";
+      collection: Collection;
+    }
   | { ok: false; error: string }
 > {
   if (!isNimbusPostConfigured()) {
@@ -298,7 +317,7 @@ export async function getCourierOptionsForOrder(
   }
   const built = await buildShipmentInput(orderId);
   if (!built) return { ok: false, error: "Order not found" };
-  const { input } = built;
+  const { input, collection } = built;
 
   const p = input.parcel ?? {};
   const options = await listCourierOptions({
@@ -322,6 +341,7 @@ export async function getCourierOptionsForOrder(
     options,
     pincode: input.consignee.pincode,
     paymentType: input.paymentType,
+    collection,
   };
 }
 
@@ -374,9 +394,12 @@ export async function dispatchOrder(orderId: string): Promise<DispatchResult> {
 
   const order = await prisma.order.findUnique({ where: { id: orderId } });
   if (!order) return { ok: false, error: "Order not found" };
-  if (order.trackingNumber) {
-    return { ok: false, error: `This order already has an AWB (${order.trackingNumber}).` };
-  }
+
+  // Covers "already has an AWB" and adds the two states that used to fall
+  // through: a pending order (nobody has accepted it) and a cancelled or
+  // payment-failed one (nothing is being packed).
+  const gate = shipmentGateFor(order);
+  if (!gate.allowed) return { ok: false, error: gate.reason };
 
   // No draft yet → stage one and stop. Booking is a separate, deliberate act.
   if (!order.nimbusShipmentId) {
@@ -437,6 +460,52 @@ export async function dispatchOrder(orderId: string): Promise<DispatchResult> {
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * Book this order **now**, with the courier the admin just chose.
+ *
+ * The admin-facing half of "Ship now". It is still draft-first — it simply does
+ * not make the human press twice for something they have already decided.
+ * `dispatchOrder` is called at most twice:
+ *
+ *   1. no draft yet → it stages one and returns `drafted`
+ *   2. draft now exists → it books it and returns `booked`
+ *
+ * so the draft always exists in NimbusPost before the AWB does, and
+ * `createShipment()` (the one-shot create-and-book) stays unused exactly as
+ * CLAUDE.md requires. The difference from the old button is honesty: pressing
+ * "Ship now" cannot leave you with a draft and a success toast.
+ *
+ * **A failed booking leaves the draft intact.** `dispatchOrder` only writes on
+ * success, so a wallet with ₹0.00 in it produces an error and an order that
+ * still reads "draft staged" — never one that reads "shipped".
+ */
+export async function shipOrderNow(
+  orderId: string,
+  courier: { id: string; name: string } | null
+): Promise<DispatchResult> {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { status: true, trackingNumber: true },
+  });
+  if (!order) return { ok: false, error: "Order not found" };
+
+  const gate = shipmentGateFor(order);
+  if (!gate.allowed) return { ok: false, error: gate.reason };
+
+  // Recorded before the booking call so the choice survives a failure — the
+  // retry then books with the same courier instead of silently reverting to
+  // whatever NimbusPost feels like allocating.
+  if (courier) {
+    await chooseCourierForOrder(orderId, courier.id, courier.name).catch(() => {});
+  }
+
+  const first = await dispatchOrder(orderId);
+  if (!first.ok || first.outcome === "booked") return first;
+
+  // `drafted` — the draft was staged by that call, so the second one books it.
+  return dispatchOrder(orderId);
 }
 
 /* ------------------------------------------------------------------ */

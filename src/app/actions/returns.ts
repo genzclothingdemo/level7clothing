@@ -1083,6 +1083,95 @@ export async function returnableBreakdown() {
   return { inherit, yes, no, total: inherit + yes + no };
 }
 
+/** The three answers a product can give. `inherit` is NULL, not `false`. */
+export type ReturnableMode = "yes" | "no" | "inherit";
+
+/** One row of the catalogue picker. Deliberately tiny — 22 products today, but
+ *  this list is rendered in full and filtered in the browser. */
+export type ReturnableProduct = {
+  id: string;
+  name: string;
+  category: string;
+  /** NULL = inherits `defaultReturnable`. */
+  returnable: boolean | null;
+  /** Made-to-order: non-returnable while `returnable` is NULL, whatever the
+   *  store default says. The row has to show that or the state looks wrong. */
+  isCustomisable: boolean;
+  isActive: boolean;
+};
+
+/**
+ * Every product with just the columns the returnable picker needs.
+ *
+ * Read in one query and filtered client-side rather than round-tripping per
+ * keystroke: the catalogue is ~22 rows, and a search that pauses is worse than
+ * one that over-fetches 22 names.
+ */
+export async function listReturnableProducts(): Promise<ReturnableProduct[]> {
+  await requireAdmin();
+  try {
+    return await prisma.product.findMany({
+      orderBy: [{ category: "asc" }, { name: "asc" }],
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        returnable: true,
+        isCustomisable: true,
+        isActive: true,
+      },
+    });
+  } catch (err) {
+    console.error("[returns] listReturnableProducts failed:", err);
+    return [];
+  }
+}
+
+/**
+ * Set `Product.returnable` on **named products only**.
+ *
+ * The catalogue-wide write (`bulkSetReturnable`) stays, but it is no longer the
+ * only option: "make this one final-sale drop non-returnable" was previously
+ * either 22 trips through the product editor or a write that hit everything.
+ *
+ * Ids are filtered against the catalogue rather than trusted, so a stale tab
+ * holding a deleted id updates the rows that still exist instead of failing the
+ * whole call.
+ */
+export async function setReturnableForProducts(
+  ids: string[],
+  mode: ReturnableMode
+) {
+  await requireAdmin();
+  if (mode !== "yes" && mode !== "no" && mode !== "inherit") {
+    return { ok: false as const, error: "Unknown option" };
+  }
+  const unique = [...new Set((ids ?? []).filter((id) => typeof id === "string" && id))];
+  if (unique.length === 0) {
+    return { ok: false as const, error: "Pick at least one product first." };
+  }
+
+  const returnable = mode === "inherit" ? null : mode === "yes";
+
+  try {
+    const res = await prisma.product.updateMany({
+      where: { id: { in: unique } },
+      data: { returnable },
+    });
+    // Product pages render the returns block, so the whole layout is stale.
+    revalidatePath("/", "layout");
+    revalidatePath("/admin/returns");
+    revalidatePath("/admin/products");
+    return { ok: true as const, updated: res.count };
+  } catch (err) {
+    console.error("[returns] setReturnableForProducts failed:", err);
+    return {
+      ok: false as const,
+      error: "Could not update those products — please try again.",
+    };
+  }
+}
+
 /**
  * Bulk-set `Product.returnable` across the whole catalogue.
  *
@@ -1096,7 +1185,7 @@ export async function returnableBreakdown() {
  * the store default silently did nothing, which is the trap this option exists
  * to avoid.
  */
-export async function bulkSetReturnable(mode: "yes" | "no" | "inherit") {
+export async function bulkSetReturnable(mode: ReturnableMode) {
   await requireAdmin();
   if (mode !== "yes" && mode !== "no" && mode !== "inherit") {
     return { ok: false as const, error: "Unknown option" };

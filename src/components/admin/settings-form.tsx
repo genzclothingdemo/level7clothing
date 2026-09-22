@@ -19,12 +19,25 @@
  * `router.replace`: Next integrates that with the router without re-running
  * the server component, so switching tabs costs nothing and — the real point —
  * cannot remount the form and drop an unsaved edit.
+ *
+ * ## One save bar, two writers
+ *
+ * The order-pipeline columns moved in from `/admin/orders`, and they keep their
+ * own scoped action. So a save can dispatch to two places, and it dispatches
+ * **only what is dirty**: nothing is round-tripped "unchanged" through an
+ * action that does not own it, which is the shape of the `defaultReturnsInfo`
+ * lost update CLAUDE.md records. If one half fails the other is still rebased
+ * on what the database took, and the toast names which half did not land —
+ * "saved" over a half-written save is the one outcome worth avoiding.
+ *
+ * The return policy is a third writer and is deliberately NOT here: it is
+ * mounted as `ReturnPolicyCard`, which carries its own draft and its own Save.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { updateSettings } from "@/app/actions/admin";
+import { updateOrderPipelineSettings, updateSettings } from "@/app/actions/admin";
 import {
   DEFAULT_TAB,
   FIELD_META,
@@ -34,30 +47,31 @@ import {
   TABS,
   changedKeys,
   countByTab,
+  isPipelineKey,
   isTabKey,
   type DraftKey,
   type SettingsDraft,
   type TabKey,
 } from "@/components/admin/settings-ui";
 import {
-  BrandSection,
-  ContactSection,
-  CopySection,
   EmailSection,
+  OrdersSection,
   PaymentsSection,
-  ProductSection,
+  ReturnsSection,
   ShippingSection,
+  StoreSection,
+  StorefrontSection,
   type SectionProps,
   type SettingsFacts,
 } from "@/components/admin/settings-sections";
 
 const SECTIONS: Record<TabKey, (p: SectionProps) => React.ReactElement> = {
-  brand: BrandSection,
-  contact: ContactSection,
-  copy: CopySection,
+  store: StoreSection,
+  orders: OrdersSection,
   payments: PaymentsSection,
   shipping: ShippingSection,
-  product: ProductSection,
+  returns: ReturnsSection,
+  storefront: StorefrontSection,
   email: EmailSection,
 };
 
@@ -139,6 +153,36 @@ export function SettingsForm({
     if (dirty.length === 0 || saving) return;
     setSaving(true);
 
+    // Split by owner. A group with nothing dirty is not sent at all, so the
+    // action that owns those columns is not even called — nothing is ever
+    // round-tripped "unchanged" through a writer that does not own it.
+    const pipelineDirty = dirty.some(isPipelineKey);
+    const settingsDirty = dirty.some((k) => !isPipelineKey(k));
+
+    // Starts as the last-known-good baseline. Each group that lands overwrites
+    // its own slice, so a group that fails is simply left at its old value and
+    // stays listed as unsaved.
+    let next: SettingsDraft = { ...saved };
+    const failures: string[] = [];
+
+    if (pipelineDirty) {
+      const res = await updateOrderPipelineSettings({
+        orderConfirmMode: draft.orderConfirmMode,
+        autoConfirmPrepaid: draft.autoConfirmPrepaid,
+        autoConfirmPartial: draft.autoConfirmPartial,
+        autoConfirmCod: draft.autoConfirmCod,
+        autoShipOnConfirm: draft.autoShipOnConfirm,
+        autoShipCourier: draft.autoShipCourier,
+      });
+      if (res.ok) next = { ...next, ...res.settings };
+      else failures.push(res.error || "Order automation could not be saved");
+    }
+
+    if (!settingsDirty) {
+      finish(next, failures);
+      return;
+    }
+
     const res = await updateSettings({
       brandName: draft.brandName,
       tagline: draft.tagline,
@@ -167,46 +211,69 @@ export function SettingsForm({
       defaultShippingInfo: draft.defaultShippingInfo,
     });
 
-    setSaving(false);
-
     if (!res.ok) {
-      toast.error(res.error || "Could not save");
+      failures.push(res.error || "Branding & payments could not be saved");
+    } else {
+      // Rebase on what the database actually holds. The server trims and
+      // normalises, so echoing the draft back would leave a field looking
+      // unsaved forever — trailing space in, trailing space never matched.
+      const s = res.settings;
+      next = {
+        ...next,
+        brandName: s.brandName,
+        tagline: s.tagline,
+        logoUrl: s.logoUrl ?? "",
+        announcement: s.announcement ?? "",
+        heroHeadline: s.heroHeadline,
+        heroSubtext: s.heroSubtext,
+        aboutText: s.aboutText,
+        contactEmail: s.contactEmail,
+        contactPhone: s.contactPhone,
+        whatsapp: s.whatsapp ?? "",
+        address: s.address ?? "",
+        instagram: s.instagram ?? "",
+        facebook: s.facebook ?? "",
+        adminNotifyEmail: s.adminNotifyEmail,
+        freeShippingThreshold:
+          s.freeShippingThreshold == null ? "" : String(s.freeShippingThreshold),
+        codEnabled: s.codEnabled,
+        prepaidEnabled: s.prepaidEnabled,
+        partialEnabled: s.partialEnabled,
+        directEnabled: s.directEnabled,
+        razorpayEnabled: s.razorpayEnabled,
+        nimbusEnabled: s.nimbusEnabled,
+        defaultMaterialsCare: s.defaultMaterialsCare,
+        defaultShippingInfo: s.defaultShippingInfo,
+      };
+    }
+
+    finish(next, failures);
+  }
+
+  /**
+   * Land whichever groups succeeded and report honestly.
+   *
+   * On a clean save `draft` is rebased on `next` — the *server's* values, not
+   * what was typed, so a trimmed trailing space doesn't leave a field looking
+   * unsaved forever.
+   *
+   * On a partial failure the draft is left exactly as the operator typed it and
+   * only `saved` moves. The dirty comparison then reports precisely the fields
+   * that did not land, the save bar keeps naming them, and pressing Save again
+   * retries only those. A green "saved" over a half-written save is the one
+   * outcome worth going out of the way to avoid.
+   */
+  function finish(next: SettingsDraft, failures: string[]) {
+    setSaving(false);
+    setSaved(next);
+
+    if (failures.length > 0) {
+      toast.error(failures.join(" · "), { duration: 12000 });
+      router.refresh();
       return;
     }
 
-    // Rebase on what the database actually holds. The server trims and
-    // normalises, so echoing the draft back would leave a field looking
-    // unsaved forever — trailing space in, trailing space never matched.
-    const s = res.settings;
-    const next: SettingsDraft = {
-      brandName: s.brandName,
-      tagline: s.tagline,
-      logoUrl: s.logoUrl ?? "",
-      announcement: s.announcement ?? "",
-      heroHeadline: s.heroHeadline,
-      heroSubtext: s.heroSubtext,
-      aboutText: s.aboutText,
-      contactEmail: s.contactEmail,
-      contactPhone: s.contactPhone,
-      whatsapp: s.whatsapp ?? "",
-      address: s.address ?? "",
-      instagram: s.instagram ?? "",
-      facebook: s.facebook ?? "",
-      adminNotifyEmail: s.adminNotifyEmail,
-      freeShippingThreshold:
-        s.freeShippingThreshold == null ? "" : String(s.freeShippingThreshold),
-      codEnabled: s.codEnabled,
-      prepaidEnabled: s.prepaidEnabled,
-      partialEnabled: s.partialEnabled,
-      directEnabled: s.directEnabled,
-      razorpayEnabled: s.razorpayEnabled,
-      nimbusEnabled: s.nimbusEnabled,
-      defaultMaterialsCare: s.defaultMaterialsCare,
-      defaultShippingInfo: s.defaultShippingInfo,
-    };
-    setSaved(next);
     setDraft(next);
-
     toast.success(
       dirty.length === 1
         ? `${FIELD_META[dirty[0]].label} saved`

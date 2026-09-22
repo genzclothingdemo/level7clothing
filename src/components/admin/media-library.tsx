@@ -11,10 +11,11 @@
  *   nothing. Filtering now lives in the shared, collapsible `MediaFilterBar`
  *   above the grid — same control set as the PhotoPicker, so there is one
  *   thing to learn.
- * - **Selection does something.** `selectedIds` used to drive nothing but a
- *   ring on the thumbnail. There is now a select-all that agrees with the
- *   active filters, an indeterminate partial state, a live readout, and bulk
- *   tag/delete.
+ * - **Selection does something.** It used to drive nothing but a ring on the
+ *   thumbnail. There is now a select-all that agrees with the active filters,
+ *   an indeterminate partial state, a live readout, and bulk tag/delete — all
+ *   of it from the shared `admin/selection` primitive, which also brings
+ *   shift-click ranges and a drag sweep across the tiles.
  * - **"All" is spelled out.** The API is paged, so "select all" can only ever
  *   mean "every loaded photo that matches the filters". The bar says exactly
  *   that and offers to load the rest.
@@ -39,6 +40,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { InfoTip } from "@/components/store/info-tip";
+import { useMultiSelect } from "@/components/admin/selection";
 import {
   MediaFilterBar,
   NO_FILTERS,
@@ -85,6 +87,32 @@ const MAX_AUTO_PAGES = 20;
  * that always includes the photo's currently-stored `current` value — so
  * pre-existing tags are never dropped from the dropdown or silently changed.
  */
+/**
+ * Where a "used by" row goes when clicked.
+ *
+ * The `kind` strings are written by `/api/admin/media`, which is the one place
+ * that knows what can own a photo. An unrecognised kind returns `null` and the
+ * row renders as plain text rather than a dead link — a new owner added there
+ * should show up here as an un-clickable row, not as a 404.
+ */
+function usageHref(u: { kind: string; id: string }): string | null {
+  switch (u.kind) {
+    case "product":
+      return `/admin/products/${u.id}/edit`;
+    case "portfolio":
+      return `/admin/portfolio/${u.id}/edit`;
+    // Covers are edited on the category screen, which owns both levels.
+    case "category":
+      return `/admin/categories/${u.id}`;
+    case "subcategory":
+      return "/admin/categories";
+    case "settings":
+      return "/admin/settings";
+    default:
+      return null;
+  }
+}
+
 function withCurrent(options: string[], current?: string | null): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -103,7 +131,6 @@ export function MediaLibrary() {
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState<MediaFilters>({ ...NO_FILTERS });
 
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [activePhotoId, setActivePhotoId] = useState<string | null>(null);
 
   // Classification dropdown options (categories + variant attribute values).
@@ -219,41 +246,32 @@ export function MediaLibrary() {
     [photos, usage, filters]
   );
 
-  const selectedInView = useMemo(
-    () => visible.reduce((n, p) => n + (selectedIds.has(p.id) ? 1 : 0), 0),
-    [visible, selectedIds]
-  );
-  const allInViewSelected = visible.length > 0 && selectedInView === visible.length;
+  const visibleIds = useMemo(() => visible.map((p) => p.id), [visible]);
+
+  /**
+   * Selection is the shared primitive (`admin/selection`), which also brings
+   * shift-click ranges and a drag sweep across the tiles.
+   *
+   * The behaviour change worth stating: a selection here is now **intersected
+   * with what the filters are showing**, where it used to survive a filter
+   * change. That mattered because the bulk bar below can delete. Selecting
+   * thirty photos, narrowing to three and pressing Delete used to remove all
+   * thirty — the admin could not see twenty-seven of the things they were
+   * agreeing to.
+   *
+   * `photo-picker.tsx` deliberately keeps the *old* behaviour, and that is not
+   * an oversight: picking photos for a product is an accumulating task where
+   * you browse several filters and collect from each, and nothing there
+   * destroys anything. Bulk-acting and picking want opposite rules.
+   */
+  const selection = useMultiSelect(visibleIds);
 
   const loadedAll = photos.length >= total;
   const remaining = Math.max(0, total - photos.length);
 
-  const toggleSelect = (id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  /**
-   * Select all — deliberately scoped to `visible`, i.e. exactly the photos the
-   * active filters are showing, never the whole table. Unchecking removes only
-   * those, so a selection made under a different filter survives.
-   */
-  const toggleAllShown = () => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (allInViewSelected) visible.forEach((p) => next.delete(p.id));
-      else visible.forEach((p) => next.add(p.id));
-      return next;
-    });
-  };
-
   const selectedPhotos = useMemo(
-    () => photos.filter((p) => selectedIds.has(p.id)),
-    [photos, selectedIds]
+    () => photos.filter((p) => selection.selected.has(p.id)),
+    [photos, selection.selected]
   );
 
   /* ------------------------------------------------------------------ */
@@ -553,7 +571,7 @@ export function MediaLibrary() {
       }
     }
     setBulkBusy(false);
-    setSelectedIds(new Set());
+    selection.clear();
     setActivePhotoId(null);
     if (ok > 0) toast.success(`Deleted ${ok} photo${ok === 1 ? "" : "s"}.`);
     if (ok < free.length) toast.error(`${free.length - ok} could not be deleted.`);
@@ -634,18 +652,22 @@ export function MediaLibrary() {
         {/* Selection bar — select-all always agrees with the filters above. */}
         <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border bg-card px-3 py-1 sm:px-5">
           <TriCheckbox
-            checked={allInViewSelected}
-            indeterminate={selectedInView > 0}
-            onChange={toggleAllShown}
+            checked={selection.allVisibleSelected}
+            indeterminate={selection.someVisibleSelected}
+            onChange={selection.toggleAll}
             label={
               <span className="text-muted-foreground">
                 {visible.length === 0
                   ? "Nothing to select"
                   : selectionSummary({
-                      selectedInView,
-                      inView: visible.length,
-                      // Counted from the loaded photos, not `selectedIds.size`,
+                      // Counted from the loaded photos, not `selection.count`,
                       // so an id left over from a deleted row can't inflate it.
+                      selectedInView: selectedPhotos.length,
+                      inView: visible.length,
+                      // Always equal now that the selection is intersected with
+                      // the filters, so the "…outside this filter" tail never
+                      // fires here. The helper still supports it for the photo
+                      // picker, which accumulates across filters on purpose.
                       totalSelected: selectedPhotos.length,
                     })}
               </span>
@@ -661,6 +683,9 @@ export function MediaLibrary() {
               not the whole library. Photos are fetched a page at a time, so it
               can only reach the {photos.length} loaded so far
               {loadedAll ? "" : `; “Load all ${total}” pulls in the rest`}.
+              Changing a filter drops anything that is no longer shown, so a
+              bulk action can never reach a photo you cannot see. Shift-click
+              takes a range, and you can drag across the tiles to sweep.
             </InfoTip>
           </span>
 
@@ -685,7 +710,7 @@ export function MediaLibrary() {
               </button>
               <button
                 type="button"
-                onClick={() => setSelectedIds(new Set())}
+                onClick={selection.clear}
                 className="inline-flex min-h-11 cursor-pointer items-center rounded-lg px-2 text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground sm:min-h-8"
               >
                 Clear
@@ -719,7 +744,7 @@ export function MediaLibrary() {
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
                 {visible.map((photo) => {
                   const uses = usage[photo.url] ?? [];
-                  const isSelected = selectedIds.has(photo.id);
+                  const isSelected = selection.isSelected(photo.id);
                   const isActive = activePhotoId === photo.id;
 
                   return (
@@ -750,9 +775,23 @@ export function MediaLibrary() {
                         className="absolute inset-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       />
 
+                      {/* Toggling happens on pointerdown, not click: a sweep
+                          that starts here and releases on another tile never
+                          fires a click on this one, so a click-driven toggle
+                          would leave the first tile of every drag unselected.
+                          A keyboard-generated click reports `detail === 0`,
+                          which is how that path is kept. */}
                       <button
                         type="button"
-                        onClick={() => toggleSelect(photo.id)}
+                        onPointerDown={(e) => {
+                          if (e.button !== 0) return;
+                          if (e.shiftKey) selection.select(photo.id, { shift: true });
+                          else selection.dragStart(photo.id);
+                        }}
+                        onPointerEnter={() => selection.dragOver(photo.id)}
+                        onClick={(e) => {
+                          if (e.detail === 0) selection.select(photo.id);
+                        }}
                         aria-pressed={isSelected}
                         aria-label={`${isSelected ? "Deselect" : "Select"} ${photoLabel(photo)}`}
                         className="absolute left-0 top-0 z-10 grid h-11 w-11 cursor-pointer place-items-center md:h-9 md:w-9"
@@ -1098,18 +1137,41 @@ export function MediaLibrary() {
                       Not used anywhere
                     </p>
                   ) : (
-                    <ul className="space-y-2">
-                      {activeUses.map((u, i) => (
-                        <li key={i} className="flex flex-col gap-0.5 text-xs">
-                          <div className="flex items-center gap-1.5">
-                            <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                            <span className="truncate font-medium">{u.name}</span>
-                          </div>
-                          <span className="pl-5 capitalize text-muted-foreground">
-                            {u.kind} • {u.slot || "Gallery"}
-                          </span>
-                        </li>
-                      ))}
+                    <ul className="space-y-1">
+                      {activeUses.map((u, i) => {
+                        // Every use links to the screen that owns it. Knowing a
+                        // photo is on "Core Oversized Tee" is only half an
+                        // answer if you then have to go and find it.
+                        const href = usageHref(u);
+                        const body = (
+                          <>
+                            <span className="flex items-center gap-1.5">
+                              <Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                              <span className="truncate font-medium">{u.name}</span>
+                            </span>
+                            <span className="block pl-5 text-muted-foreground">
+                              <span className="capitalize">{u.kind}</span>
+                              {u.slot ? ` • ${u.slot}` : ""}
+                            </span>
+                          </>
+                        );
+                        return (
+                          <li key={i} className="text-xs">
+                            {href ? (
+                              <a
+                                href={href}
+                                className="flex min-h-11 flex-col justify-center rounded-lg px-1 transition-colors hover:bg-muted sm:min-h-9"
+                              >
+                                {body}
+                              </a>
+                            ) : (
+                              <span className="flex min-h-11 flex-col justify-center px-1 sm:min-h-9">
+                                {body}
+                              </span>
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>

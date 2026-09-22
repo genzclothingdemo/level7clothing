@@ -14,20 +14,32 @@
  *    tab, so the dirty count per tab, the "what will be written" list in the
  *    save bar and the section headings all derive from the same table instead
  *    of drifting apart.
- * 3. **One writer per column.** Anything owned by another screen is rendered
- *    through `ManagedElsewhere` — current value, read-only, with a link. Two
- *    editors for one column is how they drift.
+ * 3. **One writer per column.** A column has exactly one editor. Where the
+ *    value is fixed in code, `ManagedElsewhere` states it read-only. Two
+ *    editable copies of one column is how they drift — see the
+ *    `defaultReturnsInfo` lost update in CLAUDE.md.
  *
  * Explanation lives in an `InfoTip` or behind `ExpandableText`, never in a
  * paragraph under a field — same rule as `form-kit`.
+ *
+ * ## Two writers, one save bar
+ *
+ * The order-pipeline columns moved in from the Orders screen, and they keep
+ * their own scoped server action (`updateOrderPipelineSettings`). The draft
+ * below therefore spans two actions: `PIPELINE_KEYS` is the split, and
+ * `settings-form` sends each group only to the action that owns it. That is the
+ * opposite of merging them into one payload — merging is precisely what would
+ * let a Settings save clobber a column it does not own.
  */
 
 import { TABS, type TabKey } from "@/lib/settings-tabs";
 import Link from "next/link";
 import { ArrowUpRight, Loader2, RotateCcw } from "lucide-react";
 import { InfoTip } from "@/components/store/info-tip";
+import { Disclosure } from "@/components/store/disclosure";
 import { Btn } from "@/components/admin/order-ui";
 import { Field } from "@/components/admin/form-kit";
+import type { AutoShipCourier, OrderConfirmMode } from "@/lib/orders-pipeline";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -67,9 +79,42 @@ export type SettingsDraft = {
   nimbusEnabled: boolean;
   defaultMaterialsCare: string;
   defaultShippingInfo: string;
+
+  /* ---- Order pipeline. Written by `updateOrderPipelineSettings`. ---- */
+  orderConfirmMode: OrderConfirmMode;
+  autoConfirmPrepaid: boolean;
+  autoConfirmPartial: boolean;
+  autoConfirmCod: boolean;
+  autoShipOnConfirm: boolean;
+  autoShipCourier: AutoShipCourier;
 };
 
 export type DraftKey = keyof SettingsDraft;
+
+/**
+ * The six keys `updateSettings` must never see.
+ *
+ * `settingsSchema` deliberately does not accept them, and Zod strips anything
+ * not in the schema *silently* (CLAUDE.md, "Zod strips anything not in the
+ * schema") — so sending them there would not error, it would just quietly do
+ * nothing. This list is what routes them to their own action instead.
+ */
+export const PIPELINE_KEYS = [
+  "orderConfirmMode",
+  "autoConfirmPrepaid",
+  "autoConfirmPartial",
+  "autoConfirmCod",
+  "autoShipOnConfirm",
+  "autoShipCourier",
+] as const satisfies readonly DraftKey[];
+
+export type PipelineKey = (typeof PIPELINE_KEYS)[number];
+
+const PIPELINE_KEY_SET: ReadonlySet<string> = new Set(PIPELINE_KEYS);
+
+export function isPipelineKey(k: DraftKey): k is PipelineKey {
+  return PIPELINE_KEY_SET.has(k);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Tabs                                                               */
@@ -94,29 +139,40 @@ export { TABS, DEFAULT_TAB, isTabKey, type TabKey } from "@/lib/settings-tabs";
 
 /** Label + home tab for every editable field. The one place either is stated. */
 export const FIELD_META: Record<DraftKey, { label: string; tab: TabKey }> = {
-  brandName: { label: "Brand name", tab: "brand" },
-  tagline: { label: "Tagline", tab: "brand" },
-  logoUrl: { label: "Logo", tab: "brand" },
-  announcement: { label: "Announcement bar", tab: "brand" },
-  heroHeadline: { label: "Hero headline", tab: "copy" },
-  heroSubtext: { label: "Hero subtext", tab: "copy" },
-  aboutText: { label: "About text", tab: "copy" },
-  contactEmail: { label: "Contact email", tab: "contact" },
-  contactPhone: { label: "Contact phone", tab: "contact" },
-  whatsapp: { label: "WhatsApp number", tab: "contact" },
-  address: { label: "Studio address", tab: "contact" },
-  instagram: { label: "Instagram URL", tab: "contact" },
-  facebook: { label: "Facebook URL", tab: "contact" },
-  adminNotifyEmail: { label: "Order & lead emails", tab: "email" },
-  freeShippingThreshold: { label: "Free shipping above", tab: "shipping" },
+  brandName: { label: "Brand name", tab: "store" },
+  tagline: { label: "Tagline", tab: "store" },
+  logoUrl: { label: "Logo", tab: "store" },
+  announcement: { label: "Announcement bar", tab: "store" },
+  contactEmail: { label: "Contact email", tab: "store" },
+  contactPhone: { label: "Contact phone", tab: "store" },
+  whatsapp: { label: "WhatsApp number", tab: "store" },
+  address: { label: "Studio address", tab: "store" },
+  instagram: { label: "Instagram URL", tab: "store" },
+  facebook: { label: "Facebook URL", tab: "store" },
+
+  orderConfirmMode: { label: "When orders confirm", tab: "orders" },
+  autoConfirmPrepaid: { label: "Auto-confirm prepaid", tab: "orders" },
+  autoConfirmPartial: { label: "Auto-confirm part-paid", tab: "orders" },
+  autoConfirmCod: { label: "Auto-confirm cash on delivery", tab: "orders" },
+  autoShipOnConfirm: { label: "Book the shipment automatically", tab: "orders" },
+  autoShipCourier: { label: "Courier preference", tab: "orders" },
+
   codEnabled: { label: "Cash on Delivery", tab: "payments" },
   prepaidEnabled: { label: "Prepaid", tab: "payments" },
   partialEnabled: { label: "Advance + COD", tab: "payments" },
   directEnabled: { label: "Customised order", tab: "payments" },
   razorpayEnabled: { label: "Razorpay online payments", tab: "payments" },
+
+  freeShippingThreshold: { label: "Free shipping above", tab: "shipping" },
   nimbusEnabled: { label: "NimbusPost shipping", tab: "shipping" },
-  defaultMaterialsCare: { label: "Materials & Care", tab: "product" },
-  defaultShippingInfo: { label: "Shipping & Delivery", tab: "product" },
+
+  heroHeadline: { label: "Hero headline", tab: "storefront" },
+  heroSubtext: { label: "Hero subtext", tab: "storefront" },
+  aboutText: { label: "About text", tab: "storefront" },
+  defaultMaterialsCare: { label: "Materials & Care", tab: "storefront" },
+  defaultShippingInfo: { label: "Shipping & Delivery", tab: "storefront" },
+
+  adminNotifyEmail: { label: "Order & lead emails", tab: "email" },
 };
 
 const ALL_KEYS = Object.keys(FIELD_META) as DraftKey[];
@@ -341,6 +397,61 @@ export function LinesField({
         />
       )}
     </Field>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Set-once disclosure                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The second level of every tab: fields that are set once and then left alone.
+ *
+ * The screen was a wall of fields because a logo upload and the COD switch were
+ * given the same weight, and the logo is chosen on day one while COD is flipped
+ * in a bad week. So each tab now opens with what changes often and folds the
+ * rest behind one of these. `summary` is what makes a fold honest — "3 of 4
+ * filled" answers the question without opening it.
+ *
+ * **`dirty` is not decoration.** Switching tabs unmounts the section, so a fold
+ * would reopen closed and hide an unsaved edit that the save bar is still
+ * promising to write. Passing the dirty state re-opens exactly the folds that
+ * hold one.
+ */
+export function SetOnce({
+  label,
+  summary,
+  dirty = false,
+  children,
+}: {
+  label: string;
+  /** One line readable while closed — a count, a state, never an explanation. */
+  summary?: React.ReactNode;
+  /** True when any field inside differs from the last saved value. */
+  dirty?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <section
+      className={cn(
+        "min-w-0 rounded-2xl border bg-card px-4 sm:px-5",
+        dirty ? "border-accent/50" : "border-border"
+      )}
+    >
+      <Disclosure
+        label={label}
+        defaultOpen={dirty}
+        summary={
+          dirty ? (
+            <span className="font-medium text-accent">unsaved changes</span>
+          ) : (
+            summary
+          )
+        }
+      >
+        <div className="space-y-4 pb-4">{children}</div>
+      </Disclosure>
+    </section>
   );
 }
 

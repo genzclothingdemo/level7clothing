@@ -48,6 +48,12 @@ export function CustomerFilters({ counts }: { counts: Record<string, number> }) 
     const next = new URLSearchParams(params.toString());
     if (value) next.set(key, value);
     else next.delete(key);
+    // Any change to what is being listed resets the page. Keeping `?page=4`
+    // through a narrowing filter leaves the reader on page 4 of a list that is
+    // now one page long — the URL would be honest and the screen would look
+    // broken. The page number is clamped server-side too, so this is about the
+    // link being right rather than about the page surviving.
+    next.delete("page");
     push(next);
   }
 

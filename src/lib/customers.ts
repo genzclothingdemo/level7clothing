@@ -51,7 +51,8 @@
 import { cache } from "react";
 import { prisma } from "@/lib/prisma";
 import { fuzzyFilter } from "@/lib/search";
-import { normalisePhone } from "@/lib/utils";
+import { OPEN_RETURN_STATUSES } from "@/lib/returns";
+import { formatINR, normalisePhone } from "@/lib/utils";
 import type { BadgeTone } from "@/components/admin/order-ui";
 
 /* ------------------------------------------------------------------ */
@@ -225,6 +226,36 @@ export type CustomerStats = {
   lastActivityAt: Date;
   preferredPaymentMethod: string | null;
   preferredPaymentCount: number;
+
+  /* -- things that want doing about this person ------------------------- */
+
+  /**
+   * Orders whose payment attempt failed.
+   *
+   * Counted and surfaced rather than hidden: a failed payment is a shopper who
+   * chose the pieces, reached the gateway and did not get through. That is the
+   * warmest lead the store has, and it is invisible if the only place it
+   * appears is a grey badge on the fourth order card.
+   *
+   * Cancelled orders are NOT excluded here, unlike every money figure — an
+   * order usually ends up cancelled *because* the payment failed, so dropping
+   * them would delete the entire signal.
+   */
+  failedPayments: number;
+  /** Σ `total` over those orders — the size of the sale that nearly happened. */
+  failedValue: number;
+  /** Return requests still being worked: pending, approved, picked up, received. */
+  openReturns: number;
+  /** Σ `adminUnread` — messages from this person nobody has answered. */
+  unreadMessages: number;
+  /**
+   * Cart leads still open — `interested` or `contacted`. This is the closest
+   * thing the store has to "what is in their cart right now"; `ordered` and
+   * `lost` are closed and drop out.
+   */
+  openCartItems: number;
+  /** Σ price × quantity over those open leads, skipping ones with no price. */
+  openCartValue: number;
 };
 
 export type CustomerRecord = {
@@ -259,10 +290,31 @@ export type CustomerRecord = {
   stats: CustomerStats;
 };
 
+/**
+ * A cart lead that named nobody. Carried out of the resolver rather than just
+ * counted, so the list's "6 records left out" footnote can say *what* was left
+ * out and link each one at the product it was about — the only handle those
+ * rows have.
+ */
+export type AnonymousLead = {
+  id: string;
+  productId: string | null;
+  productName: string;
+  quantity: number;
+  price: number | null;
+  status: string;
+  createdAt: Date;
+};
+
 export type CustomerDirectory = {
   customers: CustomerRecord[];
   /** Rows that identify nobody — no usable email and no usable phone. */
-  anonymous: { leads: number; threads: number };
+  anonymous: {
+    leads: number;
+    threads: number;
+    /** The newest few of those leads, so the footnote is actionable. */
+    leadRows: AnonymousLead[];
+  };
 };
 
 /* ------------------------------------------------------------------ */
@@ -651,7 +703,9 @@ export const getCustomers = cache(async (): Promise<CustomerDirectory> => {
   /* -- pass 2: drop every row into its group ----------------------------- */
 
   const buckets = new Map<string, Bucket>();
-  const anonymous = { leads: 0, threads: 0 };
+  const anonymous = { leads: 0, threads: 0, leadRows: [] as AnonymousLead[] };
+  /** Enough to show the shape of what was skipped without listing 300 rows. */
+  const ANON_LEADS_SHOWN = 12;
 
   for (const u of users) {
     const et = userTokens.get(u.id);
@@ -715,6 +769,18 @@ export const getCustomers = cache(async (): Promise<CustomerDirectory> => {
     const root = ids.groupOf(rowTokens(l));
     if (!root) {
       anonymous.leads++;
+      // Newest first already, so the first N are the freshest.
+      if (anonymous.leadRows.length < ANON_LEADS_SHOWN) {
+        anonymous.leadRows.push({
+          id: l.id,
+          productId: l.productId,
+          productName: l.productName,
+          quantity: l.quantity,
+          price: l.price,
+          status: l.status,
+          createdAt: l.createdAt,
+        });
+      }
       continue;
     }
     const b = bucket(buckets, root);
@@ -865,6 +931,20 @@ function buildRecord(b: Bucket, tokens: string[]): CustomerRecord {
     }
   }
 
+  /* -- what wants doing -------------------------------------------------- */
+
+  // Deliberately over ALL orders, not `live`: a failed payment very often ends
+  // as a cancelled order, so filtering cancellations out here would throw away
+  // exactly the rows this is meant to find.
+  const failed = orders.filter((o) => o.paymentStatus === "failed");
+  const openReturns = b.returns.filter((r) =>
+    (OPEN_RETURN_STATUSES as readonly string[]).includes(r.status)
+  ).length;
+  const unreadMessages = b.threads.reduce((n, t) => n + t.adminUnread, 0);
+  const openCart = b.leads.filter(
+    (l) => l.status === "interested" || l.status === "contacted"
+  );
+
   const orderDates = orders.map((o) => o.createdAt);
   const firstOrderAt = orderDates.length
     ? new Date(Math.min(...orderDates.map((d) => d.getTime())))
@@ -945,6 +1025,15 @@ function buildRecord(b: Bucket, tokens: string[]): CustomerRecord {
       lastActivityAt,
       preferredPaymentMethod,
       preferredPaymentCount,
+      failedPayments: failed.length,
+      failedValue: failed.reduce((n, o) => n + o.total, 0),
+      openReturns,
+      unreadMessages,
+      openCartItems: openCart.reduce((n, l) => n + l.quantity, 0),
+      openCartValue: openCart.reduce(
+        (n, l) => n + (l.price != null ? l.price * l.quantity : 0),
+        0
+      ),
     },
   };
 }
@@ -1030,6 +1119,14 @@ export async function getCustomerProducts(
   return { byId, bySlug };
 }
 
+/**
+ * The resolved product lookup, named so the three sections that take it share
+ * one type rather than one of them owning it and the others importing across.
+ */
+export type CustomerProductIndex = Awaited<
+  ReturnType<typeof getCustomerProducts>
+>;
+
 /* ------------------------------------------------------------------ */
 /*  List shaping                                                       */
 /* ------------------------------------------------------------------ */
@@ -1097,5 +1194,220 @@ export const adminLink = {
   /** The chat inbox has no per-thread route; it opens on the thread list. */
   chat: () => `/admin/messages`,
   lead: (contact: string) => `/admin/leads?q=${encodeURIComponent(contact)}`,
-  customer: (id: string) => `/admin/customers/${id}`,
+  coupon: (code: string) => `/admin/coupons?q=${encodeURIComponent(code)}`,
+
+  /**
+   * The customer's own four sections.
+   *
+   * Real routes rather than `?tab=`, so a section is a link somebody can paste
+   * into a message, the browser's back button steps through sections, and Next
+   * re-renders only the section when you switch — the header and the identity
+   * block above it are a layout and stay put.
+   */
+  customer: (id: string) => `/admin/customers/${encodeURIComponent(id)}`,
+  customerOrders: (id: string) =>
+    `/admin/customers/${encodeURIComponent(id)}/orders`,
+  customerPayments: (id: string) =>
+    `/admin/customers/${encodeURIComponent(id)}/payments`,
+  customerActivity: (id: string) =>
+    `/admin/customers/${encodeURIComponent(id)}/activity`,
 } as const;
+
+/* ------------------------------------------------------------------ */
+/*  Timeline                                                           */
+/* ------------------------------------------------------------------ */
+
+export type CustomerEventKind =
+  | "account"
+  | "order"
+  | "payment_failed"
+  | "return"
+  | "chat"
+  | "cart"
+  | "wishlist";
+
+/**
+ * One thing that happened, from whichever table it happened in.
+ *
+ * Structured rather than pre-written prose: the caller decides the wording and
+ * the icon, this decides what counts as an event and when it happened. `href`
+ * is the screen that owns it — never null for anything with a home, which is
+ * how "no dead ends" survives a new event kind being added here.
+ */
+export type CustomerEvent = {
+  id: string;
+  kind: CustomerEventKind;
+  at: Date;
+  /** The thing itself — an order number, a product name, a message. */
+  subject: string;
+  /** Money involved, where the event has any. */
+  amount: number | null;
+  href: string | null;
+};
+
+/**
+ * Every source folded into one stream, newest first.
+ *
+ * This is the only view that answers "what has this person been doing" without
+ * the reader stitching five lists together by date in their head. It restates
+ * nothing: each entry is a link to the section or screen that holds the detail.
+ */
+export function customerTimeline(customer: CustomerRecord): CustomerEvent[] {
+  const events: CustomerEvent[] = [];
+
+  for (const o of customer.orders) {
+    events.push({
+      id: `order-${o.id}`,
+      kind: o.paymentStatus === "failed" ? "payment_failed" : "order",
+      at: o.createdAt,
+      subject: o.orderNumber,
+      amount: o.total,
+      href: adminLink.order(o.orderNumber),
+    });
+  }
+  for (const r of customer.returns) {
+    events.push({
+      id: `return-${r.id}`,
+      kind: "return",
+      at: r.createdAt,
+      subject: r.requestNumber,
+      amount: r.refundAmount ?? r.unitPrice * r.quantity,
+      href: adminLink.return(r.requestNumber),
+    });
+  }
+  for (const t of customer.threads) {
+    events.push({
+      id: `chat-${t.id}`,
+      kind: "chat",
+      at: t.lastMessageAt,
+      subject: t.lastMessage ?? "Started a chat",
+      amount: null,
+      href: adminLink.chat(),
+    });
+  }
+  for (const l of customer.leads) {
+    events.push({
+      id: `lead-${l.id}`,
+      kind: "cart",
+      at: l.createdAt,
+      subject: l.productName,
+      amount: l.price != null ? l.price * l.quantity : null,
+      // A cart entry for a product that has since been deleted still has
+      // somewhere to go: the Activity section, which holds the entry itself.
+      href: l.productId
+        ? adminLink.product(l.productId)
+        : adminLink.customerActivity(customer.id),
+    });
+  }
+  for (const w of customer.wishlist) {
+    events.push({
+      id: `wish-${w.id}`,
+      kind: "wishlist",
+      at: w.createdAt,
+      // The wishlist stores a slug, not a product id (see the model comment),
+      // and resolving slugs to names costs a query this view does not make.
+      // Activity does make it, so that is where this points — and the slug is
+      // at least the honest value rather than an invented title.
+      subject: w.slug,
+      amount: null,
+      href: adminLink.customerActivity(customer.id),
+    });
+  }
+  for (const a of customer.accounts) {
+    events.push({
+      id: `account-${a.id}`,
+      kind: "account",
+      at: a.createdAt,
+      subject: a.email,
+      amount: null,
+      href: null,
+    });
+  }
+
+  return events.sort((x, y) => y.at.getTime() - x.at.getTime());
+}
+
+/* ------------------------------------------------------------------ */
+/*  Signals — the only things that ask for an action                   */
+/* ------------------------------------------------------------------ */
+
+export type CustomerSignalKind = "unread" | "failed" | "due" | "return" | "cart";
+
+/**
+ * Something about this person that wants doing, ready to render.
+ *
+ * Derived here rather than in the two screens that show it, so the list's
+ * badges and the detail page's strip can never disagree about whether someone
+ * needs chasing. Every signal carries a destination: a flag you cannot act on
+ * is decoration.
+ */
+export type CustomerSignal = {
+  kind: CustomerSignalKind;
+  /** Short and already formatted — "₹10 due", "2 unread". */
+  label: string;
+  tone: BadgeTone;
+  /** The sentence behind it, for a `title` or a tip. */
+  help: string;
+  href: string;
+};
+
+/**
+ * Ordered by how much a human is waiting on the answer: an unanswered message
+ * first, then a payment that failed (a sale still within reach), then money
+ * owed, then an open return, then a cart nobody has followed up.
+ */
+export function customerSignals(c: CustomerRecord): CustomerSignal[] {
+  const s = c.stats;
+  const out: CustomerSignal[] = [];
+
+  if (s.unreadMessages > 0) {
+    out.push({
+      kind: "unread",
+      label: `${s.unreadMessages} unread`,
+      tone: "accent",
+      help: `${s.unreadMessages} chat message${s.unreadMessages === 1 ? "" : "s"} nobody has replied to.`,
+      href: adminLink.chat(),
+    });
+  }
+  if (s.failedPayments > 0) {
+    out.push({
+      kind: "failed",
+      label: `${s.failedPayments} payment failed`,
+      tone: "danger",
+      help: `${s.failedPayments} order${s.failedPayments === 1 ? "" : "s"} worth ${formatINR(s.failedValue)} reached the gateway and did not go through. Worth a nudge.`,
+      href: adminLink.customerPayments(c.id),
+    });
+  }
+  if (s.stillDue > 0) {
+    out.push({
+      kind: "due",
+      label: `${formatINR(s.stillDue)} due`,
+      tone: "warn",
+      help: `${formatINR(s.stillDue)} outstanding on orders that have not been delivered yet.`,
+      href: adminLink.customerPayments(c.id),
+    });
+  }
+  if (s.openReturns > 0) {
+    out.push({
+      kind: "return",
+      label: `${s.openReturns} return open`,
+      tone: "warn",
+      help: `${s.openReturns} return request${s.openReturns === 1 ? "" : "s"} still being worked.`,
+      href: adminLink.customerActivity(c.id),
+    });
+  }
+  if (s.openCartItems > 0) {
+    out.push({
+      kind: "cart",
+      label: `${s.openCartItems} in cart`,
+      tone: "info",
+      help:
+        s.openCartValue > 0
+          ? `${s.openCartItems} item${s.openCartItems === 1 ? "" : "s"} worth ${formatINR(s.openCartValue)} left in a cart and never ordered.`
+          : `${s.openCartItems} item${s.openCartItems === 1 ? "" : "s"} left in a cart and never ordered.`,
+      href: adminLink.customerActivity(c.id),
+    });
+  }
+
+  return out;
+}

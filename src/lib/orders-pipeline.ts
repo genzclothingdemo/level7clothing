@@ -340,6 +340,85 @@ export function resolveCollection(order: CollectableOrder): Collection {
 }
 
 /* ------------------------------------------------------------------ */
+/*  May anything be sent to the courier?                               */
+/* ------------------------------------------------------------------ */
+
+/** The only order facts that decide whether the courier may be touched. */
+export type ShippableOrder = {
+  status: string | null | undefined;
+  /** The AWB. Present ⇒ this parcel is already booked, by us or by hand. */
+  trackingNumber?: string | null;
+};
+
+export type ShipmentGate =
+  | { allowed: true }
+  | {
+      allowed: false;
+      /** Which rule stopped it — the UI branches on this, not on the prose. */
+      code: "pending" | "closed" | "booked";
+      /** Shown verbatim to the admin and returned verbatim by the actions. */
+      reason: string;
+    };
+
+/**
+ * The one answer to "can this order reach NimbusPost right now?".
+ *
+ * Pure, so the server action that enforces it and the panel that decides what
+ * to render cannot disagree — the whole class of bug where a button is shown
+ * and then refused (or worse, shown and *not* refused) comes from those two
+ * being written twice.
+ *
+ * Three refusals. **`booked` is tested first**, and deliberately: the panel
+ * branches on `code` to decide what to draw, and a parcel that has already gone
+ * out must show its tracking whatever the order's status has since become — an
+ * order cancelled after dispatch still has a real parcel in a real van.
+ *
+ * 1. **`booked`.** An AWB already exists. This is the one the admin screen got
+ *    wrong: offering "book" on a booked parcel invites a second shipment and a
+ *    second wallet charge for one order. `trackingNumber` is the test rather
+ *    than `nimbusShipmentId`, because a parcel handed to a courier by hand is
+ *    just as booked as one this app booked — only the AWB proves a shipment
+ *    exists.
+ * 2. **`pending`.** An unconfirmed order is a request, not work. Staging a
+ *    draft for one puts an order into NimbusPost that nobody has accepted, and
+ *    booking it spends the wallet on a parcel that may be cancelled in the next
+ *    minute. Confirm first — that is what `runConfirmationPipeline` is for.
+ * 3. **`closed`.** Cancelled, or the payment failed. Stock has been returned
+ *    and nothing is being packed.
+ */
+export function shipmentGateFor(order: ShippableOrder): ShipmentGate {
+  const status = String(order.status ?? "").trim().toLowerCase();
+  const awb = order.trackingNumber?.trim();
+
+  if (awb) {
+    return {
+      allowed: false,
+      code: "booked",
+      reason: `This order already has an AWB (${awb}). Booking it again would create a second shipment and charge your wallet twice.`,
+    };
+  }
+  if (status === "pending") {
+    return {
+      allowed: false,
+      code: "pending",
+      reason:
+        "This order is still pending. Confirm it first — nothing is sent to the courier until an order has been accepted.",
+    };
+  }
+  if (status === "cancelled" || status === "payment_failed") {
+    return {
+      allowed: false,
+      code: "closed",
+      reason:
+        status === "cancelled"
+          ? "This order was cancelled and its stock returned, so there is nothing to ship."
+          : "The payment on this order failed, so it is not being packed.",
+    };
+  }
+  return { allowed: true };
+}
+
+/* ------------------------------------------------------------------ */
 /*  Courier choice                                                     */
 /* ------------------------------------------------------------------ */
 

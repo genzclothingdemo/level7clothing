@@ -50,8 +50,23 @@ export const SECTIONS: { href: string; label: string; exact?: boolean }[] = [
 const GRAIN_ROUTES = new Set(["/admin", "/admin/finance/sales"]);
 
 const chip =
-  "inline-flex min-h-11 items-center rounded-lg border px-3 text-[11px] font-medium uppercase tracking-wider transition-colors sm:min-h-9 " +
+  "inline-flex min-h-11 shrink-0 items-center rounded-lg border px-3 text-[11px] font-medium uppercase tracking-wider transition-colors sm:min-h-9 " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
+
+/**
+ * One scrolling line on a phone, wrapped from `sm` up.
+ *
+ * Wrapping put the six section tabs on two rows and the four ranges on two
+ * more, so at 375px this bar alone stood between the heading and the first
+ * figure for about 290px — before the page had said anything. A single
+ * swipeable line is what the storefront's own filter rails already do
+ * (`shop-filters`, `portfolio-tabs`), and `shrink-0` on the chip is what stops
+ * the labels squashing instead of overflowing.
+ *
+ * `overflow-visible` from `sm` matters: a scroll container clips, and these
+ * bars sit next to `InfoTip` bubbles.
+ */
+const rail = "no-scrollbar flex min-w-0 gap-1 overflow-x-auto sm:flex-wrap sm:overflow-visible";
 const chipOn = "border-accent bg-accent/10 text-accent";
 const chipOff = "border-border text-muted-foreground hover:bg-muted hover:text-foreground";
 
@@ -96,7 +111,7 @@ export function WorkspaceNav() {
     <div className="space-y-2">
       <nav
         aria-label="Analytics sections"
-        className="flex min-w-0 flex-wrap gap-1 rounded-lg border border-border bg-card p-2"
+        className={cn(rail, "rounded-lg border border-border bg-card p-2")}
       >
         {SECTIONS.map((t) => {
           const on = t.exact ? pathname === t.href : pathname.startsWith(t.href);
@@ -119,7 +134,7 @@ export function WorkspaceNav() {
             className="hidden h-3.5 w-3.5 shrink-0 text-muted-foreground sm:block"
             aria-hidden="true"
           />
-          <div role="radiogroup" aria-label="Time range" className="flex min-w-0 flex-wrap gap-1">
+          <div role="radiogroup" aria-label="Time range" className={rail}>
             {FINANCE_RANGES.map((r) => {
               const on = range === r.value;
               return (
@@ -152,7 +167,7 @@ export function WorkspaceNav() {
               className="hidden h-3.5 w-3.5 shrink-0 text-muted-foreground sm:block"
               aria-hidden="true"
             />
-            <div role="radiogroup" aria-label="Bucket size" className="flex min-w-0 flex-wrap gap-1">
+            <div role="radiogroup" aria-label="Bucket size" className={rail}>
               {GRANULARITIES.map((g) => {
                 const on = grain === g.value;
                 return (

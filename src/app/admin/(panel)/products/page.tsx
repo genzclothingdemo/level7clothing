@@ -1,13 +1,10 @@
 import Link from "next/link";
-import Image from "next/image";
 import { Plus, Package, Download } from "lucide-react";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { formatINR } from "@/lib/utils";
 import { fuzzyFilter } from "@/lib/search";
-import { ProductRowActions } from "@/components/admin/product-row-actions";
+import { ProductsTable } from "@/components/admin/products-table";
 import { ProductFilters } from "@/components/admin/product-filters";
-import { CopyableId } from "@/components/admin/copy-id";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Products" };
@@ -188,91 +185,21 @@ export default async function AdminProducts({
           )}
         </div>
       ) : (
-        <div className="mt-6 overflow-hidden rounded-2xl border border-border bg-card">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
-                  <th className="px-4 py-3 font-medium">Product</th>
-                  <th className="px-4 py-3 font-medium">Category</th>
-                  <th className="px-4 py-3 font-medium">Subcategory</th>
-                  <th className="px-4 py-3 font-medium">Price</th>
-                  <th className="px-4 py-3 font-medium">Stock</th>
-                  <th className="px-4 py-3 font-medium">Status</th>
-                  <th className="px-4 py-3" />
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {products.map((p) => (
-                  <tr key={p.id} className="hover:bg-muted/40">
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-3">
-                        <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded-lg bg-muted">
-                          {p.images[0] && (
-                            <Image
-                              src={p.images[0]}
-                              alt={p.name}
-                              fill
-                              sizes="44px"
-                              className="object-cover"
-                            />
-                          )}
-                        </div>
-                        <div className="min-w-0">
-                          <p className="truncate font-medium">{p.name}</p>
-                          {p.isFeatured && (
-                            <span className="block text-[11px] gold-text">
-                              ★ Featured
-                            </span>
-                          )}
-                          {/* Same ID shown on order line items, so one copied
-                              off an order can be matched back to here. */}
-                          <span className="mt-1 block">
-                            <CopyableId id={p.id} />
-                          </span>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-muted-foreground">
-                      {p.category}
-                    </td>
-                    <td className="px-4 py-3">
-                      {p.subcategory ? (
-                        <span className="rounded-full bg-accent/10 px-2.5 py-1 text-xs text-foreground">
-                          {p.subcategory.name}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">{formatINR(p.price)}</td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={p.stock <= 0 ? "text-danger" : ""}
-                      >
-                        {p.stock}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`rounded-full px-2.5 py-1 text-xs ${
-                          p.isActive
-                            ? "bg-success/15 text-success"
-                            : "bg-muted text-muted-foreground"
-                        }`}
-                      >
-                        {p.isActive ? "Active" : "Hidden"}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <ProductRowActions id={p.id} isActive={p.isActive} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        /* The table is a client component so it can hold a selection. Only
+           plain data crosses — see `ProductRow`. */
+        <ProductsTable
+          rows={products.map((p) => ({
+            id: p.id,
+            name: p.name,
+            image: p.images[0] ?? null,
+            category: p.category,
+            subcategoryName: p.subcategory?.name ?? null,
+            price: p.price,
+            stock: p.stock,
+            isActive: p.isActive,
+            isFeatured: p.isFeatured,
+          }))}
+        />
       )}
     </div>
   );

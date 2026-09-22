@@ -12,23 +12,48 @@
  * directive can be imported from both sides, which is what a shared constant
  * and a type guard actually need.
  *
- * Grouped by errand rather than by schema column order: "rename the brand",
- * "change the COD switch" and "rewrite the hero" are three different jobs and
- * should not be three scroll positions in one form.
+ * ## Why these seven
+ *
+ * Settings is now the **single home for settings** — the order pipeline and the
+ * return policy both moved in from the screens that used to own them, because
+ * the owner went looking for auto-confirm here twice and it was on the Orders
+ * page. That would have made nine tabs, and nine tabs on a 375px screen is a
+ * swipe, not a menu. So they are grouped by the errand instead of by the
+ * schema, and two pairs merged:
+ *
+ *   Brand + Contact          → **Store**       (who you are)
+ *   Copy + Product defaults  → **Storefront**  (what it says)
+ *
+ * and the order is by how often the owner touches them. **Store** stays first
+ * because the sidebar calls this screen "Branding & settings" and landing
+ * somewhere else would not match the door you came through; **Orders** is
+ * second, because it is the one people go hunting for.
+ *
+ * Inside each tab the same rule applies one level down: what changes weekly is
+ * on top, what is set once is behind a `Disclosure`, and every long explanation
+ * is behind an `(i)` rather than in a paragraph.
+ *
+ * Renaming `brand`/`copy`/`contact`/`product` changes their `?tab=` values.
+ * `isTabKey` rejects the old ones and `DEFAULT_TAB` catches them, so a stale
+ * bookmark opens Store rather than an empty panel.
  */
 export const TABS = [
-  { key: "brand", label: "Brand", heading: "Brand & identity" },
-  { key: "contact", label: "Contact", heading: "Contact & social" },
-  { key: "copy", label: "Copy", heading: "Storefront copy" },
+  { key: "store", label: "Store", heading: "Brand, contact & social" },
+  { key: "orders", label: "Orders", heading: "Order automation" },
   { key: "payments", label: "Payments", heading: "Payments" },
   { key: "shipping", label: "Shipping", heading: "Shipping & fulfilment" },
-  { key: "product", label: "Products", heading: "Product defaults" },
+  { key: "returns", label: "Returns", heading: "Returns & refunds" },
+  {
+    key: "storefront",
+    label: "Storefront",
+    heading: "Storefront copy & product defaults",
+  },
   { key: "email", label: "Email", heading: "Notifications & email" },
 ] as const;
 
 export type TabKey = (typeof TABS)[number]["key"];
 
-export const DEFAULT_TAB: TabKey = "brand";
+export const DEFAULT_TAB: TabKey = "store";
 
 export function isTabKey(v: string | undefined): v is TabKey {
   return TABS.some((t) => t.key === v);

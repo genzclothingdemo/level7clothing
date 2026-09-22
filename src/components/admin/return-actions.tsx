@@ -227,6 +227,11 @@ export function ReturnActions({
           </div>
           <p className="mt-1.5 text-[11px] text-muted-foreground">
             Refund if approved: <b>{formatINR(refund.net)}</b>
+            {refund.waivedFee > 0 && (
+              <span className="block text-success">
+                Full refund — our fault, {formatINR(refund.waivedFee)} fee waived
+              </span>
+            )}
           </p>
         </div>
       );
@@ -633,13 +638,33 @@ function Breakdown({ refund }: { refund: RefundBreakdown }) {
         />
       )}
       <Line label="Gross" value={formatINR(refund.gross)} strong />
-      <Line
-        label={refund.feeWaived ? "Return fee (waived — our fault)" : "Return fee"}
-        value={refund.fee > 0 ? `− ${formatINR(refund.fee)}` : "—"}
-      />
+      {/*
+        The waiver is stated as a *line of the sum*, not as a parenthesis on a
+        label, and only when a fee actually existed to waive — `feeWaived` is
+        true for any damaged item, including on a store that charges nothing,
+        where "waived" would name a fee that was never there.
+      */}
+      {refund.waivedFee > 0 ? (
+        <Line
+          label="Return fee — waived, our fault"
+          value={`${formatINR(refund.waivedFee)} not charged`}
+          tip="This reason reads as our mistake (damaged, defective, wrong item, missing, not as described) and the store's policy waives the fee on those, so this one is a full refund. Change that under Settings → Returns."
+        />
+      ) : (
+        <Line
+          label="Return fee"
+          value={refund.fee > 0 ? `− ${formatINR(refund.fee)}` : "—"}
+        />
+      )}
       <div className="border-t border-border pt-1">
         <Line label="Pay the customer" value={formatINR(refund.net)} strong />
       </div>
+      {refund.waivedFee > 0 && (
+        <p className="text-success">
+          Full refund — this one is our fault, so the {formatINR(refund.waivedFee)}{" "}
+          fee is dropped.
+        </p>
+      )}
       {refund.feeCapped && (
         <p className="text-danger">
           The fee is larger than the refund — capped, so nothing is owed rather

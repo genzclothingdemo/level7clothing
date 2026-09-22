@@ -11,11 +11,13 @@
  *    single flex row reads correctly from 320px up and there is no second
  *    copy to forget when a column is added.
  *
- * 2. **Select-all agrees with the filters.** It toggles exactly the rows on
- *    screen, and the selection is *intersected* on read rather than trimmed
- *    on write — so narrowing the filter narrows what a bulk action hits,
- *    instead of silently acting on rows the admin can no longer see. Same
- *    rule as `orders-table.tsx`.
+ * 2. **Selection is the shared primitive** (`admin/selection`), not a local
+ *    copy. That is where the rule lives that select-all only ever covers the
+ *    rows on screen and the selection is intersected with them — so narrowing
+ *    the filter narrows what a bulk action hits, instead of silently acting on
+ *    rows the admin can no longer see. Adopting it also gave this list
+ *    shift-click ranges and a drag sweep down the checkbox column, neither of
+ *    which the hand-rolled version had.
  *
  * 3. **Reorder is up/down buttons and is disabled while filtered.** No drag:
  *    the owner does this on a phone and HTML5 drag events don't fire on
@@ -45,7 +47,12 @@ import {
   Star,
   Trash2,
 } from "lucide-react";
-import { Check, CountBadge, MiniButton, Toolbar } from "@/components/admin/form-kit";
+import { CountBadge, MiniButton, Toolbar } from "@/components/admin/form-kit";
+import {
+  SelectCheckbox,
+  SelectHandle,
+  useMultiSelect,
+} from "@/components/admin/selection";
 import {
   bulkPortfolioAction,
   deletePortfolioItem,
@@ -99,7 +106,6 @@ export function PortfolioTable({
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   /** Local order while unsaved. `null` means "whatever the server sent". */
   const [draftOrder, setDraftOrder] = useState<string[] | null>(null);
   const [savingOrder, setSavingOrder] = useState(false);
@@ -119,33 +125,17 @@ export function PortfolioTable({
     return [...kept, ...added].map((id) => byId.get(id)!).filter(Boolean);
   }, [draftOrder, rows, serverIds]);
 
-  const visibleIds = orderedRows.map((r) => r.id);
-  // Intersected on read — see note 2.
-  const selectedIds = visibleIds.filter((id) => selected.has(id));
-  const allSelected = visibleIds.length > 0 && selectedIds.length === visibleIds.length;
+  const visibleIds = useMemo(() => orderedRows.map((r) => r.id), [orderedRows]);
+
+  /**
+   * Selection comes from the shared primitive now (`admin/selection`), which
+   * is where the intersect-with-visible rule of note 2 lives — along with
+   * shift-range and the drag sweep this list used to lack. The hand-rolled
+   * version here was one of the four near-identical copies it replaced.
+   */
+  const selection = useMultiSelect(visibleIds);
+  const selectedIds = selection.ids;
   const dirtyOrder = draftOrder !== null;
-
-  /* ---------------- selection ---------------- */
-
-  function toggleOne(id: string, next: boolean) {
-    setSelected((prev) => {
-      const copy = new Set(prev);
-      if (next) copy.add(id);
-      else copy.delete(id);
-      return copy;
-    });
-  }
-
-  function toggleAll(next: boolean) {
-    setSelected((prev) => {
-      const copy = new Set(prev);
-      for (const id of visibleIds) {
-        if (next) copy.add(id);
-        else copy.delete(id);
-      }
-      return copy;
-    });
-  }
 
   /* ---------------- reorder ---------------- */
 
@@ -222,7 +212,7 @@ export function PortfolioTable({
     const res = await bulkPortfolioAction(selectedIds, action);
     if (res.success) {
       toast.success(`${res.count ?? selectedIds.length} updated`);
-      setSelected(new Set());
+      selection.clear();
       router.refresh();
     } else {
       toast.error(res.error ?? "Couldn't apply that to the selection.");
@@ -251,11 +241,15 @@ export function PortfolioTable({
     <div className="mt-6 min-w-0 space-y-3">
       {/* ---- Toolbar: select-all, bulk actions, save order ---- */}
       <Toolbar>
-        <Check
-          checked={allSelected}
-          indeterminate={selectedIds.length > 0}
-          onChange={toggleAll}
-          label={allSelected ? "Clear selection" : "Select every piece shown"}
+        <SelectCheckbox
+          checked={selection.allVisibleSelected}
+          indeterminate={selection.someVisibleSelected}
+          onChange={selection.toggleAll}
+          label={
+            selection.allVisibleSelected
+              ? "Clear selection"
+              : "Select every piece shown"
+          }
         />
         <span className="text-xs text-muted-foreground">
           {selectedIds.length > 0 ? (
@@ -288,7 +282,7 @@ export function PortfolioTable({
             >
               <Trash2 className="h-3.5 w-3.5" /> Delete
             </MiniButton>
-            <MiniButton onClick={() => setSelected(new Set())}>Clear</MiniButton>
+            <MiniButton onClick={selection.clear}>Clear</MiniButton>
           </span>
         )}
       </Toolbar>
@@ -321,7 +315,7 @@ export function PortfolioTable({
       {/* ---- Rows ---- */}
       <ul className="min-w-0 space-y-2">
         {orderedRows.map((row, i) => {
-          const isSelected = selected.has(row.id);
+          const isSelected = selection.isSelected(row.id);
           return (
             <li
               key={row.id}
@@ -337,9 +331,11 @@ export function PortfolioTable({
                 !row.isActive && "opacity-60"
               )}
             >
-              <Check
-                checked={isSelected}
-                onChange={(next) => toggleOne(row.id, next)}
+              {/* The handle is the drag surface, not the whole row — this row
+                  carries six controls, and a press on Delete must not sweep. */}
+              <SelectHandle
+                selection={selection}
+                id={row.id}
                 label={`Select ${row.title}`}
               />
 

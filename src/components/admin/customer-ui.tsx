@@ -17,6 +17,8 @@ import {
   CUSTOMER_STATUS_HELP,
   CUSTOMER_STATUS_LABEL,
   CUSTOMER_STATUS_TONE,
+  type CustomerRecord,
+  type CustomerSignal,
   type CustomerStatus,
 } from "@/lib/customers";
 
@@ -73,13 +75,15 @@ export function formatAgo(d: Date, now: number): string {
 export function CustomerStatusBadge({
   status,
   withTip = false,
+  className,
 }: {
   status: CustomerStatus;
   /** Only the detail page explains it; a list of 40 tips is noise. */
   withTip?: boolean;
+  className?: string;
 }) {
   return (
-    <span className="inline-flex items-center gap-0.5">
+    <span className={cn("inline-flex items-center gap-0.5", className)}>
       <Badge tone={CUSTOMER_STATUS_TONE[status]} title={CUSTOMER_STATUS_HELP[status]}>
         {CUSTOMER_STATUS_LABEL[status]}
       </Badge>
@@ -98,37 +102,106 @@ export function CustomerStatusBadge({
 /*  Provenance                                                         */
 /* ------------------------------------------------------------------ */
 
+/** "a, b and c" — a sentence, not a machine-readable join. */
+function sentenceList(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? "";
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
 /**
- * Which tables fed this record — "Account + 2 guest orders".
+ * The merge, behind an "(i)".
  *
- * This is the merge, made visible. Without it a record that quietly absorbed a
- * guest order looks like it lost one, and nobody can tell whether the person
- * they are looking at is one shopper or two that were welded together.
+ * This used to be a line of prose under every name — "Account + 4 account
+ * orders + 1 cart lead + 1 chat + 1 return" — which made the longest string on
+ * the row the one answering the question nobody asks first. It is still the
+ * most important thing to be able to check (a record that quietly absorbed a
+ * guest order looks like it lost one), so it moves behind a tap rather than
+ * going away, and it now says *why* the sources folded together rather than
+ * only that they did.
+ *
+ * Rendered only when there is more than one source. A record built from one
+ * table has nothing to explain, and 40 rows of "(i) Account" is noise.
  */
-export function SourceLine({
-  parts,
+export function MergeTip({
+  customer,
   className,
-  withTip = false,
 }: {
-  parts: string[];
+  customer: CustomerRecord;
   className?: string;
-  withTip?: boolean;
 }) {
-  if (parts.length === 0) return null;
+  const parts = customer.sourceParts;
+  if (parts.length < 2) return null;
+
+  const linkedBy = [...customer.emails, ...customer.phones];
+
   return (
-    <span
-      className={cn("inline-flex min-w-0 items-center gap-0.5", className)}
-      title={parts.join(" + ")}
-    >
-      <span className="truncate">{parts.join(" + ")}</span>
-      {withTip && (
-        <InfoTip term="Sources">
-          A customer here is a person, not a row. Records are matched on
-          lowercased email, falling back to phone number, and anything sharing a
-          contact detail is folded into one record — so a guest order and the
-          account opened later are the same shopper. Two registered accounts are
-          never merged, even if they share a phone.
-        </InfoTip>
+    <InfoTip term="One person, several records" className={className}>
+      Built from {sentenceList(parts)}.
+      {linkedBy.length > 0 && (
+        <>
+          {" "}
+          They were folded together because they share{" "}
+          {linkedBy.length === 1 ? "this contact detail" : "these contact details"}:{" "}
+          <b>{linkedBy.join(", ")}</b>.
+        </>
+      )}{" "}
+      Matching is on lowercased email first and phone number second. Two
+      registered accounts are never merged, even when they share a number.
+    </InfoTip>
+  );
+}
+
+/**
+ * The same facts as a plain string, for a `title` attribute — used where a
+ * second tap target would be in the way.
+ */
+export function sourceSummary(customer: CustomerRecord): string {
+  return customer.sourceParts.length
+    ? `Built from ${sentenceList(customer.sourceParts)}`
+    : "";
+}
+
+/* ------------------------------------------------------------------ */
+/*  Signals                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The things that want doing, as badges.
+ *
+ * `linked` is off in the customer list, where the row is already one big link
+ * to the person and five more destinations per row would fight it, and on
+ * wherever the reader is meant to act — the detail page's strip.
+ */
+export function SignalBadges({
+  signals,
+  linked = false,
+  className,
+}: {
+  signals: CustomerSignal[];
+  linked?: boolean;
+  className?: string;
+}) {
+  if (signals.length === 0) return null;
+
+  return (
+    <span className={cn("inline-flex flex-wrap items-center gap-1", className)}>
+      {signals.map((s) =>
+        linked ? (
+          <Link
+            key={s.kind}
+            href={s.href}
+            title={s.help}
+            className="rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
+            <Badge tone={s.tone} className="hover:brightness-95">
+              {s.label}
+            </Badge>
+          </Link>
+        ) : (
+          <Badge key={s.kind} tone={s.tone} title={s.help}>
+            {s.label}
+          </Badge>
+        )
       )}
     </span>
   );
@@ -154,8 +227,14 @@ export function Stat({
 }) {
   return (
     <div className="min-w-0 rounded-lg border border-border bg-card p-3">
-      <div className="flex items-center gap-0.5">
-        <span className="eyebrow truncate">{label}</span>
+      {/*
+        The label wraps rather than truncating. At 320px a two-column tile row
+        leaves about 90px for it, which turned "Still to collect" into "STILL
+        TO …" — a label nobody can read is worse than a tile one line taller,
+        and grid items stretch so the row stays level either way.
+      */}
+      <div className="flex items-start gap-0.5">
+        <span className="eyebrow min-w-0 break-words">{label}</span>
         {tip && <InfoTip term={label}>{tip}</InfoTip>}
       </div>
       <p
@@ -169,7 +248,7 @@ export function Stat({
         {value}
       </p>
       {sub && (
-        <p className="mt-0.5 truncate text-xs text-muted-foreground">{sub}</p>
+        <p className="mt-0.5 break-words text-xs text-muted-foreground">{sub}</p>
       )}
     </div>
   );
@@ -204,6 +283,12 @@ export function AdminRef({
       className={cn(
         "rounded-sm underline decoration-border underline-offset-2 transition-colors hover:text-accent hover:decoration-accent",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+        // Vertical padding on an *inline* element grows the hit box without
+        // touching the line height, so a 14px reference in a dense ledger row
+        // becomes something a thumb can land on and nothing moves. `display`
+        // is deliberately left alone: `inline-block` would stop a long product
+        // name wrapping mid-link, which overflows at 320px.
+        "py-1.5",
         mono && "font-mono",
         className
       )}

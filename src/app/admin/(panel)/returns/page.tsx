@@ -7,9 +7,9 @@ import { DEFAULT_SETTINGS } from "@/lib/settings";
 import { formatINR } from "@/lib/utils";
 import { InfoTip } from "@/components/store/info-tip";
 import { ExpandableText } from "@/components/store/expandable-text";
-import { ReturnPolicyForm } from "@/components/admin/return-defaults";
+import { ReturnPolicySummary } from "@/components/admin/return-policy-summary";
 import { ReturnableBulk } from "@/components/admin/returnable-bulk";
-import { returnableBreakdown } from "@/app/actions/returns";
+import { listReturnableProducts } from "@/app/actions/returns";
 import { ReturnFilters } from "@/components/admin/return-filters";
 import { ReturnActions } from "@/components/admin/return-actions";
 import {
@@ -58,10 +58,14 @@ async function readClock(): Promise<number> {
 /**
  * The return policy, read straight from the settings row.
  *
- * Not `getSettings()`: that DTO predates `returnReasons` / `returnPolicyNote`,
- * and this screen is their only editor. A failed read falls back to the same
- * defaults the schema declares, so the form still renders during a DB blip —
- * it just can't save until the database is back.
+ * Not `getSettings()`: that DTO predates `returnReasons` / `returnPolicyNote`.
+ * A failed read falls back to the same defaults the schema declares, so the
+ * screen still renders during a DB blip.
+ *
+ * This page no longer **edits** any of it — the editor moved to Admin →
+ * Settings so `SiteSettings` keeps one writer per field. What is read here
+ * feeds the read-only summary, the per-product picker's "what does this resolve
+ * to" column, and the refund figures on the queue.
  */
 async function readPolicy() {
   const row = await prisma.siteSettings
@@ -71,15 +75,15 @@ async function readPolicy() {
         returnsEnabled: true,
         defaultReturnable: true,
         returnWindowDays: true,
-        defaultReturnsInfo: true,
         returnReasons: true,
-        returnPolicyNote: true,
         nimbusEnabled: true,
         refundFeePercent: true,
         refundFeeFlat: true,
         partialAdvanceRefundable: true,
         waiveRefundFeeOnOurFault: true,
-        refundPolicyNote: true,
+        // Owned by Settings → Payments. Read-only here: it decides whether the
+        // part-paid advance rule can apply at all.
+        partialEnabled: true,
       },
     })
     .catch(() => null);
@@ -88,10 +92,9 @@ async function readPolicy() {
     returnsEnabled: row?.returnsEnabled ?? DEFAULT_SETTINGS.returnsEnabled,
     defaultReturnable: row?.defaultReturnable ?? DEFAULT_SETTINGS.defaultReturnable,
     returnWindowDays: row?.returnWindowDays ?? DEFAULT_SETTINGS.returnWindowDays,
-    defaultReturnsInfo: row?.defaultReturnsInfo ?? DEFAULT_SETTINGS.defaultReturnsInfo,
     returnReasons: normaliseReturnReasons(row?.returnReasons),
-    returnPolicyNote: row?.returnPolicyNote ?? "",
     nimbusEnabled: row?.nimbusEnabled ?? DEFAULT_SETTINGS.nimbusEnabled,
+    partialEnabled: row?.partialEnabled ?? DEFAULT_SETTINGS.partialEnabled,
     // The money rules. A failed read falls back to "no fee" rather than to a
     // guess — inventing a deduction is the one wrong answer here.
     refund: {
@@ -105,7 +108,6 @@ async function readPolicy() {
         row?.waiveRefundFeeOnOurFault ??
         DEFAULT_REFUND_SETTINGS.waiveRefundFeeOnOurFault,
     },
-    refundPolicyNote: row?.refundPolicyNote ?? "",
   };
 }
 
@@ -127,12 +129,9 @@ export default async function AdminReturns({
   const now = await readClock();
 
   const policy = await readPolicy();
-  // Only needed by the policy tab; the requests tab never renders the bulk
-  // control, so three COUNT queries are not worth running for it.
-  const returnable =
-    tab === "policy"
-      ? await returnableBreakdown()
-      : { inherit: 0, yes: 0, no: 0, total: 0 };
+  // Only the policy tab renders the product picker, so the catalogue read is
+  // skipped entirely on the queue.
+  const products = tab === "policy" ? await listReturnableProducts() : [];
 
   // Composed as AND parts rather than assigned onto one object: the search and
   // the "our fault" filter both need their own OR, and the last writer would
@@ -294,30 +293,33 @@ export default async function AdminReturns({
       </div>
 
       {tab === "policy" ? (
-        <div className="mt-4 max-w-2xl">
-          <ReturnPolicyForm
-            initial={{
+        <div className="mt-4 max-w-2xl space-y-4">
+          {/* The rules, stated but not editable — they are written at Admin →
+              Settings so `SiteSettings` keeps one writer per field. */}
+          <ReturnPolicySummary
+            policy={{
               returnsEnabled: policy.returnsEnabled,
               defaultReturnable: policy.defaultReturnable,
               returnWindowDays: policy.returnWindowDays,
-              defaultReturnsInfo: policy.defaultReturnsInfo,
               returnReasons: policy.returnReasons,
-              returnPolicyNote: policy.returnPolicyNote,
               refundFeePercent: policy.refund.refundFeePercent,
               refundFeeFlat: policy.refund.refundFeeFlat,
               partialAdvanceRefundable: policy.refund.partialAdvanceRefundable,
               waiveRefundFeeOnOurFault: policy.refund.waiveRefundFeeOnOurFault,
-              refundPolicyNote: policy.refundPolicyNote,
+              partialEnabled: policy.partialEnabled,
             }}
-            todayISO={new Date(now).toISOString()}
           />
 
-          {/* Catalogue-wide override. Sits below the policy form because it
-              acts on products rather than on the policy itself, and because it
-              only makes sense once the store default above has been decided. */}
-          <div className="mt-6">
-            <ReturnableBulk breakdown={returnable} />
-          </div>
+          {/* Per-product exceptions. They belong here rather than in Settings:
+              this acts on the catalogue, not on the policy, and it only makes
+              sense once the store default above has been decided. */}
+          <ReturnableBulk
+            products={products}
+            policy={{
+              returnsEnabled: policy.returnsEnabled,
+              defaultReturnable: policy.defaultReturnable,
+            }}
+          />
         </div>
       ) : (
         <div className="mt-4">

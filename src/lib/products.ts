@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { prisma } from "./prisma";
 import type { Prisma, Product } from "@prisma/client";
 import type {
@@ -207,26 +208,37 @@ export async function getFeatured(limit = 4): Promise<ProductDTO[]> {
   }
 }
 
-export async function getProductBySlug(
+/**
+ * One live product by slug, or `null` when there genuinely isn't one.
+ *
+ * **It does not catch database errors, and must not start.** Callers turn
+ * `null` into `notFound()`, so swallowing a connection blip told Google a live
+ * product had been deleted. Letting it throw gives a 500, which crawlers
+ * retry. A try/catch here came back in with the upstream V2 port (851c099) —
+ * CLAUDE.md names this, and `promotions.ts` and `getProductsBySlugs` both
+ * carry comments that say "unlike getProductBySlug, this DOES swallow errors",
+ * so the surrounding code was relying on a rule the function had stopped
+ * keeping.
+ *
+ * `cache()` is per-request dedup, not a cross-request cache: the product page
+ * asks for the same row twice — once in `generateMetadata`, once in the body —
+ * and without this that is two round trips to Mumbai for one page view.
+ */
+export const getProductBySlug = cache(async function getProductBySlug(
   slug: string
 ): Promise<ProductDTO | null> {
-  try {
-    const product = await prisma.product.findUnique({
-      where: { slug },
-      include: {
-        productImages: {
-          include: { media: true },
-          orderBy: { sortOrder: "asc" },
-        },
+  const product = await prisma.product.findUnique({
+    where: { slug },
+    include: {
+      productImages: {
+        include: { media: true },
+        orderBy: { sortOrder: "asc" },
       },
-    });
-    if (!product || !product.isActive) return null;
-    return toDTO(product);
-  } catch (err) {
-    console.error("[products] getProductBySlug failed:", err);
-    return null;
-  }
-}
+    },
+  });
+  if (!product || !product.isActive) return null;
+  return toDTO(product);
+});
 
 /**
  * Look up several products by slug at once, returning them in the order the

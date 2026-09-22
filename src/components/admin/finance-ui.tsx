@@ -26,8 +26,9 @@
  */
 
 import Link from "next/link";
-import { ArrowDown, ArrowRight, ArrowUp, Minus } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUp, CheckCircle2, Minus } from "lucide-react";
 import { InfoTip } from "@/components/store/info-tip";
+import { Disclosure } from "@/components/store/disclosure";
 import { cn, formatINR } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -295,68 +296,119 @@ export function NotMeasured({
 }) {
   if (rows.length === 0) return null;
   return (
-    <ul className="divide-y divide-border">
-      {rows.map((row) => (
-        <li key={row.metric} className="py-3 first:pt-0 last:pb-0">
-          <p className="text-sm font-medium">{row.metric}</p>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{row.why}</p>
-          <p className="mt-1.5 text-xs leading-relaxed">
-            <span className="eyebrow">To measure it</span>{" "}
-            <span className="text-muted-foreground">{row.toGetIt}</span>
-          </p>
-        </li>
-      ))}
-    </ul>
+    // Collapsed by default. The content is worth keeping in full — it is the
+    // panel doing the most useful work here — but it is read ONCE and then
+    // never changes, and expanded it ran to roughly 950 words on Overview:
+    // longer than every live figure on the screen put together, sitting under
+    // numbers that change every day. A closed row states how many absences
+    // there are, which is the part worth seeing on every visit.
+    <Disclosure
+      label={`${rows.length} figure${rows.length === 1 ? "" : "s"} this screen deliberately does not show`}
+      summary="Read why"
+    >
+      <ul className="divide-y divide-border">
+        {rows.map((row) => (
+          <li key={row.metric} className="py-3 first:pt-0 last:pb-0">
+            <p className="text-sm font-medium">{row.metric}</p>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{row.why}</p>
+            <p className="mt-1.5 text-xs leading-relaxed">
+              <span className="eyebrow">To measure it</span>{" "}
+              <span className="text-muted-foreground">{row.toGetIt}</span>
+            </p>
+          </li>
+        ))}
+      </ul>
+    </Disclosure>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/*  Needs attention                                                    */
+/*  Work queue                                                         */
 /* ------------------------------------------------------------------ */
 
 /**
- * One line of the Overview's queue: a count, what it means, and where to go
- * and do something about it. Rendered as a link because every row on that
- * panel has an action behind it — a row with nothing to click is a statistic,
- * and statistics belong in the tiles above.
+ * The Overview's work queue, as a strip at the top of the page.
+ *
+ * It used to be a half-width panel of eight two-line rows, sitting below the
+ * headline tiles and a full-width trend chart — roughly 1,100px down. That is
+ * the wrong order. Revenue is a report you *consult*; this is work you
+ * *clear*, and it is the only thing on the screen with an action behind it.
+ * An owner opening the admin at nine in the morning is asking "what do I have
+ * to do today", and the answer was below the fold.
+ *
+ * Each row is now a chip: the count, a two-word noun, and a link. The
+ * "why it matters" sentences that used to sit under every row are gone rather
+ * than moved — they are onboarding text, true on every visit forever, and the
+ * screen each chip links to explains itself far better than a sentence here
+ * can. What is NOT dropped is the count and the destination, which is the
+ * whole job of this strip.
  */
-export function ActionRow({
-  count,
-  label,
-  detail,
-  href,
-  tone = "neutral",
+export function WorkQueue({
+  rows,
 }: {
-  count: string;
-  label: string;
-  detail?: string;
-  href: string;
-  /** `alert` for a queue that costs money while it sits there. */
-  tone?: "neutral" | "alert";
+  rows: {
+    count: number;
+    short: string;
+    /** Singular form, where the plural would read as "1 reviews to approve". */
+    one?: string;
+    href: string;
+    tone?: "neutral" | "alert";
+  }[];
 }) {
+  if (rows.length === 0) {
+    return (
+      <p className="flex min-h-11 items-center gap-2 rounded-2xl border border-success/40 bg-success/5 px-4 text-sm text-success">
+        <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+        Nothing is waiting — every queue in the store is empty.
+      </p>
+    );
+  }
+
+  const total = rows.reduce((n, r) => n + r.count, 0);
+
   return (
-    <li>
-      <Link
-        href={href}
-        className="flex min-h-11 items-center gap-3 rounded-lg px-2 py-2 -mx-2 transition-colors hover:bg-muted"
-      >
-        <span
-          className={cn(
-            "w-10 shrink-0 text-right text-lg font-medium tabular-nums",
-            tone === "alert" ? "text-danger" : "text-foreground"
-          )}
-        >
-          {count}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-sm">{label}</span>
-          {detail && (
-            <span className="block text-xs leading-relaxed text-muted-foreground">{detail}</span>
-          )}
-        </span>
-        <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-      </Link>
-    </li>
+    <section className="rounded-2xl border border-border bg-card p-3 sm:p-4">
+      <div className="mb-2.5 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <h2 className="flex items-center gap-1 font-serif text-lg leading-none">
+          Needs attention
+          <InfoTip term="Needs attention">
+            Everything currently sitting in a queue, across the whole store.
+            Deliberately <strong className="font-medium">not</strong> filtered
+            by the time range above: an order that has been waiting a month to
+            be confirmed is more urgent than one placed this morning, and
+            scoping this to the last 30 days would hide exactly the rows that
+            matter. Each chip links to the screen where you can clear it.
+          </InfoTip>
+        </h2>
+        <p className="text-xs text-muted-foreground">
+          {formatCount(total)} item{total === 1 ? "" : "s"} across{" "}
+          {rows.length} queue{rows.length === 1 ? "" : "s"} · right now, not this period
+        </p>
+      </div>
+      <ul className="flex flex-wrap gap-2">
+        {rows.map((r) => (
+          <li key={r.short}>
+            <Link
+              href={r.href}
+              className={cn(
+                "flex min-h-11 items-center gap-1.5 rounded-lg border px-3 transition-colors",
+                r.tone === "alert"
+                  ? "border-danger/40 bg-danger/5 text-danger hover:bg-danger/10"
+                  : "border-border hover:bg-muted"
+              )}
+            >
+              <span className="text-base font-medium leading-none tabular-nums">
+                {formatCount(r.count)}
+              </span>
+              <span className="text-xs leading-none">
+                {r.count === 1 && r.one ? r.one : r.short}
+              </span>
+              <ArrowRight className="h-3 w-3 shrink-0 opacity-50" aria-hidden="true" />
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

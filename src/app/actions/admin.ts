@@ -15,6 +15,7 @@ import {
   dispatchOrder,
   getCourierOptionsForOrder,
   runConfirmationPipeline,
+  shipOrderNow,
   syncAllOpenOrders,
   syncOrderFromNimbus,
   type ConfirmationPipelineResult,
@@ -654,10 +655,12 @@ export async function setProductSubcategory(
  * - The six order-pipeline columns are written by
  *   `updateOrderPipelineSettings` below.
  *
- * Settings renders both groups read-only with a link. A field must have
- * exactly one writer — `defaultReturnsInfo` used to be echoed back through
- * this payload "unchanged", which is a lost update waiting to happen the
- * moment two tabs are open.
+ * Both groups are now *edited on the Settings screen* — the return policy as a
+ * mounted `ReturnPolicyCard`, the pipeline through its own action — but neither
+ * goes through this payload, and that is the point. A field must have exactly
+ * one writer: `defaultReturnsInfo` used to be echoed back through here
+ * "unchanged", which is a lost update waiting to happen the moment two tabs are
+ * open. Sharing a screen is not the same as sharing a writer.
  *
  * `currency` is also absent: nothing renders it (`formatINR` and the Razorpay
  * order are both hard-wired to INR), so there is no editor for it and this
@@ -1101,28 +1104,57 @@ export async function confirmOrder(id: string) {
 }
 
 // -------- Shipping (NimbusPost) --------
-/**
- * Books a staged draft. If nothing is staged yet it stages the draft and stops
- * — booking never happens on the same click, so the draft can be reviewed in
- * NimbusPost (or here) first.
+/*
+ * Two actions, never one button with two meanings.
+ *
+ * The screen used to carry a single control whose label flipped between "Send
+ * draft" and "Book & generate AWB" depending on hidden state, in the same
+ * colour, with no confirmation — one of them free, the other a real charge to
+ * the NimbusPost wallet. Which one you were about to press was something you
+ * had to infer. They are now `shipOrderNowAction` (spends money, confirmed in
+ * the UI first) and `draftOrderInNimbusAction` (free, reversible), and each
+ * does exactly and only what its name says.
+ *
+ * Both refuse a pending, cancelled or already-booked order through
+ * `shipmentGateFor` down in `lib/fulfilment.ts`, so the rule is enforced on the
+ * server and not merely hidden in the client.
  */
-export async function shipOrderViaNimbus(id: string) {
+
+/**
+ * **Ship now** — book the AWB with the courier the admin picked from the live
+ * rates. Stages the draft first if there isn't one, so the review gate's
+ * draft-before-AWB ordering still holds inside NimbusPost.
+ */
+export async function shipOrderNowAction(
+  id: string,
+  courierId: string | null,
+  courierName: string | null
+) {
   await requireAdmin();
 
-  const result = await dispatchOrder(id);
+  const courier =
+    courierId && courierName ? { id: courierId, name: courierName } : null;
+  const result = await shipOrderNow(id, courier);
+
   if (!result.ok) {
-    console.error("[admin] dispatchOrder failed:", result.error);
-    return { ok: false as const, error: result.error || "Failed to create shipment." };
+    console.error("[admin] shipOrderNow failed:", result.error);
+    // Deliberately not a generic message: "Insufficient wallet balance" is the
+    // one the owner will actually hit (CLAUDE.md records the wallet at ₹0.00),
+    // and it tells them exactly what to do next.
+    revalidatePath("/admin/orders");
+    return { ok: false as const, error: result.error };
   }
 
-  // Draft staged only — no courier, no AWB, no wallet charge, nothing to email.
+  // Can only happen if the second dispatch call also found no draft, which
+  // means the booking never ran. Reported as a failure rather than a success,
+  // because nothing shipped.
   if (result.outcome === "drafted") {
     revalidatePath("/admin/orders");
     revalidatePath("/admin");
     return {
-      ok: true as const,
-      outcome: "drafted" as const,
-      nimbusOrderId: result.nimbusOrderId,
+      ok: false as const,
+      error:
+        "The draft was staged but NimbusPost did not return an AWB. The draft is safe — try Ship now again, or book it in the NimbusPost dashboard.",
     };
   }
 
@@ -1151,10 +1183,41 @@ export async function shipOrderViaNimbus(id: string) {
   revalidatePath("/admin");
   return {
     ok: true as const,
-    outcome: "booked" as const,
     awb: result.awb,
     courier: result.courier,
     courierMismatch: result.courierMismatch ?? null,
+  };
+}
+
+/**
+ * **Draft in NimbusPost** — stage the unbooked order and stop.
+ *
+ * Calls `createDraftForOrder` rather than `dispatchOrder`: `dispatchOrder`
+ * *books* when a draft already exists, so routing the draft button through it
+ * would make a second press charge the wallet. Free, idempotent, and reversible
+ * from the NimbusPost dashboard, which is why it needs no confirmation.
+ */
+export async function draftOrderInNimbusAction(id: string) {
+  await requireAdmin();
+
+  const result = await createDraftForOrder(id);
+  if (!result.ok) {
+    const error =
+      result.error ??
+      (result.skipped === "shipping disabled"
+        ? "NimbusPost shipping is switched off. Turn it on in Settings → Shipping."
+        : result.skipped === "not configured"
+          ? "NimbusPost isn't set up in this deployment."
+          : `Could not stage a draft (${result.skipped ?? "unknown reason"}).`);
+    return { ok: false as const, error };
+  }
+
+  revalidatePath("/admin/orders");
+  revalidatePath("/admin");
+  return {
+    ok: true as const,
+    alreadyStaged: result.skipped === "already staged",
+    nimbusOrderId: result.nimbusOrderId ?? null,
   };
 }
 
@@ -1482,12 +1545,19 @@ function describeShipment(shipment: ConfirmationPipelineResult): string {
 /* ------------------------------------------------------------------ */
 
 /**
- * The six pipeline columns on `SiteSettings`, edited from the Orders screen
- * rather than Admin → Settings — they are operational, not branding, and this
- * is where they are used.
+ * The six pipeline columns on `SiteSettings`.
  *
- * Scoped to exactly these fields so it can never overwrite anything the
- * general settings form owns.
+ * Edited from **Admin → Settings → Orders**. They used to live on the Orders
+ * screen, on the argument that they are operational rather than branding; the
+ * owner went looking for them in Settings twice, so Settings is now the single
+ * home for settings and `/admin/orders` carries a read-only status line that
+ * links here.
+ *
+ * Still its own action, and still scoped to exactly these six fields. The
+ * settings form calls it directly for whichever of them are dirty rather than
+ * folding them into `updateSettings` — one writer per column, so a Settings
+ * save can never clobber a pipeline column it was not asked to touch, and
+ * `settingsSchema` can go on rejecting them.
  */
 const pipelineSchema = z.object({
   orderConfirmMode: z.enum(["manual", "byPayment", "auto"]),
@@ -1616,4 +1686,84 @@ export async function searchProductsAction(query: string) {
     subcategoryName: p.subcategory?.name || null,
     options: p.options as { name: string; choices: { label: string }[] }[] | null
   }));
+}
+
+/* ------------------------------------------------------------------ */
+/*  Products — bulk                                                    */
+/* ------------------------------------------------------------------ */
+
+const productBulkSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1, "Nothing selected").max(200),
+  action: z.enum(["activate", "deactivate", "feature", "unfeature", "delete"]),
+});
+
+export type ProductBulkAction = z.infer<typeof productBulkSchema>["action"];
+
+/**
+ * Apply one change to many products.
+ *
+ * The four flag changes are a single `updateMany` — they cannot partially
+ * fail in a way worth reporting per row, and one statement is one round trip
+ * to Mumbai rather than N.
+ *
+ * **Delete is a loop on purpose.** A product can be referenced by orders,
+ * reviews, wishlist rows and portfolio pieces, so one row can fail a foreign
+ * key while the rest are fine. `deleteMany` would abort the whole batch and
+ * tell the admin nothing about which piece blocked it; this reports a count
+ * and names the ones it could not remove.
+ */
+export async function bulkProductAction(ids: string[], action: string) {
+  await requireAdmin();
+
+  const parsed = productBulkSchema.safeParse({ ids: [...new Set(ids)], action });
+  if (!parsed.success) {
+    return { ok: false as const, error: parsed.error.issues[0].message };
+  }
+  const { ids: unique, action: verb } = parsed.data;
+
+  try {
+    if (verb !== "delete") {
+      const data =
+        verb === "activate"
+          ? { isActive: true }
+          : verb === "deactivate"
+            ? { isActive: false }
+            : verb === "feature"
+              ? { isFeatured: true }
+              : { isFeatured: false };
+
+      const res = await prisma.product.updateMany({ where: { id: { in: unique } }, data });
+      revalidateStore();
+      return { ok: true as const, count: res.count };
+    }
+
+    const found = await prisma.product.findMany({
+      where: { id: { in: unique } },
+      select: { id: true, name: true },
+    });
+    const nameById = new Map(found.map((p) => [p.id, p.name]));
+
+    let count = 0;
+    const blocked: string[] = [];
+    for (const id of unique) {
+      try {
+        await prisma.product.delete({ where: { id } });
+        count += 1;
+      } catch {
+        blocked.push(nameById.get(id) ?? id.slice(-6));
+      }
+    }
+
+    revalidateStore();
+    return {
+      ok: true as const,
+      count,
+      error: blocked.length
+        ? `Kept ${blocked.length}: ${blocked.slice(0, 3).join(", ")}${blocked.length > 3 ? "…" : ""} — still referenced by an order or a review.`
+        : undefined,
+    };
+  } catch (err) {
+    console.error("[bulkProductAction] failed:", err);
+    return { ok: false as const, error: "Could not apply that to the selection." };
+  }
 }

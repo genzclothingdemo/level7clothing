@@ -23,6 +23,8 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { getAdminSession } from "@/lib/auth";
 import { PORTFOLIO_KINDS, isSafeHref, type PortfolioKind } from "@/lib/portfolio";
+import { resolveInstagramPost } from "@/lib/instagram-resolve";
+import { put } from "@vercel/blob";
 
 async function requireAdmin() {
   const session = await getAdminSession();
@@ -369,5 +371,129 @@ export async function reorderPortfolio(
     return { success: true };
   } catch (error) {
     return { success: false, error: explain(error) };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Instagram import                                                   */
+/* ------------------------------------------------------------------ */
+
+export type InstagramImportResult =
+  | {
+      success: true;
+      url: string;
+      title: string | null;
+      /** A Blob address we own, or null when copying was not possible. */
+      imageUrl: string | null;
+      embedHtml: string;
+      /** Set when the post belongs to a different handle — worth showing. */
+      author: string | null;
+      /** Non-fatal explanation, e.g. the thumbnail could not be copied. */
+      warning?: string;
+    }
+  | { success: false; error: string };
+
+/**
+ * Paste an Instagram link, get back everything the form needs.
+ *
+ * **The thumbnail is copied, never linked.** `scontent.cdninstagram.com`
+ * addresses carry a signed `oe=` expiry — measured at four days on the posts
+ * this was built against — so storing one produces a portfolio that looks
+ * right today and is broken images next week, silently. The bytes are fetched
+ * once and put in Vercel Blob, and `imageUrl` holds an address we control.
+ *
+ * Failure to copy is deliberately **not** fatal: the row is still worth
+ * saving with a working permalink and embed, so the caller gets a warning and
+ * the owner can attach a photo from the media library instead.
+ */
+export async function importInstagramPost(
+  rawUrl: string
+): Promise<InstagramImportResult> {
+  try {
+    await requireAdmin();
+
+    const post = await resolveInstagramPost(rawUrl);
+    if (!post) {
+      return {
+        success: false,
+        error:
+          "Couldn't read that link. Check it is a public Instagram post or reel — private and deleted posts can't be read, and Instagram sometimes rate-limits. You can still save it as a plain link.",
+      };
+    }
+
+    // `<iframe src>` is what `embedSrcFromHtml` parses back out; we store the
+    // same shape the oEmbed API would have returned so there is one reader.
+    const embedHtml = `<iframe src="${post.embedUrl}" width="400" height="480" frameborder="0" scrolling="no" allowtransparency="true"></iframe>`;
+
+    let imageUrl: string | null = null;
+    let warning: string | undefined;
+
+    if (post.thumbnailUrl) {
+      const copied = await copyToBlob(post.thumbnailUrl, `instagram/${post.shortcode}`);
+      if (copied.ok) imageUrl = copied.url;
+      else warning = copied.error;
+    } else {
+      warning = "Instagram returned no preview image for this post.";
+    }
+
+    return {
+      success: true,
+      url: post.url,
+      title: post.title,
+      imageUrl,
+      embedHtml,
+      author: post.author,
+      ...(warning ? { warning } : {}),
+    };
+  } catch (error) {
+    return { success: false, error: explain(error) };
+  }
+}
+
+/**
+ * Fetch a remote image and store it in Vercel Blob.
+ *
+ * Bounded on purpose: a shop admin pasting a link should not be able to pull
+ * an arbitrary 200 MB file into the blob store, and a non-image content type
+ * means we misread the page rather than found a photo.
+ */
+async function copyToBlob(
+  sourceUrl: string,
+  keyBase: string
+): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    return {
+      ok: false,
+      error:
+        "Image storage isn't configured (BLOB_READ_WRITE_TOKEN), so the preview image wasn't saved. Pick one from the media library instead.",
+    };
+  }
+
+  try {
+    const res = await fetch(sourceUrl, { cache: "no-store" });
+    if (!res.ok) {
+      return { ok: false, error: `Instagram returned ${res.status} for the preview image.` };
+    }
+
+    const type = res.headers.get("content-type") ?? "";
+    if (!type.startsWith("image/")) {
+      return { ok: false, error: "That preview address didn't return an image." };
+    }
+
+    const buf = await res.arrayBuffer();
+    const MAX = 8 * 1024 * 1024;
+    if (buf.byteLength > MAX) {
+      return { ok: false, error: "The preview image is larger than 8 MB." };
+    }
+
+    const ext = type.includes("webp") ? "webp" : type.includes("png") ? "png" : "jpg";
+    const blob = await put(`${keyBase}-${Date.now()}.${ext}`, Buffer.from(buf), {
+      access: "public",
+      addRandomSuffix: true,
+      contentType: type,
+    });
+    return { ok: true, url: blob.url };
+  } catch {
+    return { ok: false, error: "Couldn't download the preview image from Instagram." };
   }
 }

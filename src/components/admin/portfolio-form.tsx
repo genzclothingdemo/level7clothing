@@ -24,14 +24,16 @@
 import { useCallback, useMemo, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { Eye, EyeOff, Image as ImageIcon, Star } from "lucide-react";
+import { Download, Eye, EyeOff, Image as ImageIcon, Loader2, Star } from "lucide-react";
 import { Card, Field, Segmented, SwitchRow } from "@/components/admin/form-kit";
 import { PhotoPicker } from "@/components/admin/photo-picker";
 import {
   createPortfolioItem,
+  importInstagramPost,
   updatePortfolioItem,
 } from "@/app/actions/portfolio";
 import type { PortfolioKind } from "@/lib/portfolio";
+import { instagramShortcode } from "@/lib/instagram-resolve";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -103,6 +105,43 @@ export function PortfolioForm({
   const [v, setV] = useState<PortfolioFormValues>(initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  /* ---- Instagram import ---------------------------------------------
+     Paste a permalink, press the button, and the caption, the embed and a
+     *copy* of the poster arrive filled in. The copy matters: Instagram's
+     CDN addresses carry a signed expiry — four days on the posts this was
+     built against — so the obvious move of pasting the image address gives
+     a grid that breaks next week with nothing to explain it. The action
+     puts the bytes in our own blob store and returns that address. */
+  const [importing, setImporting] = useState(false);
+  const [imported, setImported] = useState<{
+    author: string | null;
+    warning?: string;
+  } | null>(null);
+
+  const runImport = useCallback(async () => {
+    setImporting(true);
+    setError(null);
+    setImported(null);
+    const res = await importInstagramPost(v.url);
+    setImporting(false);
+
+    if (!res.success) {
+      setError(res.error);
+      return;
+    }
+
+    setV((prev) => ({
+      ...prev,
+      kind: "instagram",
+      url: res.url,
+      // Never clobber a title the owner has already written.
+      title: prev.title.trim() || res.title || prev.title,
+      imageUrl: res.imageUrl ?? prev.imageUrl,
+      embedHtml: res.embedHtml,
+    }));
+    setImported({ author: res.author, warning: res.warning });
+  }, [v.url]);
 
   const set = useCallback(
     <K extends keyof PortfolioFormValues>(
@@ -256,17 +295,49 @@ export function PortfolioForm({
           tip="The Instagram permalink, blog post or page this piece lives at. If it's a reel or a YouTube video, we work out the embed and the poster from this automatically — you usually don't need the embed box below."
         >
           {(id) => (
-            <input
-              id={id}
-              type="url"
-              inputMode="url"
-              value={v.url}
-              onChange={(e) => set("url", e.target.value)}
-              placeholder="https://www.instagram.com/reel/…"
-              className="input"
-            />
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                id={id}
+                type="url"
+                inputMode="url"
+                value={v.url}
+                onChange={(e) => set("url", e.target.value)}
+                placeholder="https://www.instagram.com/reel/…"
+                className="input min-w-0 flex-1"
+              />
+              {isInstagramUrl(v.url) && (
+                <button
+                  type="button"
+                  onClick={runImport}
+                  disabled={importing}
+                  className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-accent/40 bg-accent/5 px-3 text-[11px] font-semibold uppercase tracking-wider text-accent transition-colors hover:bg-accent/10 disabled:opacity-50"
+                >
+                  {importing ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" aria-hidden />
+                  )}
+                  {importing ? "Fetching…" : "Fetch from Instagram"}
+                </button>
+              )}
+            </div>
           )}
         </Field>
+
+        {/* The two things the owner must know after an import, and neither is
+            an error, so neither is red. */}
+        {imported?.author && (
+          <p className="-mt-1 rounded-lg border border-orange-500/30 bg-orange-500/5 px-3 py-2 text-xs text-orange-600 dark:text-orange-400">
+            Posted by <strong className="font-medium">@{imported.author}</strong>,
+            not your own account. Fine for a collaboration or a creator feature —
+            worth crediting them in the title if you keep it.
+          </p>
+        )}
+        {imported?.warning && (
+          <p className="-mt-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            {imported.warning}
+          </p>
+        )}
 
         <Field
           label="About a product"
@@ -452,4 +523,9 @@ export function PortfolioForm({
       </div>
     </form>
   );
+}
+
+/** Only offer the import button for something it can actually read. */
+function isInstagramUrl(url: string): boolean {
+  return instagramShortcode(url) !== null;
 }

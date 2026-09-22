@@ -381,6 +381,49 @@ outside that branch or it disappears for half the catalogue.
   prompt. A `sessionStorage` guard stops a reload loop when two deployments serve at
   once.
 
+## Safe areas — go through a CSS variable, never `env()` directly
+
+`viewportFit: "cover"` (set in `src/app/layout.tsx`) extends the page under the
+iPhone status bar. Nothing padded the top, so on a Dynamic Island phone the
+installed PWA drew its header under the clock. The fix is three pieces, and
+`pt-safe` on the header alone is **not** one of them — padding whichever bar
+happens to be topmost leaves a 59px gap under the announcement strip at scroll
+zero:
+
+- `body` carries `pt-safe px-safe`, so nothing *starts* under the island;
+- the sticky header uses **`top-safe`, not `top-0`**, so it *pins* below the
+  island rather than at y=0;
+- `.status-bar-scrim` (fixed, `height: var(--sa-top)`, `--status-bar` matching
+  `themeColor`) paints the band, so content scrolling through it is hidden
+  rather than sliding under the clock.
+
+**Every inset reads through `--sa-top/right/bottom/left`, declared in
+`@layer base`.** That indirection is not decoration — it is what makes the
+whole thing testable without the phone: `env()` cannot be overridden from
+JavaScript, a `var()` can. Verify with
+`document.documentElement.style.setProperty('--sa-top','59px')` and assert the
+stuck header's `getBoundingClientRect().top` is 59. Proven that way on
+2026-09-22; before the fix it was 0.
+
+Also: the header's `transition-all` was transitioning `top`, so rotating the
+phone (inset 59 → 0) turned the correction into a half-second slide of the
+whole header. Transition only the properties that change on scroll.
+
+## The design system is stated here and was not enforced in code
+
+`ui/button.tsx` — the one component every storefront button is built from —
+was `rounded-full` with `hover:-translate-y-0.5` and a `btn-shine` class, long
+after this file said buttons are "squared `rounded-lg` … colour-change only"
+and listed "button shine and hover-bounce" among the effects **removed on
+purpose**. The shine had been reduced to an inert `position: relative` and the
+other two simply survived.
+
+Squared and de-bounced on 2026-09-22, along with the last `hover:-translate-y`
+call sites in `product-actions.tsx` and `product-gallery.tsx`. `.btn-shine` is
+kept as `position: relative` only, because a button may position a badge
+against it. **When this file describes the system, grep for violations rather
+than assuming the components follow it.**
+
 ## Modal pattern — don't hide with transforms
 
 A bug worth not repeating: the size guide stayed mounted and was "hidden" with
@@ -504,10 +547,30 @@ diverge:
 
 | gate | screen |
 |---|---|
-| `booked` — an AWB exists, tested first | **tracking only**: courier, AWB, tracking link, latest scan, Sync. Hand-editing folded away. **No booking controls at all.** |
+| `booked` — an AWB exists, **tested first** | **tracking only**: courier, AWB, tracking link, latest scan, Sync. Hand-editing folded away. **No booking controls at all.** |
 | `pending` | one sentence, zero controls |
 | `closed` — cancelled / payment failed | one sentence, zero controls |
-| otherwise | Ship now + Draft in NimbusPost (+ Sync once drafted) |
+| `done` — delivered / returned / rto, nothing staged | one sentence — nothing left to ship |
+| `ready` — confirmed / shipped, nothing staged | Ship now · Send draft |
+| `staged` — a draft exists | Book AWB · Sync · Cancel draft |
+
+**Cancel draft survives on pending, cancelled and delivered rows**, which looks
+like it breaks the table and does not. It cannot put anything on a courier — it
+withdraws a draft already sitting in NimbusPost that anyone reviewing that list
+could book and be charged for. A stale draft is a liability, not a leftover.
+`can.sync` is false for a hand-typed AWB: there is no NimbusPost record to ask.
+
+**The trigger is one enum, not four modes.** `SiteSettings.dispatchOnConfirm`
+is `off | draft | book`, and the courier choice is asked only when it is
+`book`. The four paths people describe ("auto-draft", "auto-book", "manual
+book", "manual draft") are this enum crossed with who pressed it.
+
+It is **nullable with no default on purpose.** `dispatchModeOf()` is the single
+reader: the enum wins, and a null falls back to the legacy
+`autoShipOnConfirm` boolean. A `@default("draft")` would have silently switched
+off a store deliberately set to auto-book. `autoShipOnConfirm` is kept as a
+derived mirror written in step by the one writer, so nothing reading the old
+field reads a lie.
 
 Three bugs this replaced, all money-shaped: **one button meant two things** —
 its label flipped between "Send draft" (free) and "Book & generate AWB"

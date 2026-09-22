@@ -43,10 +43,10 @@ This caused a full production outage and is the single most important fact here.
 `DATABASE_URL` **must** use the Supabase **pooler**, not the direct host:
 
 ```
-postgresql://postgres.<PROJECT_REF>:<PW>@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1
+postgresql://postgres.<PROJECT_REF>:<PW>@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=5
 ```
 
-Three details, all of which broke things when wrong:
+Four details, all of which broke things when wrong:
 
 1. **`db.<ref>.supabase.co` is IPv6-only** (no A record). Vercel functions have no
    outbound IPv6 → every DB page 500s with "Can't reach database server". It works
@@ -55,6 +55,33 @@ Three details, all of which broke things when wrong:
    `FATAL: (ENOTFOUND) tenant/user ... not found`. Verified by testing both.
 3. **`pgbouncer=true` is required.** Without it Prisma throws
    `prepared statement "s1" already exists` in transaction mode.
+4. **`connection_limit=5`, NOT 1.** This line used to say `1`, and on
+   2026-09-22 that took out `/admin/settings` and `/admin/customers/[id]` in
+   production with:
+
+   ```
+   code: 'P2024'
+   Timed out fetching a new connection from the connection pool
+   (Current connection pool timeout: 10, connection limit: 1)
+   ```
+
+   Nothing was wrong with either page. The app simply grew — chat, promotions,
+   customers, finance and the pipeline settings all added queries — and with a
+   single connection they queue. Fluid Compute makes it worse, because one
+   instance serves several requests *concurrently* and they all share that one
+   connection, so the queue is N requests deep. Past the 10 s pool timeout,
+   Prisma throws.
+
+   The customer 360 page aggregates User + Order + Lead + ChatThread +
+   ReturnRequest + WishlistItem, so it falls over first.
+
+   It also hid: `getLivePromotion()` fails closed, so the store silently showed
+   no promo banner instead of erroring. Measured effect of the change — the
+   same 12 concurrent queries went **1473 ms → 534 ms**.
+
+   **Symptom to recognise:** a page that works locally and alone, but breaks
+   under real traffic or on a query-heavy screen. It is a pool problem, not a
+   code problem — don't go looking for a null in the component tree (I did).
 
 `DIRECT_URL` keeps the direct `db.<ref>.supabase.co:5432` host — it's only used by
 migrations / `db push`.

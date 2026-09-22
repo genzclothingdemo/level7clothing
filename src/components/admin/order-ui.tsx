@@ -174,14 +174,29 @@ export function StatusPill({
  */
 export function Block({
   title,
-  icon: Icon,
+  icon,
   aside,
   className,
   bodyClassName,
   children,
 }: {
   title: string;
-  icon: LucideIcon;
+  /**
+   * A rendered element (`<Package />`), NOT a component reference.
+   *
+   * This file is `"use client"`. Passing `icon={Package}` from a *server*
+   * component crosses the RSC boundary with a function — lucide icons are
+   * `forwardRef` objects — and React refuses:
+   *
+   *   "Functions cannot be passed directly to Client Components…
+   *    {$$typeof: ..., render: function, displayName: ...}"
+   *
+   * That took out /admin/customers/[id] in production. It only showed up
+   * there because every other caller happens to be a client component, where
+   * the same prop is legal. An element serialises fine from either side, so
+   * this shape cannot reintroduce the bug.
+   */
+  icon: React.ReactNode;
   /** Right-aligned extras in the header — a badge, a count, an InfoTip. */
   aside?: React.ReactNode;
   className?: string;
@@ -196,7 +211,12 @@ export function Block({
       )}
     >
       <header className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-2">
-        <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+        <span
+          aria-hidden="true"
+          className="grid h-3.5 w-3.5 shrink-0 place-items-center text-muted-foreground [&>svg]:h-3.5 [&>svg]:w-3.5"
+        >
+          {icon}
+        </span>
         <h3 className="eyebrow truncate">{title}</h3>
         {aside ? (
           <span className="ml-auto flex shrink-0 items-center gap-1.5">{aside}</span>

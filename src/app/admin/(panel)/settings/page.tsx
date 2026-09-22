@@ -5,12 +5,12 @@ import { isNimbusPostConfigured } from "@/lib/nimbuspost";
 import { normaliseReturnReasons } from "@/lib/returns";
 import { normalisePipelineSettings } from "@/lib/orders-pipeline";
 import { SettingsForm } from "@/components/admin/settings-form";
-import {
-  DEFAULT_TAB,
-  isTabKey,
-  type SettingsDraft,
-  type TabKey,
-} from "@/components/admin/settings-ui";
+// Runtime values come from lib/, NOT from settings-ui — that file is
+// "use client", so importing `isTabKey` from it makes this server component
+// call a client reference, which throws at render. Types are erased at build
+// time, so importing those from the client module is harmless.
+import { DEFAULT_TAB, isTabKey, type TabKey } from "@/lib/settings-tabs";
+import type { SettingsDraft } from "@/components/admin/settings-ui";
 import type { SettingsFacts } from "@/components/admin/settings-sections";
 import type { PaymentMode } from "@/lib/types";
 

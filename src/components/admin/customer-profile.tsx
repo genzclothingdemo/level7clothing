@@ -43,7 +43,7 @@ export function CustomerContact({ customer }: { customer: CustomerRecord }) {
   const otherPhones = customer.phones.filter((p) => p !== customer.phone);
 
   return (
-    <Block title="Contact" icon={UserRound}>
+    <Block title="Contact" icon={<UserRound />}>
       <div className="space-y-2 text-sm">
         <p className="break-words font-medium">{customer.displayName}</p>
 
@@ -170,7 +170,7 @@ export function CustomerPayments({ customer }: { customer: CustomerRecord }) {
   const nothing = s.orderCount === 0;
 
   return (
-    <Block title="Payment history" icon={CreditCard}>
+    <Block title="Payment history" icon={<CreditCard />}>
       {nothing ? (
         <Nothing>
           No orders yet, so there is nothing paid, collected or outstanding.

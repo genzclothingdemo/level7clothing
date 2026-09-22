@@ -647,7 +647,7 @@ function OrderDetail({
       {/* ---- Customer & delivery ---- */}
       <Block
         title="Customer & delivery address"
-        icon={User}
+        icon={<User />}
         aside={rw ? <Badge tone={rw.tone} title={rw.title}>{rw.label}</Badge> : null}
       >
         <div className="space-y-1 text-xs">
@@ -691,7 +691,7 @@ function OrderDetail({
       {/* ---- Items ---- */}
       <Block
         title="Items"
-        icon={Package}
+        icon={<Package />}
         aside={<Badge>{o.items.length}</Badge>}
         bodyClassName="p-0"
       >
@@ -705,7 +705,7 @@ function OrderDetail({
       {/* ---- Payment ---- */}
       <Block
         title="Payment"
-        icon={CreditCard}
+        icon={<CreditCard />}
         aside={
           <Badge tone={pay.tone} title={pay.title}>
             {pay.text}
@@ -763,7 +763,7 @@ function OrderDetail({
       <NotesBlock order={o} />
 
       {/* ---- Fulfilment & tracking ---- */}
-      <Block title="Fulfilment & tracking" icon={Truck} className="md:col-span-2">
+      <Block title="Fulfilment & tracking" icon={<Truck />} className="md:col-span-2">
         <StatusControls order={o} returnWindowDays={returnWindowDays} />
         <div className="mt-2.5 border-t border-border pt-2.5">
           <OrderTracking order={o} />
@@ -771,7 +771,7 @@ function OrderDetail({
       </Block>
 
       {/* ---- History ---- */}
-      <Block title="History" icon={History} className="md:col-span-2">
+      <Block title="History" icon={<History />} className="md:col-span-2">
         <HistoryList entries={o.statusHistory} />
       </Block>
     </div>
@@ -1113,7 +1113,7 @@ function NotesBlock({ order: o }: { order: AdminOrder }) {
   return (
     <Block
       title="Notes"
-      icon={MessageSquare}
+      icon={<MessageSquare />}
       aside={
         o.customerNote ? <Badge tone="accent">customer message live</Badge> : null
       }

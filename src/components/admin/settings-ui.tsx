@@ -22,6 +22,7 @@
  * paragraph under a field — same rule as `form-kit`.
  */
 
+import { TABS, type TabKey } from "@/lib/settings-tabs";
 import Link from "next/link";
 import { ArrowUpRight, Loader2, RotateCcw } from "lucide-react";
 import { InfoTip } from "@/components/store/info-tip";
@@ -80,23 +81,16 @@ export type DraftKey = keyof SettingsDraft;
  * the hero" are three different errands and should not be three scroll
  * positions in one form.
  */
-export const TABS = [
-  { key: "brand", label: "Brand", heading: "Brand & identity" },
-  { key: "contact", label: "Contact", heading: "Contact & social" },
-  { key: "copy", label: "Copy", heading: "Storefront copy" },
-  { key: "payments", label: "Payments", heading: "Payments" },
-  { key: "shipping", label: "Shipping", heading: "Shipping & fulfilment" },
-  { key: "product", label: "Products", heading: "Product defaults" },
-  { key: "email", label: "Email", heading: "Notifications & email" },
-] as const;
-
-export type TabKey = (typeof TABS)[number]["key"];
-
-export const DEFAULT_TAB: TabKey = "brand";
-
-export function isTabKey(v: string | undefined): v is TabKey {
-  return TABS.some((t) => t.key === v);
-}
+// Moved to lib/settings-tabs.ts. Everything exported from a "use client"
+// module is a client reference, so the server page calling `isTabKey()` from
+// here threw "Attempted to call isTabKey() from the server". Re-exported so
+// client consumers keep their existing import — but the SERVER page must
+// import from "@/lib/settings-tabs" directly, not through this file.
+//
+// Imported as well as re-exported: `export … from` re-publishes the names
+// without binding them in this module's scope, and the components below use
+// TABS and TabKey directly.
+export { TABS, DEFAULT_TAB, isTabKey, type TabKey } from "@/lib/settings-tabs";
 
 /** Label + home tab for every editable field. The one place either is stated. */
 export const FIELD_META: Record<DraftKey, { label: string; tab: TabKey }> = {

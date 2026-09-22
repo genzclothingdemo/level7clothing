@@ -83,7 +83,7 @@ export function CustomerOrders({
   return (
     <Block
       title="Orders"
-      icon={ShoppingBag}
+      icon={<ShoppingBag />}
       aside={
         customer.orders.length > 0 ? (
           <Badge>{customer.orders.length}</Badge>
@@ -213,7 +213,7 @@ export function CustomerReturns({
   return (
     <Block
       title="Returns"
-      icon={PackageX}
+      icon={<PackageX />}
       aside={
         customer.returns.length > 0 ? (
           <Badge>{customer.returns.length}</Badge>
@@ -289,7 +289,7 @@ export function CustomerChats({ customer }: { customer: CustomerRecord }) {
   return (
     <Block
       title="Chat"
-      icon={MessageSquare}
+      icon={<MessageSquare />}
       aside={
         unread > 0 ? (
           <Badge tone="accent">{unread} unread</Badge>
@@ -354,7 +354,7 @@ export function CustomerWishlist({
   return (
     <Block
       title="Wishlist"
-      icon={Heart}
+      icon={<Heart />}
       aside={
         <>
           {customer.wishlist.length > 0 && (
@@ -427,7 +427,7 @@ export function CustomerLeads({
   return (
     <Block
       title="Cart interest"
-      icon={ShoppingCart}
+      icon={<ShoppingCart />}
       aside={
         <>
           {customer.leads.length > 0 && <Badge>{customer.leads.length}</Badge>}

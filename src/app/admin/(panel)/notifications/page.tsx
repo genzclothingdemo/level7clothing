@@ -19,7 +19,7 @@ export default async function AdminNotifications() {
   return (
     <div>
       <div>
-        <h1 className="font-serif text-3xl">Notifications</h1>
+        <h1 className="font-serif text-2xl">Notifications</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           {total} device{total === 1 ? "" : "s"} opted in
           {total > 0 && ` · ${signedIn} linked to an account`}

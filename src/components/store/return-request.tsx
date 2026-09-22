@@ -68,6 +68,13 @@ export type ExistingRequest = {
   createdAt: string;
   /** Null until a decision has put a figure on the request. */
   refund: ExistingRefund | null;
+  /**
+   * The reverse pickup, once a courier is genuinely booked to collect. Null
+   * while it is only a draft — "we're arranging it" and "a courier is coming"
+   * are different promises, and conflating them is how a shopper ends up
+   * waiting in all day for nobody.
+   */
+  pickup: { awb: string; courier: string | null } | null;
 };
 
 /**
@@ -266,6 +273,8 @@ export function ReturnRequest({
                   <b>From {brandName}:</b> {e.adminNote}
                 </p>
               )}
+
+              <PickupStatus request={e} />
 
               <RefundStatus
                 orderNumber={orderNumber}
@@ -534,6 +543,48 @@ function RefundPreview({
         </ExpandableText>
       )}
     </div>
+  );
+}
+
+/**
+ * Where the collection has got to, on an approved return.
+ *
+ * Says one of three things and never guesses between them: a courier is booked
+ * (with the AWB, which is the only thing here the customer can act on), we are
+ * still arranging it, or nothing is shown at all because the parcel is already
+ * back with us.
+ *
+ * Absent once the goods have arrived — a tracking line for a journey that has
+ * finished is noise, and the refund block below is what matters by then.
+ */
+function PickupStatus({ request }: { request: ExistingRequest }) {
+  if (request.status !== "approved" && request.status !== "picked_up") return null;
+
+  const { pickup } = request;
+
+  return (
+    <p className="mt-1.5 flex items-start gap-1.5 text-xs text-muted-foreground">
+      <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      {pickup ? (
+        <span className="min-w-0 break-words">
+          Pickup booked{pickup.courier ? ` with ${pickup.courier}` : ""} —{" "}
+          <a
+            href={`https://track.nimbuspost.com/track/${pickup.awb}`}
+            target="_blank"
+            rel="noreferrer"
+            className="font-mono underline underline-offset-2 hover:text-accent"
+          >
+            {pickup.awb}
+          </a>
+          . Keep the item packed and ready.
+        </span>
+      ) : (
+        <span>
+          We&apos;re arranging the collection — you&apos;ll get a tracking number
+          once a courier is booked.
+        </span>
+      )}
+    </p>
   );
 }
 

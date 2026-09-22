@@ -275,10 +275,14 @@ export type ReverseShipmentInput = {
  * `shipping_address` carrying the CUSTOMER (the pickup point) while
  * `warehouse_id` is the destination. That inversion is the whole difference.
  *
- * ⚠️ Unlike the forward flow, this exact payload has NOT been exercised against
- * a live NimbusPost account. Callers must treat a throw here as "return approved
- * but pickup not booked" and surface the message rather than swallowing it —
- * see `draftReturnPickup` in lib/fulfilment.ts.
+ * This payload **has** been exercised against the live account, contrary to
+ * what this comment used to warn: return `RET-M2SATL` carries a real draft id
+ * (`297a8fb3-…`) with `nimbusError` null. Don't re-run that diagnosis.
+ *
+ * Callers must still treat a throw here as "return approved but pickup not
+ * booked" and surface the message rather than swallowing it — see
+ * `draftReturnPickup` in lib/fulfilment.ts. Booking the draft is a separate,
+ * deliberate step: `bookReturnPickup` in lib/nimbus-returns.ts.
  */
 export async function createReverseDraftOrder(
   input: ReverseShipmentInput

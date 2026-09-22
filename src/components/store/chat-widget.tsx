@@ -432,17 +432,20 @@ export function ChatLauncherButton({ className }: { className?: string }) {
       }
       aria-expanded={chat.open}
       className={cn(
-        // 44px touch target, and colour-change only: CLAUDE.md records that
-        // hover-bounce/scale was stripped from this store deliberately.
-        "relative grid h-11 w-11 place-items-center rounded-full border border-border",
-        "transition-colors hover:border-primary/40 hover:bg-primary/5 cursor-pointer",
-        chat.open && "border-accent/50 bg-accent/10 text-accent",
+        // `.icon-btn` keeps the 44px touch target and the colour-change-only
+        // interaction CLAUDE.md asks for; the border and the circle went
+        // because the design system says buttons are squared, and because the
+        // top bar has no width to spare. See globals.css.
+        "icon-btn",
+        chat.open && "bg-accent/10 text-accent",
         className
       )}
     >
       <MessageCircle className="h-[18px] w-[18px]" />
       {chat.unread > 0 && (
-        <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1 text-[11px] font-medium text-accent-foreground">
+        // Inside the button box, not hanging off its corner: the buttons are
+        // flush now, so an outside badge would overlap its neighbour.
+        <span className="absolute right-1 top-1 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[10px] font-medium text-accent-foreground ring-2 ring-background">
           {chat.unread > 9 ? "9+" : chat.unread}
         </span>
       )}
@@ -841,7 +844,7 @@ function ChatPanel({ chat }: { chat: ChatStore }) {
         )}
       >
         {/* ── Header ── */}
-        <header className="flex items-center gap-2 border-b border-border bg-card px-3 py-2.5 pt-[max(0.625rem,env(safe-area-inset-top))] sm:pt-2.5">
+        <header className="flex items-center gap-2 border-b border-border bg-card px-3 py-2.5 pt-[max(0.625rem,var(--sa-top))] sm:pt-2.5">
           <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-accent/10 text-accent">
             <MessageCircle className="h-[18px] w-[18px]" />
           </span>
@@ -932,7 +935,7 @@ function ChatPanel({ chat }: { chat: ChatStore }) {
         </div>
 
         {/* ── Composer ── */}
-        <div className="border-t border-border bg-card px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2.5">
+        <div className="border-t border-border bg-card px-3 pb-[max(0.75rem,var(--sa-bottom))] pt-2.5">
           {needsContact && (
             <div className="mb-2 grid grid-cols-2 gap-2">
               <input

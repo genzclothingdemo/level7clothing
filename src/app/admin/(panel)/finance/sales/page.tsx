@@ -1,4 +1,3 @@
-import Link from "next/link";
 import {
   getFinanceReport,
   monthOnMonth,
@@ -10,11 +9,13 @@ import {
 import { ColumnChart, RankBars } from "@/components/admin/finance-chart";
 import {
   Caveat,
+  Degraded,
   Empty,
   NotMeasured,
   PAGE_SIZE,
   Pager,
   Panel,
+  PanelLink,
   StatTile,
   TileGrid,
   formatCount,
@@ -64,12 +65,7 @@ export default async function SalesSection({
 
   return (
     <div className="space-y-5">
-      {report.degraded && (
-        <p className="rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger">
-          At least one query failed, so some panels below may read zero. This is
-          a reporting failure, not a business one.
-        </p>
-      )}
+      {report.degraded && <Degraded />}
 
       <TileGrid>
         <StatTile
@@ -77,20 +73,21 @@ export default async function SalesSection({
           label="Net revenue"
           value={formatINR(revenue.netRevenue)}
           tip={METRIC.netRevenue}
+          note={`Scoped to ${win.phrase}. Booked at placement, not collected — Finance has the cash position.`}
           delta={previous ? delta(revenue.netRevenue, previous.netRevenue) : undefined}
           deltaLabel={vs}
-          sub={`${win.label} · booked, not collected`}
         />
         <StatTile
           label="Orders"
           value={formatCount(revenue.orders)}
           tip={METRIC.orders}
+          note={METRIC.cancelled}
           delta={previous ? delta(revenue.orders, previous.orders) : undefined}
           deltaLabel={vs}
           sub={
             revenue.cancelledOrders > 0
-              ? `${revenue.cancelledOrders} cancelled (${formatINR(revenue.cancelledValue)}) excluded`
-              : "none cancelled"
+              ? `${revenue.cancelledOrders} cancelled · ${formatINR(revenue.cancelledValue)}`
+              : undefined
           }
         />
         <StatTile
@@ -119,7 +116,7 @@ export default async function SalesSection({
       <Panel
         title="Net revenue over time"
         tip={METRIC.netRevenue}
-        subtitle={
+        note={
           <>
             One bar per {report.granularity}, by order date. {TIMEZONE_NOTE}{" "}
             {win.days !== null && (
@@ -134,7 +131,7 @@ export default async function SalesSection({
         }
       >
         {report.granularityForced && (
-          <Caveat>
+          <Caveat label={`Showing ${report.granularity}s, not ${report.granularityForced}s`}>
             You asked for one bar per {report.granularityForced}, which over
             this range would be more than 120 bars. The chart is showing{" "}
             {report.granularity}s instead.
@@ -167,7 +164,7 @@ export default async function SalesSection({
       <Panel
         title="Month on month"
         tip="Net revenue bucketed by calendar month, whatever bucket size the chart above is using, with each month's change against the one before it. Calendar months, not rolling 30-day blocks — a rolling comparison drifts across month boundaries and stops matching anything anyone else counts."
-        subtitle="Only months with at least one order in the selected range appear."
+        note="Only months with at least one order in the selected range appear."
       >
         {mom.length === 0 ? (
           <Empty>No orders in this period.</Empty>
@@ -211,7 +208,7 @@ export default async function SalesSection({
                 </tr>
               ))}
             </DataTable>
-            <Caveat>
+            <Caveat label="Blank changes and part months">
               The first row has no change because there is nothing before it
               inside the range — widen the range to compare it against an
               earlier month. A month marked <em>part month</em> is still
@@ -256,7 +253,7 @@ export default async function SalesSection({
         <Panel
           title="By order status"
           tip="The same counted orders, split by where they are in the pipeline. Kept in lifecycle order rather than sorted by size — sorting would scramble the one thing this answers, which is where orders are piling up."
-          subtitle="Cancelled orders are excluded from every money figure on this page, so they do not appear here."
+          note="Cancelled orders are excluded from every money figure on this page, so they do not appear here."
         >
           <RankBars
             emptyText="No orders placed in this period."
@@ -280,7 +277,7 @@ export default async function SalesSection({
             }))}
           />
           {revenue.cancelledOrders > 0 && (
-            <Caveat>
+            <Caveat label={`${revenue.cancelledOrders} cancelled, not counted`}>
               {revenue.cancelledOrders} cancelled order
               {revenue.cancelledOrders === 1 ? "" : "s"} worth{" "}
               {formatINR(revenue.cancelledValue)}{" "}
@@ -296,7 +293,7 @@ export default async function SalesSection({
       <Panel
         title="Where the orders went"
         tip={METRIC.place}
-        subtitle="From the shipping address on each counted order."
+        note="From the shipping address on each counted order."
       >
         {places.states.length === 0 ? (
           <Empty>No counted order in this period named a state.</Empty>
@@ -319,7 +316,7 @@ export default async function SalesSection({
             }))}
           />
         )}
-        <Caveat>
+        <Caveat label="City and state are free text">
           City and state are free text the customer typed — there is no dropdown
           behind either field. Rows are folded on case and stray spaces only, so{" "}
           <em>gujarat</em> and <em>Gujarat</em> are one row and a misspelling
@@ -340,7 +337,7 @@ export default async function SalesSection({
       <Panel
         title="By city"
         tip={METRIC.place}
-        subtitle={`Every city named on a counted order in ${win.phrase}, busiest first.`}
+        note={`Every city named on a counted order in ${win.phrase}, busiest first.`}
       >
         {places.cities.length === 0 ? (
           <Empty>No counted order in this period named a city.</Empty>
@@ -415,7 +412,7 @@ export default async function SalesSection({
       <Panel
         title="Coupons redeemed"
         tip={METRIC.couponUse}
-        subtitle="From the redemption ledger, which records a use even if the order is later cancelled — so this can exceed the discount inside net revenue above."
+        note="From the redemption ledger, which records a use even if the order is later cancelled — so this can exceed the discount inside net revenue above."
       >
         {report.coupons.length === 0 ? (
           <Empty>No coupons redeemed in this period.</Empty>
@@ -442,15 +439,19 @@ export default async function SalesSection({
                 </tr>
               ))}
             </DataTable>
-            <Caveat>
-              {formatPercent(
-                revenue.grossGoods > 0
-                  ? Math.round((revenue.discounts / revenue.grossGoods) * 1000) / 10
-                  : null
-              )}{" "}
-              of goods value was given away as discount this period, across{" "}
-              {revenue.couponOrders} of {revenue.orders} orders.
-            </Caveat>
+            {/* Stays printed: it is a measured share and a pair of counts, not
+                a standing explanation. */}
+            <p className="mt-3 text-xs text-muted-foreground">
+              <span className="tabular-nums text-foreground">
+                {formatPercent(
+                  revenue.grossGoods > 0
+                    ? Math.round((revenue.discounts / revenue.grossGoods) * 1000) / 10
+                    : null
+                )}
+              </span>{" "}
+              of goods value discounted · {revenue.couponOrders} of {revenue.orders}{" "}
+              orders
+            </p>
           </>
         )}
       </Panel>
@@ -460,15 +461,10 @@ export default async function SalesSection({
       <Panel
         title="What this section cannot tell you"
         tip="The absences that belong to sales specifically. The full list is on Overview."
+        note="Overview carries the complete list, including the ones that belong to other sections."
+        aside={<PanelLink href="/admin">Full list</PanelLink>}
       >
         <NotMeasured rows={notMeasuredFor("sales")} />
-        <Caveat>
-          <Link href="/admin" className="underline hover:text-accent">
-            Overview
-          </Link>{" "}
-          carries the complete list, including the ones that belong to other
-          sections.
-        </Caveat>
       </Panel>
 
       {nothing && (

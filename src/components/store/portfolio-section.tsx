@@ -56,7 +56,7 @@ function ReviewCard({ review }: { review: ReviewItem }) {
   return (
     <div
       className={cn(
-        "relative flex h-full flex-col rounded-2xl border border-border bg-card p-5 transition-all duration-200",
+        "relative flex h-full flex-col rounded-2xl border border-border bg-card p-4 transition-all duration-200 sm:p-5",
         review.featured && "border-accent/30 shadow-sm"
       )}
     >
@@ -116,7 +116,7 @@ export function PortfolioSection({ reviews }: { reviews: ReviewItem[] }) {
   return (
     <div className="space-y-6">
       {/* ── Summary bar ── */}
-      <div className="flex flex-col gap-5 rounded-2xl border border-border bg-card p-5 sm:flex-row sm:items-center">
+      <div className="flex flex-col gap-4 rounded-2xl border border-border bg-card p-4 sm:flex-row sm:items-center sm:gap-5 sm:p-5">
         {/* Big average */}
         <div className="flex shrink-0 flex-col items-center gap-1 sm:pr-6 sm:border-r sm:border-border">
           <span className="font-serif text-5xl font-light text-foreground">{avg}</span>
@@ -141,11 +141,13 @@ export function PortfolioSection({ reviews }: { reviews: ReviewItem[] }) {
       {/* ── Pagination ── */}
       {totalPages > 1 && (
         <div className="flex items-center justify-center gap-3">
+          {/* 44px and squared. These were 36px circles — under the minimum
+              thumb target, and round in a store whose buttons are `rounded-lg`. */}
           <button
             type="button"
             onClick={() => setPage((p) => Math.max(0, p - 1))}
             disabled={page === 0}
-            className="grid h-9 w-9 place-items-center rounded-full border border-border hover:bg-muted disabled:opacity-30 transition-all"
+            className="grid h-11 w-11 cursor-pointer place-items-center rounded-lg border border-border transition-colors hover:bg-muted disabled:cursor-default disabled:opacity-30"
             aria-label="Previous page"
           >
             <ChevronLeft className="h-4 w-4" />
@@ -157,7 +159,7 @@ export function PortfolioSection({ reviews }: { reviews: ReviewItem[] }) {
             type="button"
             onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
             disabled={page === totalPages - 1}
-            className="grid h-9 w-9 place-items-center rounded-full border border-border hover:bg-muted disabled:opacity-30 transition-all"
+            className="grid h-11 w-11 cursor-pointer place-items-center rounded-lg border border-border transition-colors hover:bg-muted disabled:cursor-default disabled:opacity-30"
             aria-label="Next page"
           >
             <ChevronRight className="h-4 w-4" />

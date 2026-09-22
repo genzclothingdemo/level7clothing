@@ -4,9 +4,11 @@ import { RankBars, Meter } from "@/components/admin/finance-chart";
 import {
   Caveat,
   DefRow,
+  Degraded,
   Empty,
   NotMeasured,
   Panel,
+  PanelLink,
   StatTile,
   TileGrid,
   formatCount,
@@ -52,13 +54,7 @@ export default async function FinanceSection({
 
   return (
     <div className="space-y-5">
-      {report.degraded && (
-        <p className="rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger">
-          At least one query failed, so some panels below may read zero. This is
-          a reporting failure, not a business one — check the database
-          connection before acting on anything here.
-        </p>
-      )}
+      {report.degraded && <Degraded />}
 
       <TileGrid>
         <StatTile
@@ -66,28 +62,27 @@ export default async function FinanceSection({
           label="Cash collected"
           value={formatINR(cash.collected)}
           tip={METRIC.collected}
-          sub={`of ${formatINR(cash.billed)} billed · ${win.label.toLowerCase()}`}
+          note={`Over orders placed in ${win.phrase}. Refunds are the exception on this screen and are dated by when the money left instead, so they can belong to an earlier period.`}
+          sub={`of ${formatINR(cash.billed)} billed`}
         />
         <StatTile
           label="Still outstanding"
           value={formatINR(cash.outstanding)}
           tip={METRIC.outstanding}
           good="down"
-          sub="billed, not in hand"
         />
         <StatTile
           label="Refunds paid out"
           value={formatINR(refunds.net)}
           tip={METRIC.refundsPaid}
           good="down"
-          sub={`${refunds.paidCount} refund${refunds.paidCount === 1 ? "" : "s"} · dated by when the money left`}
+          sub={`${refunds.paidCount} refund${refunds.paidCount === 1 ? "" : "s"}`}
         />
         <StatTile
           label="Refund rate"
           value={formatPercent(refundRate)}
           tip={METRIC.refundRate}
           good="down"
-          sub="refunds out ÷ revenue booked"
         />
       </TileGrid>
 
@@ -132,12 +127,11 @@ export default async function FinanceSection({
                   tip={METRIC.billed}
                 />
               </div>
-              <Caveat>
-                Shipping sits below the line because it is not merchandise the
-                store sold — it is money passed through to a courier, and the
-                courier&apos;s actual bill is not in this database. Nothing on
-                this page is profit: there is no cost-of-goods column on a
-                product.
+              <Caveat label="Why shipping sits below the line">
+                Shipping is not merchandise the store sold — it is money passed
+                through to a courier, and the courier&apos;s actual bill is not
+                in this database. Nothing on this page is profit: there is no
+                cost-of-goods column on a product.
               </Caveat>
             </div>
           )}
@@ -146,7 +140,7 @@ export default async function FinanceSection({
         <Panel
           title="Cash collected"
           tip={METRIC.collected}
-          subtitle="Booked revenue is not money in the bank. On a cash-on-delivery store the gap between the two is the number that matters."
+          note="Booked revenue is not money in the bank. On a cash-on-delivery store the gap between the two is the number that matters."
         >
           {nothing ? (
             <Empty>No orders placed in this period.</Empty>
@@ -184,7 +178,7 @@ export default async function FinanceSection({
                   strong
                 />
               </div>
-              <Caveat>
+              <Caveat label="When a COD balance counts as collected">
                 A cash-on-delivery balance counts as collected only once the
                 order is marked delivered —{" "}
                 <code className="text-foreground">balanceDue</code> is written
@@ -232,7 +226,8 @@ export default async function FinanceSection({
       <Panel
         title="Refunds"
         tip={METRIC.refundsPaid}
-        subtitle="Dated by when the money left, not by when the order was placed — so these do not line up with the period above, and are never subtracted inside the revenue chart."
+        note="Dated by when the money left, not by when the order was placed — so these do not line up with the period above, and are never subtracted inside the revenue chart."
+        aside={<PanelLink href="/admin/returns?status=all">Open returns</PanelLink>}
       >
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
@@ -283,15 +278,12 @@ export default async function FinanceSection({
               {refunds.pendingCount} awaiting payout · {formatINR(refunds.pendingValue)}
             </Badge>
           )}
-          <Link href="/admin/returns?status=all" className="underline hover:text-accent">
-            Open returns
-          </Link>
           <Link href="/admin/finance/fulfilment" className="underline hover:text-accent">
             Return rate by product
           </Link>
         </div>
         {refunds.pendingCount > 0 && (
-          <Caveat>
+          <Caveat label="Why approved-but-unpaid sits outside the period">
             Approved-but-unpaid requests are shown whenever they were raised,
             not just this period, because that money is owed out regardless of
             when it was agreed. It is deliberately not inside any period&apos;s
@@ -305,7 +297,7 @@ export default async function FinanceSection({
       <Panel
         title="Stock on hand"
         tip="Σ Product.stock across the whole catalogue, as it stands right now. Not a windowed figure — stock is a present-tense fact and does not have a period."
-        subtitle="Shown here because it is the one asset figure available, and it is the largest thing on the balance sheet this database knows about."
+        note="Shown here because it is the one asset figure available, and it is the largest thing on the balance sheet this database knows about."
       >
         <TileGrid>
           <StatTile
@@ -332,10 +324,11 @@ export default async function FinanceSection({
             value={formatINR(revenue.cancelledValue)}
             tip={METRIC.cancelled}
             good="down"
-            sub={`${revenue.cancelledOrders} order${revenue.cancelledOrders === 1 ? "" : "s"} · excluded from everything above`}
+            sub={`${revenue.cancelledOrders} order${revenue.cancelledOrders === 1 ? "" : "s"}`}
+            note="Excluded from every other figure on this page."
           />
         </TileGrid>
-        <Caveat>
+        <Caveat label="Why stock is not valued in rupees">
           Stock is counted in units, not in rupees. Valuing it would need a cost
           price per product, which does not exist — multiplying stock by the
           selling price would value the shelf at what it might fetch rather than

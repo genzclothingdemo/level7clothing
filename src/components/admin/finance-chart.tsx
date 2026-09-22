@@ -105,6 +105,25 @@ export type ChartColumn = {
   detail?: string;
 };
 
+/**
+ * How tall the plot box is, decided by how much series there is to plot.
+ *
+ * A fixed 192px plot is right for thirty bars and absurd for one. On this store
+ * a 30-day range draws a single bar, and at a fixed height that made the trend
+ * chart the largest element on the dashboard while carrying one number — a
+ * quarter of the page spent on empty plot area. So the box earns its height:
+ * it starts at 80px and grows only once there is a shape to see.
+ *
+ * Measured on **populated** columns, not on `columns.length`: thirty empty days
+ * are not thirty bars' worth of information, and sizing off the array length is
+ * exactly how the empty chart got big in the first place.
+ */
+function plotHeight(populated: number): string {
+  if (populated <= 2) return "h-20";
+  if (populated <= 6) return "h-28 sm:h-32";
+  return "h-40 sm:h-48";
+}
+
 export function ColumnChart({
   columns,
   formatValue,
@@ -129,6 +148,7 @@ export function ColumnChart({
   const axisMax = niceCeil(peakValue);
   const peakIndex = columns.findIndex((c) => c.value === peakValue);
   const total = columns.reduce((n, c) => n + c.value, 0);
+  const populated = columns.reduce((n, c) => n + (c.value > 0 ? 1 : 0), 0);
 
   // Which x positions get a label. First, last and the peak — never every
   // column, which at 30 bars is a wall of grey text nobody reads.
@@ -145,7 +165,11 @@ export function ColumnChart({
     <figure className="m-0">
       {/* Plot. `relative` + absolutely positioned rules keeps the bars on one
           shared baseline without a grid or a table getting involved. */}
-      <div className="relative h-40 w-full sm:h-48" role="img" aria-label={summary}>
+      <div
+        className={cn("relative w-full", plotHeight(populated))}
+        role="img"
+        aria-label={summary}
+      >
         {/* Gridlines: hairline, solid, one step off the surface. Never dashed —
             dashing reads as "threshold" when it is only a grid. */}
         <div className="pointer-events-none absolute inset-x-0 top-0 border-t border-border" />
@@ -205,14 +229,21 @@ export function ColumnChart({
         })}
       </div>
 
+      {/* Figures, not a sentence. The populated count is the one fact a short
+          plot cannot show for itself: a lone bar in a 31-day box reads as a bad
+          chart until you know 30 of those days had no order. */}
       <figcaption className="mt-2 text-xs text-muted-foreground">
         {peakValue > 0 ? (
           <>
             Peak{" "}
             <span className="tabular-nums text-foreground">{formatValue(peakValue)}</span> on{" "}
-            {columns[peakIndex].label} · {columns.length} {unit}
-            {columns.length === 1 ? "" : "s"}, total{" "}
-            <span className="tabular-nums text-foreground">{formatValue(total)}</span>
+            {columns[peakIndex].label} · total{" "}
+            <span className="tabular-nums text-foreground">{formatValue(total)}</span> ·{" "}
+            <span className="tabular-nums">
+              {populated} of {columns.length}
+            </span>{" "}
+            {unit}
+            {columns.length === 1 ? "" : "s"} with activity
           </>
         ) : (
           <>Nothing recorded across {columns.length} {unit}s.</>

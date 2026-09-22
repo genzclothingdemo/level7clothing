@@ -92,7 +92,7 @@ export default async function AdminPortfolio({
     <div className="min-w-0">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="font-serif text-3xl">Portfolio</h1>
+          <h1 className="font-serif text-2xl">Portfolio</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {all.length} piece{all.length === 1 ? "" : "s"} · {showing} showing on
             the site

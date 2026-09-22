@@ -67,7 +67,7 @@ export function LeadFilters({ counts }: { counts: Record<string, number> }) {
         {q && (
           <button
             onClick={() => setParam("q", null)}
-            className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-full text-muted-foreground hover:bg-muted"
+            className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-lg text-muted-foreground hover:bg-muted"
             aria-label="Clear search"
           >
             <X className="h-4 w-4" />

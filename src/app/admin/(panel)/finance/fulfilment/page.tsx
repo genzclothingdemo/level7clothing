@@ -9,9 +9,11 @@ import { RankBars } from "@/components/admin/finance-chart";
 import {
   Caveat,
   DefRow,
+  Degraded,
   Empty,
   NotMeasured,
   Panel,
+  PanelLink,
   StatTile,
   TileGrid,
   formatCount,
@@ -108,12 +110,7 @@ export default async function FulfilmentSection({
 
   return (
     <div className="space-y-5">
-      {report.degraded && (
-        <p className="rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger">
-          At least one query failed, so some panels below may read zero. This is
-          a reporting failure, not a business one.
-        </p>
-      )}
+      {report.degraded && <Degraded />}
 
       <TileGrid>
         <StatTile
@@ -122,10 +119,11 @@ export default async function FulfilmentSection({
           value={formatHours(f.dispatch.medianHours)}
           tip={METRIC.dispatchTime}
           good="down"
+          note={METRIC.medianVsMean}
           sub={
             f.dispatch.count > 0
-              ? `over ${f.dispatch.count} order${f.dispatch.count === 1 ? "" : "s"} that have shipped · mean ${formatHours(f.dispatch.meanHours)}`
-              : "nothing from this period has shipped yet"
+              ? `${f.dispatch.count} shipped · mean ${formatHours(f.dispatch.meanHours)}`
+              : "none shipped yet"
           }
         />
         <StatTile
@@ -133,10 +131,11 @@ export default async function FulfilmentSection({
           value={formatHours(f.delivery.medianHours)}
           tip={METRIC.deliveryTime}
           good="down"
+          note={METRIC.medianVsMean}
           sub={
             f.delivery.count > 0
-              ? `over ${f.delivery.count} delivered · mean ${formatHours(f.delivery.meanHours)}`
-              : "nothing delivered yet"
+              ? `${f.delivery.count} delivered · mean ${formatHours(f.delivery.meanHours)}`
+              : "none delivered yet"
           }
         />
         <StatTile
@@ -144,35 +143,23 @@ export default async function FulfilmentSection({
           value={formatCount(f.awaitingDispatch)}
           tip={METRIC.awaitingDispatch}
           good="down"
-          sub={
-            f.draftStaged > 0
-              ? `${f.draftStaged} with a NimbusPost draft staged`
-              : "no drafts staged"
-          }
+          sub={f.draftStaged > 0 ? `${f.draftStaged} drafts staged` : undefined}
         />
         <StatTile
           label="Return rate"
           value={formatPercent(returnRate.orderRate)}
           tip={METRIC.returnRate}
           good="down"
-          sub={`${returnRate.ordersWithReturn} of ${revenue.orders} order${revenue.orders === 1 ? "" : "s"} placed this period`}
+          sub={`${returnRate.ordersWithReturn} of ${revenue.orders} order${revenue.orders === 1 ? "" : "s"}`}
         />
       </TileGrid>
-
-      <Caveat>
-        A median is the middle order: half were faster, half slower. The mean is
-        beside it because one parcel stuck in a depot for a fortnight moves the
-        mean by days and the median not at all — when the two disagree, the gap
-        is the tail. Both are withheld rather than guessed when nothing has
-        reached that milestone yet.
-      </Caveat>
 
       {/* ---- Pipeline ------------------------------------------------------ */}
 
       <Panel
         title="Where orders are"
         tip="Counted orders placed in this period, by the status they are in right now. Kept in lifecycle order rather than sorted by size — sorting would scramble the one thing this answers, which is where orders are piling up."
-        subtitle={`Placed in ${win.phrase}. Cancelled orders are shown here for completeness and are excluded from every money figure in this workspace.`}
+        note={`Placed in ${win.phrase}. Cancelled orders are shown here for completeness and are excluded from every money figure in this workspace.`}
       >
         {nothing ? (
           <Empty>No orders placed in this period.</Empty>
@@ -203,7 +190,7 @@ export default async function FulfilmentSection({
           </>
         )}
         {f.rto > 0 && (
-          <Caveat>
+          <Caveat label={`${f.rto} with a courier RTO status`}>
             {f.rto} order{f.rto === 1 ? "" : "s"} from this period{" "}
             {f.rto === 1 ? "has" : "have"} a courier status mentioning RTO
             (return to origin). There is no RTO order status — a completed RTO
@@ -259,7 +246,7 @@ export default async function FulfilmentSection({
       <Panel
         title="Couriers"
         tip={METRIC.courierSplit}
-        subtitle="Who actually carried the parcel. NimbusPost allocates the carrier at booking, which is not always the one picked while reviewing rates."
+        note="Who actually carried the parcel. NimbusPost allocates the carrier at booking, which is not always the one picked while reviewing rates."
       >
         {f.couriers.length === 0 ? (
           <Empty>
@@ -277,7 +264,7 @@ export default async function FulfilmentSection({
           />
         )}
         {f.courierUnknown > 0 && (
-          <Caveat>
+          <Caveat label={`${f.courierUnknown} with no courier recorded`}>
             {f.courierUnknown} shipped or delivered order
             {f.courierUnknown === 1 ? "" : "s"} from this period{" "}
             {f.courierUnknown === 1 ? "has" : "have"} no courier name recorded —
@@ -293,7 +280,8 @@ export default async function FulfilmentSection({
       <Panel
         title="What came back"
         tip={METRIC.returnRate}
-        subtitle={`Return requests raised against orders PLACED in ${win.phrase} — the same set of orders every other figure on this page counts.`}
+        note={`Return requests raised against orders PLACED in ${win.phrase} — the same set of orders every other figure on this page counts.`}
+        aside={<PanelLink href="/admin/returns?status=all">Open returns</PanelLink>}
       >
         {returnRate.ordersWithReturn === 0 ? (
           <Empty>
@@ -375,17 +363,13 @@ export default async function FulfilmentSection({
             </div>
           </div>
         )}
-        <Caveat>
+        <Caveat label="Why a narrow range reads low">
           Numerator and denominator are the same set of orders, which is what
           makes this a rate rather than two counts on two clocks divided by each
           other. It is right-censored: an order placed yesterday has had one day
           to come back, so a narrow range always reads low. The refund figures
           beside it are the exception — those are dated by when the money left,
           so they can belong to orders from an earlier period.{" "}
-          <Link href="/admin/returns?status=all" className="underline hover:text-accent">
-            Open returns
-          </Link>{" "}
-          ·{" "}
           <Link href="/admin/finance/products" className="underline hover:text-accent">
             Return rate per product
           </Link>

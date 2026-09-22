@@ -10,6 +10,7 @@ import { isLeadStatus } from "@/lib/leads";
 import { slugify } from "@/lib/utils";
 import { deriveVariantModel } from "@/lib/variants";
 import {
+  cancelDraftForOrder,
   chooseCourierForOrder,
   createDraftForOrder,
   dispatchOrder,
@@ -20,7 +21,11 @@ import {
   syncOrderFromNimbus,
   type ConfirmationPipelineResult,
 } from "@/lib/fulfilment";
-import { normalisePipelineSettings } from "@/lib/orders-pipeline";
+import {
+  bulkEligibilityFor,
+  dispatchModeOf,
+  normalisePipelineSettings,
+} from "@/lib/orders-pipeline";
 import {
   BULK_ORDER_ACTIONS,
   type BulkRowResult,
@@ -1221,6 +1226,26 @@ export async function draftOrderInNimbusAction(id: string) {
   };
 }
 
+/**
+ * **Cancel draft** — withdraw the unbooked draft from NimbusPost.
+ *
+ * The undo for "Send draft". Offered wherever the gate says `can.cancelDraft`,
+ * which includes a cancelled or already-delivered order: those are precisely
+ * the ones that end up with an abandoned draft sitting in the NimbusPost list,
+ * where anyone reviewing it can book and charge for a parcel that is not going
+ * anywhere.
+ */
+export async function cancelOrderDraftAction(id: string) {
+  await requireAdmin();
+
+  const result = await cancelDraftForOrder(id);
+  if (!result.ok) return { ok: false as const, error: result.error };
+
+  revalidatePath("/admin/orders");
+  revalidatePath("/admin");
+  return { ok: true as const, cancelled: result.cancelled };
+}
+
 /** Couriers that will carry this order, with rates, for the admin to review. */
 export async function getCourierOptionsAction(orderId: string) {
   await requireAdmin();
@@ -1422,22 +1447,42 @@ export async function bulkOrderAction(ids: string[], action: string) {
   const { ids: unique, action: verb } = parsed.data;
 
   // One lookup for the numbers, so a failing row can still be named. An id
-  // with no order still gets a row rather than vanishing from the report.
+  // with no order still gets a row rather than vanishing from the report. The
+  // gate columns ride along so eligibility can be settled without a second
+  // query per row.
   const found = await prisma.order.findMany({
     where: { id: { in: unique } },
-    select: { id: true, orderNumber: true },
+    select: {
+      id: true,
+      orderNumber: true,
+      status: true,
+      paymentStatus: true,
+      trackingNumber: true,
+      nimbusShipmentId: true,
+    },
   });
-  const numberById = new Map(found.map((o) => [o.id, o.orderNumber]));
+  const byId = new Map(found.map((o) => [o.id, o]));
 
   const results: BulkRowResult[] = [];
 
   for (const id of unique) {
-    const orderNumber = numberById.get(id) ?? id.slice(-6);
+    const order = byId.get(id);
+    const orderNumber = order?.orderNumber ?? id.slice(-6);
     const row = (ok: boolean, message: string) =>
       results.push({ id, orderNumber, ok, message });
 
-    if (!numberById.has(id)) {
+    if (!order) {
       row(false, "Order not found — it may have been deleted.");
+      continue;
+    }
+
+    // The same rule the bulk bar counted with, applied before anything runs.
+    // The bar only offers a verb when some rows can take it and says what it
+    // will skip; this is the half that makes that promise true — and it is one
+    // pure function, so the two cannot drift apart.
+    const eligible = bulkEligibilityFor(verb, order);
+    if (!eligible.ok) {
+      row(false, `Skipped — ${eligible.reason}.`);
       continue;
     }
 
@@ -1477,8 +1522,9 @@ export async function bulkOrderAction(ids: string[], action: string) {
           const res = await dispatchOrder(id);
           if (!res.ok) row(false, res.error);
           else if (res.outcome === "drafted") {
-            // The draft-first gate, honoured in bulk too: an order with no
-            // draft gets one and stops. Say so rather than claiming success.
+            // Unreachable now that eligibility requires a staged draft, but
+            // `dispatchOrder` is draft-first and its type still says this can
+            // happen. Reported honestly rather than as a booking.
             row(true, "No draft existed — one was staged. Press Book again to generate the AWB.");
           } else {
             row(
@@ -1545,7 +1591,7 @@ function describeShipment(shipment: ConfirmationPipelineResult): string {
 /* ------------------------------------------------------------------ */
 
 /**
- * The six pipeline columns on `SiteSettings`.
+ * The pipeline columns on `SiteSettings`.
  *
  * Edited from **Admin → Settings → Orders**. They used to live on the Orders
  * screen, on the argument that they are operational rather than branding; the
@@ -1553,20 +1599,55 @@ function describeShipment(shipment: ConfirmationPipelineResult): string {
  * home for settings and `/admin/orders` carries a read-only status line that
  * links here.
  *
- * Still its own action, and still scoped to exactly these six fields. The
- * settings form calls it directly for whichever of them are dirty rather than
- * folding them into `updateSettings` — one writer per column, so a Settings
- * save can never clobber a pipeline column it was not asked to touch, and
+ * Still its own action, and still scoped to exactly these fields. The settings
+ * form calls it directly for whichever of them are dirty rather than folding
+ * them into `updateSettings` — one writer per column, so a Settings save can
+ * never clobber a pipeline column it was not asked to touch, and
  * `settingsSchema` can go on rejecting them.
+ *
+ * ## The enum migration lives here
+ *
+ * `autoShipOnConfirm` (boolean) became `dispatchOnConfirm` (off | draft |
+ * book). **Both fields are optional and this action writes both**, which is
+ * what lets the two live at once without a flag day:
+ *
+ *   - a caller that sends the enum gets the boolean derived from it;
+ *   - a caller still sending only the boolean gets the enum derived from it
+ *     (`true → book`, `false → draft`), exactly as `dispatchModeOf` reads it.
+ *
+ * So the screen that has migrated and the screen that has not cannot write
+ * contradicting rows — the trap CLAUDE.md records for `defaultReturnsInfo`,
+ * where two editors each echoed the other's column back on save. Here there is
+ * still exactly one writer; it just accepts two dialects.
+ *
+ * `autoShipCourier` is a free string rather than an enum because Q2 also
+ * accepts a **pinned courier** by name. `pickCourier` falls back to cheapest
+ * when the pin is not quoting, so an unrecognised value can never leave a
+ * parcel unshipped.
  */
-const pipelineSchema = z.object({
-  orderConfirmMode: z.enum(["manual", "byPayment", "auto"]),
-  autoConfirmPrepaid: z.boolean(),
-  autoConfirmPartial: z.boolean(),
-  autoConfirmCod: z.boolean(),
-  autoShipOnConfirm: z.boolean(),
-  autoShipCourier: z.enum(["cheapest", "fastest"]),
-});
+const pipelineSchema = z
+  .object({
+    orderConfirmMode: z.enum(["manual", "byPayment", "auto"]),
+    autoConfirmPrepaid: z.boolean(),
+    autoConfirmPartial: z.boolean(),
+    autoConfirmCod: z.boolean(),
+    /** Q1. Preferred. */
+    dispatchOnConfirm: z.enum(["off", "draft", "book"]).optional(),
+    /** @deprecated Q1's old boolean — accepted so an unmigrated caller works. */
+    autoShipOnConfirm: z.boolean().optional(),
+    /**
+     * Q2: "cheapest" | "fastest" | a pinned courier's name.
+     *
+     * Optional, and **absent means "leave that column alone"** rather than
+     * "reset it". A caller that has stopped editing Q2 must not be able to
+     * overwrite a pinned carrier with the default just by saving Q1.
+     */
+    autoShipCourier: z.string().trim().min(1).max(80).optional(),
+  })
+  .refine((v) => v.dispatchOnConfirm != null || v.autoShipOnConfirm != null, {
+    message: "Say what confirming should do — dispatchOnConfirm is required.",
+    path: ["dispatchOnConfirm"],
+  });
 
 export type PipelineSettingsInput = z.input<typeof pipelineSchema>;
 
@@ -1576,7 +1657,22 @@ export async function updateOrderPipelineSettings(input: PipelineSettingsInput) 
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
   }
-  const data = parsed.data;
+  const parsedData = parsed.data;
+
+  // One resolution of Q1, then both columns written from it. Never the two
+  // values the caller happened to send.
+  const dispatchOnConfirm = dispatchModeOf(parsedData);
+  const data = {
+    orderConfirmMode: parsedData.orderConfirmMode,
+    autoConfirmPrepaid: parsedData.autoConfirmPrepaid,
+    autoConfirmPartial: parsedData.autoConfirmPartial,
+    autoConfirmCod: parsedData.autoConfirmCod,
+    dispatchOnConfirm,
+    autoShipOnConfirm: dispatchOnConfirm === "book",
+    ...(parsedData.autoShipCourier
+      ? { autoShipCourier: parsedData.autoShipCourier }
+      : {}),
+  };
 
   await prisma.siteSettings.upsert({
     where: { id: "main" },

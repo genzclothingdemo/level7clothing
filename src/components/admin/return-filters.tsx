@@ -1,7 +1,10 @@
 "use client";
 
+import { useTransition } from "react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
-import { Search, X, AlertTriangle } from "lucide-react";
+import { Search, X, AlertTriangle, Loader2, RefreshCw, Truck } from "lucide-react";
+import { toast } from "sonner";
+import { syncAllReturnPickupsAction } from "@/app/actions/returns";
 import {
   RETURN_STATUSES,
   RETURN_STATUS_LABEL,
@@ -29,6 +32,7 @@ export function ReturnFilters({
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
+  const [syncing, startSync] = useTransition();
 
   const status = params.get("status") || "open";
   const q = params.get("q") || "";
@@ -41,6 +45,30 @@ export function ReturnFilters({
     if (value) next.set(key, value);
     else next.delete(key);
     router.replace(`${pathname}?${next.toString()}`);
+  }
+
+  /**
+   * Pull every open reverse shipment's state back from NimbusPost.
+   *
+   * Read-only against the courier — it books nothing and spends nothing. It sits
+   * here because the cron at `/api/cron/nimbus-sync` only walks `Order`, so a
+   * reverse pickup booked in the NimbusPost dashboard would otherwise never
+   * reach this screen.
+   */
+  function syncAll() {
+    startSync(async () => {
+      const res = await syncAllReturnPickupsAction();
+      if (!res.ok) {
+        toast.error(res.error);
+        return;
+      }
+      toast.success(
+        res.checked === 0
+          ? "No reverse pickups to check."
+          : `Checked ${res.checked} · ${res.booked} newly booked · ${res.tracked} tracked${res.failed ? ` · ${res.failed} failed` : ""}`
+      );
+      router.refresh();
+    });
   }
 
   const tabs = [
@@ -158,9 +186,40 @@ export function ReturnFilters({
               ? "bg-danger text-white"
               : "border border-border text-muted-foreground hover:bg-muted"
           }`}
-          title="Approved but the reverse pickup never got booked"
+          title="The reverse pickup could not be drafted at all"
         >
           <AlertTriangle className="h-3.5 w-3.5" /> Pickup failed
+        </button>
+
+        {/* The queue draft-first creates: a staged draft nobody has booked. It
+            looks identical to a booked one on a status badge, and can sit for
+            weeks while the customer waits for a courier. */}
+        <button
+          type="button"
+          onClick={() => setParam("issue", issue === "unbooked" ? null : "unbooked")}
+          className={`${pill} ${
+            issue === "unbooked"
+              ? "bg-accent text-white"
+              : "border border-border text-muted-foreground hover:bg-muted"
+          }`}
+          title="Approved, but no courier has been booked to collect it"
+        >
+          <Truck className="h-3.5 w-3.5" /> Not collected
+        </button>
+
+        <button
+          type="button"
+          onClick={syncAll}
+          disabled={syncing}
+          className={`${pill} border border-border text-muted-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50`}
+          title="Pull reverse-pickup bookings and scans back from NimbusPost. Books nothing."
+        >
+          {syncing ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5" />
+          )}{" "}
+          Sync pickups
         </button>
 
         {narrowed && (

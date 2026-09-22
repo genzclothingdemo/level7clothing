@@ -1,4 +1,3 @@
-import Link from "next/link";
 import {
   getAttentionQueue,
   getCustomerAnalytics,
@@ -10,12 +9,15 @@ import {
   TIMEZONE_NOTE,
   formatHours,
 } from "@/lib/analytics";
+import { InfoTip } from "@/components/store/info-tip";
 import { ColumnChart } from "@/components/admin/finance-chart";
 import {
   Caveat,
+  Degraded,
   Empty,
   NotMeasured,
   Panel,
+  PanelLink,
   StatTile,
   TileGrid,
   WorkQueue,
@@ -54,6 +56,15 @@ export const metadata = { title: "Dashboard" };
  * exists when it does not, and every row doubles as the next thing to build.
  * It stays on Overview in full, but collapsed: it is read once and never
  * changes, and expanded it outweighed every live figure on the page.
+ *
+ * **Nothing on this screen prints an explanation.** Every panel used to carry a
+ * subtitle paragraph, every tile a clause, and two panels a four-line caveat —
+ * so the page was a third figures and two thirds sentences that are true on
+ * every visit forever. None of that text is gone: it moved into the `(i)` the
+ * figure already had (`note` on `Panel` and `StatTile`) or into a closed
+ * `Caveat`. The rule to hold the line at: **if a string is the same on every
+ * visit, it is documentation and belongs behind a tap.** Only values, counts
+ * and labels are printed.
  */
 export default async function AdminOverview({
   searchParams,
@@ -153,13 +164,7 @@ export default async function AdminOverview({
   return (
     <Workspace>
       <div className="space-y-5">
-        {(report.degraded || queue.degraded || customers.degraded) && (
-          <p className="rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger">
-            At least one query failed, so some panels below may read zero. This
-            is a reporting failure, not a business one — check the database
-            connection before acting on anything here.
-          </p>
-        )}
+        {(report.degraded || queue.degraded || customers.degraded) && <Degraded />}
 
         {/* ---- What needs doing ------------------------------------------
             First, above the money. This is the only block on the page with an
@@ -171,26 +176,30 @@ export default async function AdminOverview({
 
         {/* ---- Headline --------------------------------------------------- */}
 
+        {/* Each `sub` is a count or a rupee figure — never a clause. The
+            scoping and the definitions that used to ride along here are in each
+            tile's own (i), which is where a reader looks for them anyway. */}
         <TileGrid>
           <StatTile
             emphasis
             label="Net revenue"
             value={formatINR(revenue.netRevenue)}
             tip={METRIC.netRevenue}
+            note={`Scoped to ${win.phrase}, and to when each order was placed. Booked, not collected — the cash tile beside it is the money actually in hand.`}
             delta={previous ? delta(revenue.netRevenue, previous.netRevenue) : undefined}
             deltaLabel={vs}
-            sub={`${win.label} · booked, not collected`}
           />
           <StatTile
             label="Orders"
             value={formatCount(revenue.orders)}
             tip={METRIC.orders}
+            note={METRIC.cancelled}
             delta={previous ? delta(revenue.orders, previous.orders) : undefined}
             deltaLabel={vs}
             sub={
               revenue.cancelledOrders > 0
-                ? `${revenue.cancelledOrders} cancelled excluded`
-                : "none cancelled"
+                ? `${revenue.cancelledOrders} cancelled, excluded`
+                : undefined
             }
           />
           <StatTile
@@ -204,19 +213,25 @@ export default async function AdminOverview({
             label="Cash collected"
             value={formatINR(cash.collected)}
             tip={METRIC.collected}
+            note={METRIC.outstanding}
             sub={
               cash.outstanding > 0
-                ? `${formatINR(cash.outstanding)} billed and not yet in hand`
-                : "nothing outstanding"
+                ? `${formatINR(cash.outstanding)} outstanding`
+                : undefined
             }
           />
         </TileGrid>
 
+        {/* Five words and an (i), where three lines of prose used to explain
+            why the deltas are missing. It only appears on All time. */}
         {!previous && (
-          <p className="text-xs text-muted-foreground">
-            No period-on-period comparison on All time — there is no equally
-            long period before it to compare against. Pick 7, 30 or 90 days for
-            deltas.
+          <p className="flex items-center gap-1 text-xs text-muted-foreground">
+            No comparison on All time
+            <InfoTip term="Period comparison">
+              A delta needs an equally long period immediately before this one
+              to compare against, and All time has nothing before it. Pick 7, 30
+              or 90 days and every tile above grows a change figure.
+            </InfoTip>
           </p>
         )}
 
@@ -225,21 +240,19 @@ export default async function AdminOverview({
         <Panel
           title="Net revenue over time"
           tip={METRIC.netRevenue}
-          subtitle={
+          note={
             <>
               One bar per {report.granularity}, by order date. {TIMEZONE_NOTE}{" "}
               Refunds are <strong className="font-medium text-foreground">not</strong>{" "}
               netted out of these bars — they are dated by when the money left,
-              which is a different day from the order.{" "}
-              <Link href="/admin/finance/sales" className="underline hover:text-accent">
-                Sales
-              </Link>{" "}
-              breaks the same series down month by month.
+              which is a different day from the order. Sales breaks the same
+              series down month by month.
             </>
           }
+          aside={<PanelLink href="/admin/finance/sales">Sales</PanelLink>}
         >
           {report.granularityForced && (
-            <Caveat>
+            <Caveat label={`Showing ${report.granularity}s, not ${report.granularityForced}s`}>
               You asked for one bar per {report.granularityForced}, which over
               this range would be more than 120 bars — too many to read at any
               width. The chart is showing {report.granularity}s instead.
@@ -274,118 +287,125 @@ export default async function AdminOverview({
             demand and delivery. */}
 
         <div className="grid gap-5 lg:grid-cols-2">
+          {/* `bare` tiles: these sit inside a panel that is already a card, and
+              a bordered box drawn inside a bordered box is chrome describing
+              chrome. Values only — the scoping that used to ride under each one
+              is in its (i) and in the panel's. */}
           <Panel
             title="Who is buying"
             tip={METRIC.newVsReturning}
-            subtitle={
+            note={
               <>
-                Customer identity comes from the same merge rule as{" "}
-                <Link href="/admin/customers" className="underline hover:text-accent">
-                  Admin → Customers
-                </Link>
-                , so the two screens cannot disagree about who a shopper is.
+                Customer identity comes from the same merge rule as Admin →
+                Customers, so the two screens cannot disagree about who a
+                shopper is. Repeat rate and lifetime value are{" "}
+                <strong className="font-medium text-foreground">all-time</strong>{" "}
+                and do not move with the range control; the two order counts do.
               </>
             }
+            aside={<PanelLink href="/admin/finance/customers">Customers</PanelLink>}
           >
             {customers.buyers === 0 ? (
               <Empty>Nobody has placed an order yet.</Empty>
             ) : (
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                 <StatTile
+                  bare
                   label="Repeat rate"
                   value={formatPercent(customers.repeatRate)}
                   tip={METRIC.repeatRate}
-                  sub={`${customers.repeatBuyers} of ${customers.buyers} buyers have ordered more than once · all time`}
+                  sub={`${customers.repeatBuyers} of ${customers.buyers} buyers`}
                 />
                 <StatTile
+                  bare
                   label="Median lifetime value"
                   value={formatINR(customers.medianLtv)}
                   tip={METRIC.ltv}
                   good="none"
-                  sub={`mean ${formatINR(customers.meanLtv)} · billed, incl. shipping`}
+                  sub={`mean ${formatINR(customers.meanLtv)}`}
                 />
                 <StatTile
+                  bare
                   label="Orders from new customers"
                   value={formatCount(customers.windowNewOrders)}
                   tip={METRIC.newVsReturning}
                   good="none"
-                  sub={`${formatINR(customers.windowNewRevenue)} · ${win.label.toLowerCase()}`}
+                  sub={formatINR(customers.windowNewRevenue)}
                 />
                 <StatTile
+                  bare
                   label="Orders from returning"
                   value={formatCount(customers.windowReturningOrders)}
                   tip={METRIC.newVsReturning}
                   good="none"
-                  sub={`${formatINR(customers.windowReturningRevenue)} · ${win.label.toLowerCase()}`}
+                  sub={formatINR(customers.windowReturningRevenue)}
                 />
               </div>
             )}
-            <Caveat>
-              Repeat rate and lifetime value are all-time and do not move with
-              the range control; the two order counts do.{" "}
-              <Link href="/admin/finance/customers" className="underline hover:text-accent">
-                Customers
-              </Link>{" "}
-              has the segments and the cohort retention behind these.
-            </Caveat>
           </Panel>
 
           <Panel
             title="Getting orders out"
             tip={METRIC.dispatchTime}
-            subtitle={`Measured over orders placed in ${win.phrase} that have actually shipped.`}
+            note={
+              <>
+                Measured over orders placed in {win.phrase} that have actually
+                shipped — an order still sitting unshipped is not in the
+                denominator, which is why each figure prints its own count.
+                Fulfilment has the distributions behind these medians, the
+                courier split and the full returns breakdown.
+              </>
+            }
+            aside={<PanelLink href="/admin/finance/fulfilment">Fulfilment</PanelLink>}
           >
             {nothing ? (
               <Empty>No orders placed in this period.</Empty>
             ) : (
-              // Two up, not `TileGrid`: this panel is now a half-width column,
-              // where four tiles across would put "Median delivery" on three
-              // lines. It matches "Who is buying" beside it.
-              <div className="grid grid-cols-2 gap-3">
-              <StatTile
-                label="Median dispatch"
-                value={formatHours(report.fulfilment.dispatch.medianHours)}
-                tip={METRIC.dispatchTime}
-                good="down"
-                sub={
-                  report.fulfilment.dispatch.count > 0
-                    ? `over ${report.fulfilment.dispatch.count} shipped order${report.fulfilment.dispatch.count === 1 ? "" : "s"}`
-                    : "nothing has shipped yet"
-                }
-              />
-              <StatTile
-                label="Median delivery"
-                value={formatHours(report.fulfilment.delivery.medianHours)}
-                tip={METRIC.deliveryTime}
-                good="down"
-                sub={
-                  report.fulfilment.delivery.count > 0
-                    ? `over ${report.fulfilment.delivery.count} delivered order${report.fulfilment.delivery.count === 1 ? "" : "s"}`
-                    : "nothing delivered yet"
-                }
-              />
-              <StatTile
-                label="In transit"
-                value={formatCount(report.fulfilment.inTransit)}
-                tip="Orders from this period currently marked shipped and not yet delivered."
-                good="none"
-              />
-              <StatTile
-                label="Return rate"
-                value={formatPercent(report.returnRate.orderRate)}
-                tip={METRIC.returnRate}
-                good="down"
-                sub={`${report.returnRate.ordersWithReturn} of ${revenue.orders} orders`}
-              />
+              // Two up, not `TileGrid`: this panel is a half-width column, where
+              // four tiles across would put "Median delivery" on three lines. It
+              // matches "Who is buying" beside it.
+              <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                <StatTile
+                  bare
+                  label="Median dispatch"
+                  value={formatHours(report.fulfilment.dispatch.medianHours)}
+                  tip={METRIC.dispatchTime}
+                  good="down"
+                  sub={
+                    report.fulfilment.dispatch.count > 0
+                      ? `${report.fulfilment.dispatch.count} shipped`
+                      : "none shipped yet"
+                  }
+                />
+                <StatTile
+                  bare
+                  label="Median delivery"
+                  value={formatHours(report.fulfilment.delivery.medianHours)}
+                  tip={METRIC.deliveryTime}
+                  good="down"
+                  sub={
+                    report.fulfilment.delivery.count > 0
+                      ? `${report.fulfilment.delivery.count} delivered`
+                      : "none delivered yet"
+                  }
+                />
+                <StatTile
+                  bare
+                  label="In transit"
+                  value={formatCount(report.fulfilment.inTransit)}
+                  tip="Orders from this period currently marked shipped and not yet delivered."
+                  good="none"
+                />
+                <StatTile
+                  bare
+                  label="Return rate"
+                  value={formatPercent(report.returnRate.orderRate)}
+                  tip={METRIC.returnRate}
+                  good="down"
+                  sub={`${report.returnRate.ordersWithReturn} of ${revenue.orders} orders`}
+                />
               </div>
             )}
-            <Caveat>
-              <Link href="/admin/finance/fulfilment" className="underline hover:text-accent">
-                Fulfilment
-              </Link>{" "}
-              has the distributions behind these medians, the courier split and
-              the full returns breakdown.
-            </Caveat>
           </Panel>
         </div>
 
@@ -394,7 +414,7 @@ export default async function AdminOverview({
         <Panel
           title="What this dashboard cannot tell you"
           tip="Written down rather than left as a gap. Every row is something an e-commerce dashboard normally shows and this one deliberately does not, because the data to compute it does not exist in this database."
-          subtitle="A plausible-looking number with nothing behind it is worse than an empty space — a real decision gets made on it. Each row names the one change that would make the figure real."
+          note="A plausible-looking number with nothing behind it is worse than an empty space — a real decision gets made on it. Each row names the one change that would make the figure real."
         >
           <NotMeasured rows={NOT_MEASURED} />
         </Panel>

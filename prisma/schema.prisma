@@ -356,14 +356,33 @@ model SiteSettings {
 
   // ---- Shipment pipeline ----
   //
-  // OFF (default): confirming an order stages an unbooked NimbusPost draft and
-  // stops, so a human picks the courier and sees the cost before the wallet is
-  // charged. ON: the draft is booked immediately with `autoShipCourier`.
+  // How far a CONFIRMED order goes on its own:
+  //   "off"   — nothing reaches the courier; the admin dispatches by hand.
+  //   "draft" — stage a free, unbooked NimbusPost draft and stop, so a human
+  //             picks the courier and sees the cost before the wallet is
+  //             charged. The default, and the review gate CLAUDE.md records
+  //             as deliberate.
+  //   "book"  — book it immediately with `autoShipCourier`. Spends real money
+  //             with nobody looking.
   //
-  // Deliberately default-off. CLAUDE.md records the draft-first review gate as
-  // intentional, and booking spends real money.
+  // NULLABLE ON PURPOSE, with no default: a row written before this column
+  // existed reads as null, and `dispatchModeOf()` in lib/orders-pipeline.ts
+  // then falls back to `autoShipOnConfirm` below — true → "book", false →
+  // "draft" — so every existing row keeps behaving exactly as it did, including
+  // one that was deliberately set to auto-book. A `@default("draft")` would
+  // have silently switched such a row off.
+  dispatchOnConfirm    String?
+  // DEPRECATED — the boolean `dispatchOnConfirm` replaced. It could only say
+  // draft (false) or book (true), with no way to express "do nothing".
+  //
+  // Kept and still written, in step, by the one writer
+  // (`updateOrderPipelineSettings`), so a settings screen that has not migrated
+  // to the enum yet keeps reading a truthful value. NEVER branch on it — read
+  // `dispatchModeOf()`. Drop the column once nothing references it.
   autoShipOnConfirm    Boolean @default(false)
-  // "cheapest" | "fastest" — how the courier is picked when auto-shipping.
+  // "cheapest" | "fastest" | a pinned courier's name — how the courier is
+  // picked when auto-shipping. Free text because a pin is just the carrier's
+  // own name as NimbusPost quotes it; see `pickCourier`.
   autoShipCourier      String  @default("cheapest")
 
   // ---- Refunds ----

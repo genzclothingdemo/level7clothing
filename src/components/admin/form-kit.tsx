@@ -391,7 +391,7 @@ export function MiniButton({
 /** Small count pill used on the Filters button and section headers. */
 export function CountBadge({ children }: { children: React.ReactNode }) {
   return (
-    <span className="grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[10px] font-semibold text-accent-foreground">
+    <span className="grid h-4 min-w-4 place-items-center rounded-lg bg-accent px-1 text-[10px] font-semibold text-accent-foreground">
       {children}
     </span>
   );

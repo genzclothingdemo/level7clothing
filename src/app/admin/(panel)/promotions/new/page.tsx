@@ -22,7 +22,7 @@ export default async function NewPromotionPage() {
       >
         <ChevronLeft className="h-4 w-4" /> Promotions
       </Link>
-      <h1 className="mb-6 font-serif text-3xl">New promotion</h1>
+      <h1 className="mb-6 font-serif text-2xl">New promotion</h1>
 
       <PromotionForm initial={EMPTY_PROMOTION} liveId={live?.id ?? null} />
     </div>

@@ -35,7 +35,7 @@ function LoginForm() {
   return (
     <form
       onSubmit={onSubmit}
-      className="w-full max-w-sm rounded-3xl border border-border bg-card p-8"
+      className="w-full max-w-sm rounded-2xl border border-border bg-card p-5 sm:p-8"
     >
       <div className="mb-6 text-center">
         <span className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-muted gold-text">
@@ -78,10 +78,13 @@ function LoginForm() {
         />
       </label>
 
-      <div className="mb-6 text-right">
+      {/* `min-h-11` + a negative margin: the link keeps its optical position at
+          the field's right edge, but the thing a thumb has to hit is a full
+          44px tall instead of a 16px line of 12px text. */}
+      <div className="mb-4 flex justify-end">
         <Link
           href="/account/forgot"
-          className="text-xs text-muted-foreground hover:text-accent"
+          className="-mr-2 -my-1 inline-flex min-h-11 items-center px-2 text-xs text-muted-foreground transition-colors hover:text-accent"
         >
           Forgot password?
         </Link>
@@ -112,7 +115,7 @@ function LoginForm() {
 
 export default function LoginPage() {
   return (
-    <div className="container-px mx-auto flex min-h-[70dvh] items-center justify-center py-16">
+    <div className="container-px mx-auto flex min-h-[70dvh] items-center justify-center py-10 sm:py-16">
       <Suspense>
         <LoginForm />
       </Suspense>

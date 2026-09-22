@@ -4,8 +4,10 @@ import { InfoTip } from "@/components/store/info-tip";
 import { Badge } from "@/components/admin/order-ui";
 import {
   CONFIRM_MODE_LABEL,
-  COURIER_PREFERENCE_LABEL,
-  isFullyUnattended,
+  courierChoiceLabel,
+  dispatchModeOf,
+  DISPATCH_MODE_DETAIL,
+  DISPATCH_MODE_LABEL,
   type PipelineSettings,
 } from "@/lib/orders-pipeline";
 
@@ -36,7 +38,10 @@ import {
 export const ORDER_AUTOMATION_HREF = "/admin/settings?tab=orders";
 
 export function OrderPipelinePanel({ settings }: { settings: PipelineSettings }) {
-  const unattended = isFullyUnattended(settings);
+  // Q1 through the one resolver, never off the legacy boolean — a row written
+  // before the enum existed still reads correctly here.
+  const dispatch = dispatchModeOf(settings);
+  const unattended = settings.orderConfirmMode === "auto" && dispatch === "book";
 
   return (
     <section className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 rounded-lg border border-border bg-card px-3 py-2">
@@ -44,21 +49,23 @@ export function OrderPipelinePanel({ settings }: { settings: PipelineSettings })
 
       <span className="text-xs font-medium">Order automation</span>
       <InfoTip term="Order automation">
-        Whether an order confirms itself, and what confirming then does with the
-        courier. Confirming emails the customer and stages a free, unbooked
-        draft in NimbusPost; booking allocates the courier, generates the AWB
-        and charges your NimbusPost wallet. Both are set in Settings → Orders.
+        Two questions, both set in Settings → Orders: whether an order confirms
+        itself, and how far a confirmed one then goes with the courier —
+        nothing, a free unbooked draft in NimbusPost, or a booked AWB paid for
+        out of your wallet. Whatever they say, you can always dispatch an order
+        by hand from this screen.
       </InfoTip>
 
       <span className="flex flex-wrap items-center gap-1">
         <Badge tone={settings.orderConfirmMode === "auto" ? "warn" : "neutral"}>
           Auto-confirm: {CONFIRM_MODE_LABEL[settings.orderConfirmMode].toLowerCase()}
         </Badge>
-        <Badge tone={settings.autoShipOnConfirm ? "warn" : "neutral"}>
+        <Badge tone={dispatch === "book" ? "warn" : "neutral"} title={DISPATCH_MODE_DETAIL[dispatch]}>
           <Truck className="h-2.5 w-2.5" aria-hidden />
-          {settings.autoShipOnConfirm
-            ? `Books ${COURIER_PREFERENCE_LABEL[settings.autoShipCourier].toLowerCase()} automatically`
-            : "Draft only"}
+          On confirm: {DISPATCH_MODE_LABEL[dispatch].toLowerCase()}
+          {dispatch === "book"
+            ? ` (${courierChoiceLabel(settings.autoShipCourier).toLowerCase()})`
+            : ""}
         </Badge>
         {unattended && (
           <Badge tone="danger" title="Every order confirms itself and books a real courier before you have seen it.">

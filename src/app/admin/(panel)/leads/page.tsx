@@ -45,7 +45,7 @@ export default async function AdminLeads({
 
   return (
     <div>
-      <h1 className="font-serif text-3xl">Interested customers</h1>
+      <h1 className="font-serif text-2xl">Interested customers</h1>
       <p className="mt-1 text-sm text-muted-foreground">
         Everyone who added a product to their cart — your warm leads. Update their
         status and jot notes as you follow up.

@@ -69,7 +69,7 @@ export default async function NewProductPage({
       >
         <ChevronLeft className="h-4 w-4" /> Back to products
       </Link>
-      <h1 className="mb-1 font-serif text-3xl">
+      <h1 className="mb-1 font-serif text-2xl">
         {source ? "Duplicate product" : "Add product"}
       </h1>
       <p className="mb-6 text-sm text-muted-foreground">

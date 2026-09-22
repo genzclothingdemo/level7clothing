@@ -39,7 +39,11 @@ import { InfoTip } from "@/components/store/info-tip";
 import { Disclosure } from "@/components/store/disclosure";
 import { Btn } from "@/components/admin/order-ui";
 import { Field } from "@/components/admin/form-kit";
-import type { AutoShipCourier, OrderConfirmMode } from "@/lib/orders-pipeline";
+import type {
+  CourierChoice,
+  DispatchOnConfirm,
+  OrderConfirmMode,
+} from "@/lib/orders-pipeline";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -85,8 +89,23 @@ export type SettingsDraft = {
   autoConfirmPrepaid: boolean;
   autoConfirmPartial: boolean;
   autoConfirmCod: boolean;
-  autoShipOnConfirm: boolean;
-  autoShipCourier: AutoShipCourier;
+  /**
+   * Q1 — how far a confirmed order goes on its own. **The enum, not the old
+   * `autoShipOnConfirm` boolean**, which could only say draft (false) or book
+   * (true) and had no way to express "leave the courier alone". The boolean is
+   * still a column and is still written, but it is derived from this one by
+   * the action, so it is deliberately absent from the draft: two editable
+   * copies of one decision is how they drift apart.
+   */
+  dispatchOnConfirm: DispatchOnConfirm;
+  /**
+   * `CourierChoice`, not `AutoShipCourier`: the column accepts a **pinned
+   * courier name** as well as the two strategies, and the draft has to hold
+   * what the database actually holds. Narrowing it here would show "Cheapest"
+   * for a store that had pinned Xpressbees and then write that back — a silent
+   * downgrade of a real setting.
+   */
+  autoShipCourier: CourierChoice;
 };
 
 export type DraftKey = keyof SettingsDraft;
@@ -104,7 +123,7 @@ export const PIPELINE_KEYS = [
   "autoConfirmPrepaid",
   "autoConfirmPartial",
   "autoConfirmCod",
-  "autoShipOnConfirm",
+  "dispatchOnConfirm",
   "autoShipCourier",
 ] as const satisfies readonly DraftKey[];
 
@@ -135,7 +154,14 @@ export function isPipelineKey(k: DraftKey): k is PipelineKey {
 // Imported as well as re-exported: `export … from` re-publishes the names
 // without binding them in this module's scope, and the components below use
 // TABS and TabKey directly.
-export { TABS, DEFAULT_TAB, isTabKey, type TabKey } from "@/lib/settings-tabs";
+export {
+  TABS,
+  DEFAULT_TAB,
+  isTabKey,
+  tabMeta,
+  type TabKey,
+  type SettingsTab,
+} from "@/lib/settings-tabs";
 
 /** Label + home tab for every editable field. The one place either is stated. */
 export const FIELD_META: Record<DraftKey, { label: string; tab: TabKey }> = {
@@ -154,7 +180,7 @@ export const FIELD_META: Record<DraftKey, { label: string; tab: TabKey }> = {
   autoConfirmPrepaid: { label: "Auto-confirm prepaid", tab: "orders" },
   autoConfirmPartial: { label: "Auto-confirm part-paid", tab: "orders" },
   autoConfirmCod: { label: "Auto-confirm cash on delivery", tab: "orders" },
-  autoShipOnConfirm: { label: "Book the shipment automatically", tab: "orders" },
+  dispatchOnConfirm: { label: "What confirming does", tab: "orders" },
   autoShipCourier: { label: "Courier preference", tab: "orders" },
 
   codEnabled: { label: "Cash on Delivery", tab: "payments" },
@@ -421,12 +447,19 @@ export function LinesField({
 export function SetOnce({
   label,
   summary,
+  tip,
   dirty = false,
   children,
 }: {
   label: string;
   /** One line readable while closed — a count, a state, never an explanation. */
   summary?: React.ReactNode;
+  /**
+   * What this group is and where its values show up. Every fold used to open on
+   * a paragraph of exactly this before reaching a single control, so the reward
+   * for expanding was more reading. It sits on the closed row instead.
+   */
+  tip?: React.ReactNode;
   /** True when any field inside differs from the last saved value. */
   dirty?: boolean;
   children: React.ReactNode;
@@ -438,19 +471,30 @@ export function SetOnce({
         dirty ? "border-accent/50" : "border-border"
       )}
     >
-      <Disclosure
-        label={label}
-        defaultOpen={dirty}
-        summary={
-          dirty ? (
-            <span className="font-medium text-accent">unsaved changes</span>
-          ) : (
-            summary
-          )
-        }
-      >
-        <div className="space-y-4 pb-4">{children}</div>
-      </Disclosure>
+      {/* The (i) is a sibling of the Disclosure's button, never inside it: a
+          button nested in a button is invalid, and tapping the tip would
+          otherwise toggle the fold underneath it. */}
+      <div className="flex min-w-0 items-center gap-1">
+        <Disclosure
+          className="min-w-0 flex-1"
+          label={label}
+          defaultOpen={dirty}
+          summary={
+            dirty ? (
+              <span className="font-medium text-accent">unsaved changes</span>
+            ) : (
+              summary
+            )
+          }
+        >
+          <div className="space-y-4 pb-4">{children}</div>
+        </Disclosure>
+        {tip && (
+          <span className="grid h-11 w-8 shrink-0 place-items-center self-start">
+            <InfoTip term={label}>{tip}</InfoTip>
+          </span>
+        )}
+      </div>
     </section>
   );
 }

@@ -11,11 +11,13 @@ import {
 import { HeatGrid, RankBars } from "@/components/admin/finance-chart";
 import {
   Caveat,
+  Degraded,
   Empty,
   NotMeasured,
   PAGE_SIZE,
   Pager,
   Panel,
+  PanelLink,
   StatTile,
   TileGrid,
   formatCount,
@@ -120,12 +122,7 @@ export default async function CustomersSection({
 
   return (
     <div className="space-y-5">
-      {c.degraded && (
-        <p className="rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger">
-          The customer directory could not be read, so this section is empty.
-          This is a reporting failure, not a business one.
-        </p>
-      )}
+      {c.degraded && <Degraded />}
 
       {c.buyers === 0 ? (
         <Panel
@@ -145,14 +142,15 @@ export default async function CustomersSection({
               label="Repeat rate"
               value={formatPercent(c.repeatRate)}
               tip={METRIC.repeatRate}
-              sub={`${c.repeatBuyers} of ${c.buyers} buyers have ordered more than once · all time, not filtered by the range`}
+              note="All-time. This tile does not move when you change the range."
+              sub={`${c.repeatBuyers} of ${c.buyers} buyers`}
             />
             <StatTile
               label="Buyers"
               value={formatCount(c.buyers)}
               tip="Everyone who has ever placed a counted order, after the merge rule in lib/customers.ts has joined their guest orders and their account into one person."
               good="none"
-              sub={`${c.newCustomers} first ordered in ${win.phrase}`}
+              sub={`${c.newCustomers} new in ${win.label.toLowerCase()}`}
             />
             <StatTile
               label="Median lifetime value"
@@ -174,15 +172,15 @@ export default async function CustomersSection({
               )}
               tip={METRIC.newVsReturning}
               good="none"
-              sub={`${formatINR(c.windowReturningRevenue)} of ${formatINR(c.windowNewRevenue + c.windowReturningRevenue)} · ${win.label.toLowerCase()}`}
+              sub={`${formatINR(c.windowReturningRevenue)} of ${formatINR(c.windowNewRevenue + c.windowReturningRevenue)}`}
             />
           </TileGrid>
 
-          <Caveat>
-            The first three tiles are <strong className="font-medium text-foreground">all-time</strong>{" "}
-            and do not move when you change the range — a repeat rate measured
-            over seven days would mostly be measuring the seven days. Only the
-            fourth tile, and the panel below it, are scoped to {win.phrase}.
+          <Caveat label="Which of these move with the range">
+            The first three tiles are all-time and do not move when you change
+            the range — a repeat rate measured over seven days would mostly be
+            measuring the seven days. Only the fourth tile, and the panel below
+            it, are scoped to {win.phrase}.
           </Caveat>
 
           {/* ---- New vs returning ---------------------------------------- */}
@@ -190,7 +188,7 @@ export default async function CustomersSection({
           <Panel
             title="New against returning"
             tip={METRIC.newVsReturning}
-            subtitle={`Every counted order placed in ${win.phrase}, split by whether it was that customer's first order ever.`}
+            note={`Every counted order placed in ${win.phrase}, split by whether it was that customer's first order ever.`}
           >
             {windowOrders === 0 ? (
               <Empty>No counted orders in this period.</Empty>
@@ -233,7 +231,7 @@ export default async function CustomersSection({
                 ]}
               />
             )}
-            <Caveat>
+            <Caveat label="What counts as a first order">
               &ldquo;First&rdquo; means first counted order ever, not first in
               this period — so a customer who ordered last year and again today
               counts as repeat, which is the only reading that does not reset
@@ -249,7 +247,7 @@ export default async function CustomersSection({
           <Panel
             title="Recency and frequency"
             tip={METRIC.rfmScore}
-            subtitle="Every buyer placed in a 3 × 3 grid: how recently they last ordered, against how often they have ordered. All-time, and scored against this store's own customers rather than an industry benchmark."
+            note="Every buyer placed in a 3 × 3 grid: how recently they last ordered, against how often they have ordered. All-time, and scored against this store's own customers rather than an industry benchmark."
           >
             {!c.rfmGrid || !c.rfmCutoffs ? (
               <Empty>
@@ -271,7 +269,7 @@ export default async function CustomersSection({
                   caption="Buyers by recency tercile against frequency tercile"
                   nullLabel="0"
                 />
-                <Caveat>
+                <Caveat label="Where the cut-points come from">
                   Cut-points are this store&apos;s own 33rd and 67th percentiles:
                   recent means within{" "}
                   {Math.round(c.rfmCutoffs.recencyDays[0])} days, often means{" "}
@@ -289,7 +287,7 @@ export default async function CustomersSection({
             <Panel
               title="Segments"
               tip={METRIC.rfmSegment}
-              subtitle="A name for each cell of the grid above, not a sum of the two scores — adding them would make “ordered once yesterday” and “ordered five times a year ago” the same customer."
+              note="A name for each cell of the grid above, not a sum of the two scores — adding them would make “ordered once yesterday” and “ordered five times a year ago” the same customer."
             >
               <RankBars
                 rows={c.segments.map((s) => ({
@@ -313,7 +311,7 @@ export default async function CustomersSection({
           <Panel
             title="Cohort retention"
             tip={METRIC.cohortRetention}
-            subtitle="Customers grouped by the month of their first order. Each column is the share of that group who ordered again that many months later. All-time, and not filtered by the range."
+            note="Customers grouped by the month of their first order. Each column is the share of that group who ordered again that many months later. All-time, and not filtered by the range."
           >
             {c.cohorts.length === 0 ? (
               <Empty>No counted orders yet, so there are no cohorts.</Empty>
@@ -328,7 +326,7 @@ export default async function CustomersSection({
                   caption="Share of each first-order month's customers ordering again, by months since"
                   nullLabel="—"
                 />
-                <Caveat>
+                <Caveat label="Read the cohort size before the colour">
                   The number in brackets after each month is how many customers
                   started in it — read that before the colour. A retention
                   percentage over three people moves 33 points when one of them
@@ -346,7 +344,8 @@ export default async function CustomersSection({
           <Panel
             title="Biggest customers"
             tip={METRIC.ltv}
-            subtitle="By lifetime spend, all-time. Every name links to their full record."
+            note="By lifetime spend, all-time. Every name links to their full record."
+            aside={<PanelLink href="/admin/customers">All customers</PanelLink>}
           >
             {c.top.length === 0 ? (
               <Empty>Nobody has placed a counted order yet.</Empty>
@@ -399,15 +398,12 @@ export default async function CustomersSection({
                   total={c.top.length}
                   noun="customers"
                 />
-                <Caveat>
+                <Caveat label="Why this is higher than net revenue">
                   Lifetime spend is Σ order total over non-cancelled orders —
                   what the customer was billed, shipping included. It is the
-                  same figure{" "}
-                  <Link href="/admin/customers" className="underline hover:text-accent">
-                    Admin → Customers
-                  </Link>{" "}
-                  shows on each person, which is why it is slightly higher than
-                  net revenue elsewhere in this workspace.
+                  same figure Admin → Customers shows on each person, which is
+                  why it is slightly higher than net revenue elsewhere in this
+                  workspace.
                   {!c.rfm && " Segments are blank because there are too few buyers to score."}
                 </Caveat>
               </>

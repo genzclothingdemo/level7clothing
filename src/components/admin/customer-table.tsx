@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ChevronRight, Mail, MapPin, Phone } from "lucide-react";
+import { ChevronRight, MapPin } from "lucide-react";
 import { formatINR } from "@/lib/utils";
 import { TableScroll } from "@/components/admin/form-kit";
 import {
@@ -8,9 +8,10 @@ import {
   type CustomerRecord,
 } from "@/lib/customers";
 import {
+  ContactActions,
   CustomerStatusBadge,
   MergeTip,
-  SignalBadges,
+  SignalIcons,
   formatAgo,
   formatDayTime,
   sourceSummary,
@@ -84,34 +85,18 @@ export function CustomerTable({
                 </Link>
               </div>
 
-              {/* Real links: this is the screen you open to contact somebody. */}
-              <div className="mt-1 flex flex-col text-xs text-muted-foreground">
-                {c.email && (
-                  <a
-                    href={`mailto:${c.email}`}
-                    className="flex min-h-11 items-center gap-2 hover:text-accent"
-                  >
-                    <Mail className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    <span className="truncate">{c.email}</span>
-                  </a>
-                )}
-                {c.phone && (
-                  <a
-                    href={`tel:${c.phone}`}
-                    className="flex min-h-11 items-center gap-2 hover:text-accent"
-                  >
-                    <Phone className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    <span className="truncate">{c.phone}</span>
-                  </a>
-                )}
+              {/* Reach + where, on one line.
+                  This was two full-width rows printing the whole email and the
+                  whole phone number — 88px of the longest strings on the card,
+                  above the money. They are actions, so they are buttons now;
+                  the address is in the `title` and on the detail page. */}
+              <div className="mt-1 flex items-center gap-2">
+                <ContactActions email={c.email} phone={c.phone} />
                 {c.location && (
-                  <p className="flex items-center gap-2 py-1">
+                  <p className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                     <MapPin className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                     <span className="truncate">{c.location}</span>
                   </p>
-                )}
-                {!c.email && !c.phone && !c.location && (
-                  <p className="py-1">No contact details on record.</p>
                 )}
               </div>
 
@@ -136,7 +121,7 @@ export function CustomerTable({
               </div>
 
               {signals.length > 0 && (
-                <SignalBadges signals={signals} className="mt-2" />
+                <SignalIcons signals={signals} className="mt-2" />
               )}
             </li>
           );
@@ -149,7 +134,7 @@ export function CustomerTable({
           <thead>
             <tr className="border-b border-border text-left">
               <Th>Customer</Th>
-              <Th>Contact</Th>
+              <Th>Reach</Th>
               <Th align="right">Spend</Th>
               <Th>Needs attention</Th>
               <Th align="right">Last seen</Th>
@@ -172,31 +157,22 @@ export function CustomerTable({
                       </Link>
                       <MergeTip customer={c} />
                     </div>
-                    <CustomerStatusBadge status={c.status} className="mt-1" />
+                    <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                      <CustomerStatusBadge status={c.status} />
+                      {/* Where they are is identity, not contact — it helps you
+                          recognise which "Jay Patel" this is, so it stays on
+                          the name. The email and the phone are actions and
+                          moved to the next column. */}
+                      {c.location && (
+                        <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+                          {c.location}
+                        </span>
+                      )}
+                    </div>
                   </td>
 
-                  <td className="max-w-56 px-3 py-3 text-xs text-muted-foreground">
-                    {c.email && (
-                      <a
-                        href={`mailto:${c.email}`}
-                        className="block truncate hover:text-accent"
-                        title={c.email}
-                      >
-                        {c.email}
-                      </a>
-                    )}
-                    {c.phone && (
-                      <a
-                        href={`tel:${c.phone}`}
-                        className="block truncate hover:text-accent"
-                      >
-                        {c.phone}
-                      </a>
-                    )}
-                    {!c.email && !c.phone && <span>—</span>}
-                    {c.location && (
-                      <span className="block truncate">{c.location}</span>
-                    )}
+                  <td className="w-px whitespace-nowrap px-3 py-3">
+                    <ContactActions email={c.email} phone={c.phone} />
                   </td>
 
                   <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums">
@@ -222,12 +198,8 @@ export function CustomerTable({
                     )}
                   </td>
 
-                  <td className="max-w-56 px-3 py-3">
-                    {signals.length > 0 ? (
-                      <SignalBadges signals={signals} />
-                    ) : (
-                      <span className="text-xs text-muted-foreground">—</span>
-                    )}
+                  <td className="max-w-48 px-3 py-3">
+                    <SignalIcons signals={signals} />
                   </td>
 
                   <td

@@ -56,6 +56,14 @@ export type ReturnRequestRow = {
   refundUpi: string | null;
   refundReference: string | null;
   refundedAt: Date | null;
+  /**
+   * The REVERSE pickup's AWB — set only once a courier has actually been booked
+   * to collect. Null while it is a draft, which is the state the customer most
+   * needs told apart from "booked": one means someone is coming, the other
+   * means nobody is yet.
+   */
+  nimbusAwb?: string | null;
+  nimbusCourier?: string | null;
 };
 
 export type OrderReturnsView = {
@@ -135,6 +143,12 @@ export function buildOrderReturns(input: {
     reason: r.reason,
     adminNote: r.adminNote,
     createdAt: r.createdAt.toISOString(),
+    // Only the booked leg is passed on. A draft id is an internal NimbusPost
+    // reference the customer can do nothing with, and showing one would read as
+    // a tracking number that doesn't work.
+    pickup: r.nimbusAwb
+      ? { awb: r.nimbusAwb, courier: r.nimbusCourier ?? null }
+      : null,
     // The figures fixed at the decision, never recomputed: the customer is
     // shown what was agreed, not what today's fee settings would produce.
     refund:

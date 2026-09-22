@@ -3,6 +3,9 @@ import { prisma } from "./prisma";
 import { getSettings } from "./settings";
 import { mapNimbusStatus, NOTIFY_STATUSES } from "./nimbus-status";
 import {
+  courierChoiceLabel,
+  dispatchModeOf,
+  isCourierStrategy,
   normalisePipelineSettings,
   pickCourier,
   resolveCollection,
@@ -14,6 +17,7 @@ import {
 } from "./orders-pipeline";
 import {
   isNimbusPostConfigured,
+  cancelOrder,
   createDraftOrder,
   createReverseDraftOrder,
   getOrderState,
@@ -38,7 +42,7 @@ import {
 /* ------------------------------------------------------------------ */
 
 /**
- * The six pipeline columns off `SiteSettings`.
+ * The seven pipeline columns off `SiteSettings`.
  *
  * Read directly rather than through `getSettings()` because `SettingsDTO` is
  * the storefront's branding shape and does not carry them. Wrapped in React
@@ -59,6 +63,10 @@ export const getPipelineSettings = cache(async (): Promise<PipelineSettings> => 
         autoConfirmPrepaid: true,
         autoConfirmPartial: true,
         autoConfirmCod: true,
+        // Both, always: `dispatchModeOf` prefers the enum and falls back to the
+        // boolean for a row written before the enum column existed. Selecting
+        // only one of them would make that fallback unreachable.
+        dispatchOnConfirm: true,
         autoShipOnConfirm: true,
         autoShipCourier: true,
       },
@@ -162,10 +170,12 @@ export async function createDraftForOrder(
   }
 
   // Enforced here rather than only in the UI, because a server action is a
-  // public endpoint reachable by id. `runConfirmationPipeline` always sets the
-  // order to confirmed before it calls this, so the confirm path is unaffected.
+  // public endpoint reachable by id. `can.draft` rather than `allowed`, so the
+  // rule the panel drew the button from is the rule that runs.
+  // `runConfirmationPipeline` always sets the order to confirmed before it
+  // calls this, so the confirm path is unaffected.
   const gate = shipmentGateFor(order);
-  if (!gate.allowed) return { ok: false, error: gate.reason };
+  if (!gate.can.draft) return { ok: false, error: gate.reason };
 
   const built = await buildShipmentInput(orderId);
   if (!built) return { ok: false, error: "Order not found" };
@@ -191,6 +201,72 @@ export async function createDraftForOrder(
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * Withdraw a staged draft — delete it in NimbusPost and forget the link here.
+ *
+ * The other half of draft-first. A draft costs nothing, which is exactly why
+ * one gets left behind on an order that was then cancelled, or delivered by
+ * hand: it sits in the NimbusPost list looking like work to do, and anyone
+ * reviewing that list can book it, which charges the wallet for a parcel that
+ * is not going anywhere.
+ *
+ * **The local link is cleared only if NimbusPost accepted the cancellation.**
+ * Forgetting it after a failure would leave a live draft there with nothing
+ * pointing at it, and the next press of "Send draft" would put a *second* one
+ * in the list for the same order.
+ *
+ * Refuses a booked parcel outright — an AWB is a shipment, and withdrawing
+ * that is `cancelShipment`, a different decision with a different cost.
+ */
+export async function cancelDraftForOrder(
+  orderId: string
+): Promise<{ ok: true; cancelled: boolean } | { ok: false; error: string }> {
+  if (!isNimbusPostConfigured()) {
+    return { ok: false, error: "NimbusPost isn't configured." };
+  }
+
+  const order = await prisma.order.findUnique({ where: { id: orderId } });
+  if (!order) return { ok: false, error: "Order not found" };
+  if (order.trackingNumber?.trim()) {
+    return {
+      ok: false,
+      error: `This order is booked (AWB ${order.trackingNumber}). A booked shipment is cancelled with the courier, not withdrawn as a draft.`,
+    };
+  }
+  if (!order.nimbusShipmentId) {
+    return { ok: true, cancelled: false };
+  }
+
+  try {
+    await cancelOrder(order.nimbusShipmentId, "withdrawn from the store admin");
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
+  const history = Array.isArray(order.statusHistory)
+    ? (order.statusHistory as unknown as { status: string; note?: string; at: string }[])
+    : [];
+  history.push({
+    status: order.status,
+    note: `Draft withdrawn from NimbusPost (was ${order.nimbusShipmentId}).`,
+    at: new Date().toISOString(),
+  });
+
+  await prisma.order.update({
+    where: { id: orderId },
+    data: {
+      nimbusShipmentId: null,
+      // The saved courier belonged to that draft. Leaving it would silently
+      // pre-pick a carrier for a parcel quoted at a different time.
+      nimbusCourierId: null,
+      nimbusCourierName: null,
+      statusHistory: history as unknown as object[],
+    },
+  });
+
+  return { ok: true, cancelled: true };
 }
 
 /**
@@ -487,7 +563,10 @@ export async function shipOrderNow(
 ): Promise<DispatchResult> {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { status: true, trackingNumber: true },
+    // `nimbusShipmentId` is part of the gate's answer, not decoration: it is
+    // what separates "ready" (Ship now) from "staged" (Book the draft), and a
+    // select that omits it hands the gate a half-truth.
+    select: { status: true, trackingNumber: true, nimbusShipmentId: true },
   });
   if (!order) return { ok: false, error: "Order not found" };
 
@@ -553,10 +632,15 @@ export type ConfirmationPipelineResult =
  * admin confirm (single and bulk), so "what happens on confirm" cannot differ
  * depending on who did the confirming.
  *
- * **Draft-first stays the default.** With `autoShipOnConfirm` off this stages
- * an unbooked NimbusPost draft and stops — no courier, no AWB, no wallet
- * charge — which is the review gate CLAUDE.md records as deliberate. Turning
- * the setting on is the only way past it.
+ * **Q1 (`dispatchOnConfirm`) decides how far this goes**, and only this
+ * function reads it:
+ *
+ *   - `off`   — return immediately. Nothing is staged, nothing is booked, and
+ *               the admin dispatches from the orders screen by hand.
+ *   - `draft` — stage the unbooked NimbusPost draft and stop. No courier, no
+ *               AWB, no wallet charge. **The default**, and the review gate
+ *               CLAUDE.md records as deliberate.
+ *   - `book`  — stage, then book. The only setting that spends money on its own.
  *
  * A booking that fails leaves the draft exactly where it was and reports the
  * error. It never writes `status: "shipped"`, and it records the failure in
@@ -567,9 +651,21 @@ export async function runConfirmationPipeline(
   orderId: string
 ): Promise<ConfirmationPipelineResult> {
   const pipeline = await getPipelineSettings();
+  const mode = dispatchModeOf(pipeline);
 
-  // Step 1 — always stage a draft. Free, idempotent, and the prerequisite for
-  // booking either way.
+  // Step 0 — "off" means off. Checked before anything is staged, because a
+  // draft the owner did not ask for still turns up in their NimbusPost list
+  // and still has to be deleted there by hand.
+  if (mode === "off") {
+    return {
+      outcome: "skipped",
+      message:
+        "Order automation is set to leave the courier alone on confirmation — dispatch it from the orders screen when you are ready.",
+    };
+  }
+
+  // Step 1 — stage a draft. Free, idempotent, and the prerequisite for booking
+  // either way.
   let staged: Awaited<ReturnType<typeof createDraftForOrder>>;
   try {
     staged = await createDraftForOrder(orderId);
@@ -608,7 +704,7 @@ export async function runConfirmationPipeline(
 
   // Step 2 — stop here unless the admin explicitly opted into unattended
   // booking. This is the default, and the whole review gate.
-  if (!pipeline.autoShipOnConfirm) {
+  if (mode !== "book") {
     if (!nimbusOrderId) {
       return { outcome: "skipped", message: "A shipment is already staged for this order." };
     }
@@ -637,9 +733,20 @@ export async function runConfirmationPipeline(
     const chosen = pickCourier(quote.options, pipeline.autoShipCourier);
     if (chosen) {
       await chooseCourierForOrder(orderId, chosen.courierId, chosen.name).catch(() => {});
+      // A pinned courier that isn't quoting for this parcel falls back to
+      // cheapest rather than leaving the parcel unshipped — but silently
+      // shipping with someone else is how a rate agreement gets broken without
+      // anyone noticing until the invoice.
+      if (
+        !isCourierStrategy(pipeline.autoShipCourier) &&
+        chosen.name.trim().toLowerCase() !==
+          String(pipeline.autoShipCourier).trim().toLowerCase()
+      ) {
+        caveat = `${pipeline.autoShipCourier} is pinned in Settings but did not quote for this parcel, so it went with ${chosen.name} instead.`;
+      }
     }
   } else {
-    caveat = `Could not price the couriers (${quote.error}), so NimbusPost allocated one instead of the ${pipeline.autoShipCourier} option.`;
+    caveat = `Could not price the couriers (${quote.error}), so NimbusPost allocated one instead of the ${courierChoiceLabel(pipeline.autoShipCourier).toLowerCase()} option.`;
   }
 
   // Step 4 — book. This is the call that spends the wallet.
@@ -810,11 +917,18 @@ export async function syncOrderFromNimbus(orderId: string): Promise<SyncResult> 
       return { ok: true, outcome: "not-booked", orderStatus: state.orderStatus };
     }
 
+    // Never walk a finished order backwards. A draft left on a delivered order
+    // and booked late in the dashboard would otherwise flip it from Delivered
+    // to Shipped — the same regression `refreshTracking` guards against for a
+    // late courier scan.
+    const finished = new Set(["delivered", "returned", "cancelled"]);
+    const nextStatus = finished.has(order.status) ? order.status : "shipped";
+
     const history = Array.isArray(order.statusHistory)
       ? (order.statusHistory as unknown as { status: string; note?: string; at: string }[])
       : [];
     history.push({
-      status: "shipped",
+      status: nextStatus,
       note: `Booked in the NimbusPost dashboard${state.courierName ? ` (${state.courierName})` : ""} — AWB ${state.awb}`,
       at: new Date().toISOString(),
     });
@@ -822,7 +936,7 @@ export async function syncOrderFromNimbus(orderId: string): Promise<SyncResult> 
     await prisma.order.update({
       where: { id: orderId },
       data: {
-        status: "shipped",
+        status: nextStatus,
         courier: state.courierName,
         trackingNumber: state.awb,
         trackingUrl: state.trackingUrl,

@@ -449,7 +449,7 @@ export function MediaFilterBar({
             <SlidersHorizontal className="h-4 w-4" />
             <span className="hidden sm:inline">Filters</span>
             {active > 0 && (
-              <span className="grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1 text-[10px] font-semibold text-accent-foreground">
+              <span className="grid h-5 min-w-5 place-items-center rounded-lg bg-accent px-1 text-[10px] font-semibold text-accent-foreground">
                 {active}
               </span>
             )}

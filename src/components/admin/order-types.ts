@@ -6,6 +6,8 @@
  * `orders-table.tsx` re-exports `AdminOrder`, which is what the page imports.
  */
 
+import type { BulkVerb } from "@/lib/orders-pipeline";
+
 /** One entry of `Order.statusHistory`. */
 export type StatusEntry = {
   status: string;
@@ -103,6 +105,10 @@ export type CourierOption = {
  * export async functions — a plain `const` array exported from it fails the
  * build with no type error to warn you first. This module has no directive,
  * so the server action and the table can share one list.
+ *
+ * The *type* is `BulkVerb` from `lib/orders-pipeline`, where the rule for what
+ * each verb may run on lives. Aliasing rather than redeclaring is what stops a
+ * verb existing in the bar with no eligibility rule behind it.
  */
 export const BULK_ORDER_ACTIONS = [
   "confirm",
@@ -110,9 +116,9 @@ export const BULK_ORDER_ACTIONS = [
   "draft",
   "book",
   "sync",
-] as const;
+] as const satisfies readonly BulkVerb[];
 
-export type BulkOrderAction = (typeof BULK_ORDER_ACTIONS)[number];
+export type BulkOrderAction = BulkVerb;
 
 /** One row's outcome from a bulk run. Every selected order gets exactly one. */
 export type BulkRowResult = {
@@ -143,7 +149,10 @@ export const BULK_ACTION_META: Record<
     label: "Confirm",
     verb: "Confirming",
     tone: "solid",
-    confirm: "Confirm the selected orders? Each customer is emailed and a NimbusPost draft is staged.",
+    // Deliberately does not promise a draft: what confirming does with the
+    // courier is Q1 (`dispatchOnConfirm`), which can be off, draft or book.
+    confirm:
+      "Confirm the selected orders? Each customer is emailed, and what then reaches the courier is whatever Settings → Orders is set to.",
   },
   cancel: {
     label: "Cancel",

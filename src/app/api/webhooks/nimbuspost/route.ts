@@ -23,6 +23,25 @@
  *   "timestamp": "2024-07-01T14:30:00Z",
  *   "remark": "Delivered to customer"
  * }
+ *
+ * ## An AWB can belong to two different things
+ *
+ * NimbusPost sends the same payload shape for a forward shipment (order → the
+ * customer) and a reverse pickup (customer → us, for a return). Nothing in the
+ * body distinguishes them, so this route resolves the AWB against **both**
+ * `Order.trackingNumber` and `ReturnRequest.nimbusAwb`.
+ *
+ * This used to look only at orders, which meant every reverse scan was logged
+ * as "No order found — ignoring" and dropped: a return could never hear from
+ * the courier, and a pickup booked in the NimbusPost dashboard was invisible
+ * forever.
+ *
+ * The two must never be conflated. A reverse AWB written onto
+ * `Order.trackingNumber` would overwrite the forward AWB and feed reverse scans
+ * to the order's status machine — "collected from the customer" would read as
+ * "your order shipped", and a failed pickup would cancel a delivered order. If
+ * one AWB somehow matches both records this route **refuses to guess**: see the
+ * collision branch below.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -31,6 +50,8 @@ import { getSettings } from "@/lib/settings";
 import { sendOrderStatusEmail } from "@/lib/email";
 import { revalidatePath } from "next/cache";
 import { mapNimbusStatus, NOTIFY_STATUSES } from "@/lib/nimbus-status";
+import { applyReverseScan } from "@/lib/nimbus-returns";
+import { isRtoStatus } from "@/lib/returns";
 
 // ---------------------------------------------------------------------------
 // The status table and the "worth emailing about" set both live in
@@ -91,14 +112,84 @@ export async function POST(req: NextRequest) {
       ? new Date(String(body.timestamp ?? body.updated_at)).toISOString()
       : new Date().toISOString();
 
-  // ---- 3. Find the order by AWB -------------------------------------------
-  const order = await prisma.order
-    .findFirst({ where: { trackingNumber: awb } })
-    .catch(() => null);
+  // ---- 3. Resolve the AWB — forward shipment OR reverse pickup -------------
+  //
+  // Both are queried, always, rather than falling through from one to the
+  // other. Checking orders first and returning early is what made every reverse
+  // scan vanish; checking returns first would hide a collision just as well.
+  const [order, returnRequest] = await Promise.all([
+    prisma.order.findFirst({ where: { trackingNumber: awb } }).catch(() => null),
+    prisma.returnRequest
+      .findFirst({
+        where: { nimbusAwb: awb },
+        select: { id: true, requestNumber: true },
+      })
+      .catch(() => null),
+  ]);
+
+  // ---- 3a. Collision — refuse to guess ------------------------------------
+  //
+  // One AWB matching a forward shipment AND a reverse pickup cannot be resolved
+  // from this payload, and acting on either would be a coin flip that moves the
+  // wrong record: mark a live order cancelled, or mark a return received.
+  // Nothing is changed and the pairing is named loudly, because this is a data
+  // fault a human has to unpick, not an event to be absorbed.
+  if (order && returnRequest) {
+    console.error(
+      `[nimbus-webhook] AWB COLLISION ${awb} — matches order ${order.orderNumber} AND return ${returnRequest.requestNumber}. ` +
+        `Status "${nimbusStatusRaw}" NOT applied to either; one of the two records has the wrong AWB.`
+    );
+    return NextResponse.json(
+      {
+        received: true,
+        skipped: "awb-collision",
+        order: order.orderNumber,
+        return: returnRequest.requestNumber,
+      },
+      { status: 409 }
+    );
+  }
+
+  // ---- 3b. Reverse pickup — the goods are coming back ----------------------
+  if (returnRequest) {
+    // One shared write path with the poller (`syncReturnFromNimbus`), so push
+    // and poll can never disagree about what a scan meant — the exact drift
+    // lib/nimbus-status.ts was created to end.
+    const moved = await applyReverseScan(returnRequest.id, {
+      raw: nimbusStatusRaw || "Status update",
+      location: location || null,
+      courier: String(body.courier ?? body.courier_name ?? "").trim() || null,
+      by: "nimbus-webhook",
+    }).catch((err) => {
+      console.error("[nimbus-webhook] reverse scan failed:", err);
+      return null;
+    });
+
+    try {
+      revalidatePath("/admin/returns");
+      revalidatePath("/admin");
+    } catch {
+      // revalidatePath can throw outside a request context in some edge configs.
+    }
+
+    console.log(
+      `[nimbus-webhook] AWB ${awb} → "${nimbusStatusRaw}" on return ${returnRequest.requestNumber}${moved ? ` (now ${moved})` : " (recorded, status unchanged)"}`
+    );
+
+    // No customer email on the reverse leg: `sendOrderStatusEmail` speaks about
+    // an order's progress ("your order has shipped"), which is actively wrong
+    // for a parcel travelling the other way. A return-specific template is the
+    // right fix and belongs with the other mail in lib/email.ts.
+    return NextResponse.json({
+      received: true,
+      leg: "reverse",
+      status: moved ?? "recorded",
+    });
+  }
 
   if (!order) {
     // Could be from a test ping or a shipment not in our DB — not an error.
-    console.log(`[nimbus-webhook] No order found for AWB ${awb} — ignoring.`);
+    console.log(`[nimbus-webhook] No order or return found for AWB ${awb} — ignoring.`);
     return NextResponse.json({ received: true });
   }
 
@@ -114,6 +205,17 @@ export async function POST(req: NextRequest) {
   const noteParts = [nimbusStatusRaw || "Status update"];
   if (location) noteParts.push(`at ${location}`);
   if (remark && remark !== nimbusStatusRaw) noteParts.push(remark);
+  // RTO is spelled out rather than left as courier jargon. `mapNimbusStatus`
+  // turns "rto delivered" into the order status `cancelled`, which is correct
+  // for the order but says nothing about the parcel physically arriving back on
+  // our shelf — or about a prepaid customer who is now owed their money. The
+  // status can't carry that (there is no RTO order status), so the timeline
+  // does. Admin → Returns lists these under "Coming back to you".
+  if (isRtoStatus(nimbusStatusRaw)) {
+    noteParts.push(
+      "RTO — delivery failed, the parcel is being returned to you. Check whether a refund is owed."
+    );
+  }
   const note = noteParts.join(" — ");
 
   const history = Array.isArray(order.statusHistory)

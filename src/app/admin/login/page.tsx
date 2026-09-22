@@ -34,7 +34,7 @@ function LoginForm() {
       className="w-full max-w-sm rounded-3xl border border-border bg-card p-8"
     >
       <div className="mb-6 text-center">
-        <span className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-muted gold-text">
+        <span className="mx-auto grid h-12 w-12 place-items-center rounded-lg bg-muted gold-text">
           <Lock className="h-5 w-5" />
         </span>
         <h1 className="mt-4 font-serif text-2xl">Admin login</h1>

@@ -27,7 +27,7 @@ export function Workspace({ children }: { children: React.ReactNode }) {
           lines of prose above every section, on every visit. They are true
           forever and change nothing day to day, so they are behind the (i)
           instead — which is also the thing they are describing. */}
-      <h1 className="flex items-center gap-1.5 font-serif text-3xl">
+      <h1 className="flex items-center gap-1.5 font-serif text-2xl">
         Dashboard
         <InfoTip term="How to read this workspace">
           Every figure states its own definition behind the (i) beside it — if

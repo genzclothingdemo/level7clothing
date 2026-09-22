@@ -24,7 +24,10 @@ export function CartDrawer() {
             onClick={() => setOpen(false)}
           />
           <motion.aside
-            className="fixed right-0 top-0 z-50 flex h-full w-full max-w-md flex-col bg-card shadow-2xl"
+            // `pt-safe`/`pb-safe`: a full-height fixed panel starts at the
+            // literal top of the screen, which under `viewportFit: "cover"` is
+            // behind the Dynamic Island — the Close button was the casualty.
+            className="pt-safe pb-safe fixed right-0 top-0 z-50 flex h-full w-full max-w-md flex-col bg-card shadow-2xl"
             initial={{ x: "100%" }}
             animate={{ x: 0 }}
             exit={{ x: "100%" }}

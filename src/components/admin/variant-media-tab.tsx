@@ -374,7 +374,7 @@ export function VariantMediaTab({
                         <button
                           type="button"
                           onClick={() => setPreview(val, null)}
-                          className="absolute right-0.5 top-0.5 grid h-5 w-5 place-items-center rounded-full bg-black/70 text-white hover:bg-danger"
+                          className="absolute right-0.5 top-0.5 grid h-5 w-5 place-items-center rounded-lg bg-black/70 text-white hover:bg-danger"
                           aria-label="Clear preview"
                           title="Clear manual preview"
                         >
@@ -527,7 +527,7 @@ export function VariantMediaTab({
                               className="pointer-events-none object-cover"
                             />
                             {/* Drag handle hint */}
-                            <span className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-black/50 text-white opacity-0 transition-opacity group-hover:opacity-100">
+                            <span className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-lg bg-black/50 text-white opacity-0 transition-opacity group-hover:opacity-100">
                               <GripVertical className="h-3 w-3" />
                             </span>
                             {/* Set as preview / preview badge (manual choice) */}
@@ -549,7 +549,7 @@ export function VariantMediaTab({
                             <button
                               type="button"
                               onClick={() => removeFromGallery(val, img)}
-                              className="absolute bottom-1 right-1 grid h-5 w-5 place-items-center rounded-full bg-black/70 text-white opacity-0 transition-opacity hover:bg-danger group-hover:opacity-100"
+                              className="absolute bottom-1 right-1 grid h-5 w-5 place-items-center rounded-lg bg-black/70 text-white opacity-0 transition-opacity hover:bg-danger group-hover:opacity-100"
                               aria-label="Remove"
                             >
                               <X className="h-3 w-3" />
@@ -623,7 +623,7 @@ export function VariantMediaTab({
                                     if (isCommon) removeFromCommon(img);
                                     else removeFromGallery(val, img);
                                   }}
-                                  className="absolute right-0.5 top-0.5 grid h-4 w-4 place-items-center rounded-full bg-black/70 text-white opacity-0 transition-opacity hover:bg-danger group-hover:opacity-100"
+                                  className="absolute right-0.5 top-0.5 grid h-4 w-4 place-items-center rounded-lg bg-black/70 text-white opacity-0 transition-opacity hover:bg-danger group-hover:opacity-100"
                                   aria-label="Remove"
                                 >
                                   <X className="h-2.5 w-2.5" />
@@ -830,13 +830,13 @@ function GalleryGrid({
               Cover
             </span>
           )}
-          <span className="absolute left-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-black/50 text-white opacity-0 transition-opacity group-hover:opacity-100">
+          <span className="absolute left-1 top-1 grid h-5 w-5 place-items-center rounded-lg bg-black/50 text-white opacity-0 transition-opacity group-hover:opacity-100">
             <GripVertical className="h-3 w-3" />
           </span>
           <button
             type="button"
             onClick={() => onRemove(img)}
-            className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-black/70 text-white opacity-0 transition-opacity hover:bg-danger group-hover:opacity-100"
+            className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-lg bg-black/70 text-white opacity-0 transition-opacity hover:bg-danger group-hover:opacity-100"
             aria-label="Remove"
           >
             <X className="h-3 w-3" />

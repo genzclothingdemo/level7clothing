@@ -54,7 +54,7 @@ export default async function EditPortfolioPage({
       >
         <ChevronLeft className="h-4 w-4" /> Portfolio
       </Link>
-      <h1 className="mb-6 break-words font-serif text-3xl">Edit piece</h1>
+      <h1 className="mb-6 break-words font-serif text-2xl">Edit piece</h1>
 
       <PortfolioForm itemId={item.id} initial={initial} products={products} />
     </div>

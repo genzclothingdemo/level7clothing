@@ -20,7 +20,7 @@ export default async function NewPortfolioPage() {
       >
         <ChevronLeft className="h-4 w-4" /> Portfolio
       </Link>
-      <h1 className="mb-6 font-serif text-3xl">Add a piece</h1>
+      <h1 className="mb-6 font-serif text-2xl">Add a piece</h1>
 
       <PortfolioForm initial={EMPTY_PORTFOLIO_ITEM} products={products} />
     </div>

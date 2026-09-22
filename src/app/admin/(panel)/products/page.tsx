@@ -133,7 +133,7 @@ export default async function AdminProducts({
     <div>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-serif text-3xl">Products</h1>
+          <h1 className="font-serif text-2xl">Products</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {hasFilters
               ? `${products.length} of ${totalCount} product${totalCount === 1 ? "" : "s"} match your filters`
@@ -144,13 +144,13 @@ export default async function AdminProducts({
           <a
             href="/api/admin/products/export"
             download
-            className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2.5 text-sm font-medium hover:bg-muted transition-colors"
+            className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2.5 text-sm font-medium hover:bg-muted transition-colors"
           >
             <Download className="h-4 w-4" /> Export CSV
           </a>
           <Link
             href="/admin/products/new"
-            className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm text-primary-foreground hover:opacity-90"
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm text-primary-foreground hover:opacity-90"
           >
             <Plus className="h-4 w-4" /> Add product
           </Link>
@@ -178,7 +178,7 @@ export default async function AdminProducts({
           {!hasFilters && (
             <Link
               href="/admin/products/new"
-              className="mt-6 inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm text-primary-foreground"
+              className="mt-6 inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm text-primary-foreground"
             >
               <Plus className="h-4 w-4" /> Add product
             </Link>

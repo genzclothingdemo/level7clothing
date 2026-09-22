@@ -86,7 +86,7 @@ export default async function EditProductPage({
       >
         <ChevronLeft className="h-4 w-4" /> Back to products
       </Link>
-      <h1 className="mb-6 font-serif text-3xl">Edit product</h1>
+      <h1 className="mb-6 font-serif text-2xl">Edit product</h1>
       <ProductForm
         product={dto}
         categories={categories}

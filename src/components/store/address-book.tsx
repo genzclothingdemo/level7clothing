@@ -122,7 +122,7 @@ export function AddressBook({ addresses }: { addresses: SavedAddress[] }) {
           </InfoTip>
         </p>
         {!showForm && (
-          <Button variant="outline" size="sm" onClick={startAdd}>
+          <Button variant="outline" onClick={startAdd}>
             <Plus className="h-4 w-4" /> Add address
           </Button>
         )}
@@ -135,7 +135,7 @@ export function AddressBook({ addresses }: { addresses: SavedAddress[] }) {
             No saved addresses yet. Add one and checkout fills itself in.
           </p>
           <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
-            <Button size="sm" onClick={startAdd}>
+            <Button onClick={startAdd}>
               <Plus className="h-4 w-4" /> Add an address
             </Button>
             {/* No dead end: nothing to manage yet, so offer the way forward. */}
@@ -188,7 +188,6 @@ export function AddressBook({ addresses }: { addresses: SavedAddress[] }) {
                     <Button
                       type="button"
                       variant="danger"
-                      size="sm"
                       disabled={busyId === a.id}
                       onClick={() => onDelete(a.id)}
                     >
@@ -203,7 +202,6 @@ export function AddressBook({ addresses }: { addresses: SavedAddress[] }) {
                     <Button
                       type="button"
                       variant="ghost"
-                      size="sm"
                       onClick={() => setConfirmingId(null)}
                     >
                       Keep

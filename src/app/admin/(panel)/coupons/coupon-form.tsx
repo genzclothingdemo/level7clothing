@@ -179,14 +179,14 @@ export function CouponForm({
         <button
           type="button"
           onClick={() => router.back()}
-          className="rounded-full px-5 py-2.5 text-sm font-medium border border-input bg-transparent hover:bg-muted"
+          className="rounded-lg px-5 py-2.5 text-sm font-medium border border-input bg-transparent hover:bg-muted"
         >
           Cancel
         </button>
         <button
           type="submit"
           disabled={isSubmitting}
-          className="rounded-full px-5 py-2.5 text-sm font-medium bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+          className="rounded-lg px-5 py-2.5 text-sm font-medium bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
         >
           {isSubmitting ? "Saving..." : coupon ? "Update Coupon" : "Create Coupon"}
         </button>

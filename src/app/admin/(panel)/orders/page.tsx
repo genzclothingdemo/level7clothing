@@ -212,7 +212,7 @@ export default async function AdminOrders({
 
   return (
     <div>
-      <h1 className="font-serif text-3xl">Orders</h1>
+      <h1 className="font-serif text-2xl">Orders</h1>
       <p className="mt-1 text-sm text-muted-foreground tabular-nums">
         {hasFilters
           ? `${matchCount} of ${totalCount} order${totalCount === 1 ? "" : "s"} match your filters`

@@ -13,6 +13,7 @@ import {
   MapPin,
   PackageCheck,
   RefreshCw,
+  Trash2,
   Truck,
   X,
 } from "lucide-react";
@@ -24,6 +25,7 @@ import type { AdminOrder, CourierOption } from "@/components/admin/order-types";
 import { shipmentGateFor } from "@/lib/orders-pipeline";
 import type { Collection } from "@/lib/orders-pipeline";
 import {
+  cancelOrderDraftAction,
   chooseCourierAction,
   draftOrderInNimbusAction,
   getCourierOptionsAction,
@@ -35,50 +37,116 @@ import {
 /**
  * The shipment half of an order.
  *
- * ## The state machine
+ * ## One gate decides what is on screen
  *
  * `shipmentGateFor()` (pure, in `lib/orders-pipeline.ts`, and the same function
- * the server actions enforce) answers one question — may this order reach the
- * courier right now — and this panel draws one of four things from its answer:
+ * the server actions enforce) answers *what may this order do with the courier
+ * right now*, and this panel draws its `can` flags — it never re-derives the
+ * rule from `order.status` or `order.trackingNumber` itself. That is the whole
+ * point: the button offered and the rule applied are one object.
  *
- * | gate            | what is on screen                                  |
- * |-----------------|----------------------------------------------------|
- * | `booked`        | tracking only: courier, AWB, link, last scan, Sync |
- * | `pending`       | one sentence saying to confirm it first            |
- * | `closed`        | one sentence: cancelled / payment failed           |
- * | allowed         | **Ship now** and **Draft in NimbusPost**           |
+ * | gate     | what is on screen                                        |
+ * |----------|----------------------------------------------------------|
+ * | `booked` | tracking only: courier, AWB, link, last scan, Sync        |
+ * | `pending`| one line — confirm the order first                        |
+ * | `closed` | one line — cancelled / payment failed                     |
+ * | `done`   | one line — delivered, nothing left to ship                |
+ * | `ready`  | **Ship now** · **Send draft**                             |
+ * | `staged` | **Book AWB** · Sync · cancel draft                        |
  *
- * Three things this fixes, all of which were live:
+ * The owner's complaint, verbatim: *"if order status pending/cancel, delivered
+ * hai to nimbus ka option show hi kyu kare? if AWB order draft or book ho gaya
+ * hai then us button ko hide karde."* Four of those six rows exist to answer
+ * it — a state with nothing to do shows one sentence, not a row of controls
+ * that will be refused.
  *
- * 1. **A booked parcel was still offered booking controls.** They were hidden
- *    on `trackingNumber`, but the panel beneath them then showed the AWB and
- *    the courier in *editable* inputs and nothing read-only — so the one fact
- *    you open a shipped order to read was a text box you could quietly break.
- *    Now a booked order gets a tracking view, and the hand-editing lives behind
- *    a fold that says what it is for.
- * 2. **A pending order was offered "Send draft".** Nobody has accepted that
- *    order yet. It now says why, in one line, instead of showing a control that
- *    the server would refuse.
- * 3. **One button meant two things.** Its label flipped between "Send draft"
- *    (free) and "Book & generate AWB" (spends the wallet) on hidden state, same
- *    colour, no confirmation. They are two buttons now, and the one that costs
- *    money names the courier, the charge and what the courier will collect
- *    before it runs.
+ * The one control that survives a dead state is **cancel draft**, and only when
+ * a draft really is staged. It cannot put anything on a courier; it withdraws
+ * something that is already there. A draft abandoned on a cancelled order is
+ * money waiting to be spent by whoever reviews the NimbusPost list next.
  */
 export function OrderTracking({ order }: { order: AdminOrder }) {
   const gate = shipmentGateFor(order);
 
-  if (gate.allowed) return <ShipmentActions order={order} />;
-  if (gate.code === "booked") return <BookedShipment order={order} />;
-  return <ShipmentBlocked order={order} code={gate.code} reason={gate.reason} />;
+  if (gate.can.tracking) return <BookedShipment order={order} canSync={gate.can.sync} />;
+  if (gate.allowed) return <ShipmentActions order={order} gate={gate} />;
+  return (
+    <ShipmentBlocked
+      order={order}
+      code={gate.code}
+      reason={gate.reason}
+      canCancelDraft={gate.can.cancelDraft}
+    />
+  );
 }
 
 /* ------------------------------------------------------------------ */
-/*  1. Blocked — pending, cancelled, payment failed                     */
+/*  Shared: withdraw a staged draft                                    */
 /* ------------------------------------------------------------------ */
 
 /**
- * One sentence, no controls.
+ * The undo for "Send draft".
+ *
+ * Confirmed first, because it deletes something in NimbusPost — but not warned
+ * about, because a draft costs nothing and leaving one behind is the more
+ * expensive mistake.
+ */
+function CancelDraftButton({
+  order,
+  tone = "ghost",
+}: {
+  order: AdminOrder;
+  tone?: "ghost" | "outline";
+}) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+
+  function run() {
+    if (
+      !confirm(
+        `Withdraw the unbooked draft for ${order.orderNumber} from NimbusPost?\n\nNothing has been charged for it, and you can send a new draft afterwards.`
+      )
+    ) {
+      return;
+    }
+    start(async () => {
+      const res = await cancelOrderDraftAction(order.id);
+      if (!res.ok) {
+        toast.error(res.error, { duration: 10000 });
+        return;
+      }
+      toast.success(
+        res.cancelled
+          ? "Draft withdrawn from NimbusPost."
+          : "There was no draft left to withdraw."
+      );
+      router.refresh();
+    });
+  }
+
+  return (
+    <Btn
+      tone={tone}
+      onClick={run}
+      disabled={pending}
+      title="Delete the unbooked draft in NimbusPost and unlink it from this order"
+    >
+      {pending ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+      ) : (
+        <Trash2 className="h-3.5 w-3.5" aria-hidden />
+      )}
+      Cancel draft
+    </Btn>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  1. Blocked — pending, cancelled, payment failed, delivered          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One sentence, no shipping controls.
  *
  * A disabled button is a worse answer than a sentence: it still reads as
  * "ship this", it gives no reason, and on a phone it is a 44px target that
@@ -88,33 +156,30 @@ function ShipmentBlocked({
   order,
   code,
   reason,
+  canCancelDraft,
 }: {
   order: AdminOrder;
-  code: "pending" | "closed";
+  code: "pending" | "closed" | "done" | "ready" | "staged" | "booked";
   reason: string;
+  canCancelDraft: boolean;
 }) {
   return (
-    <div
-      className={cn(
-        "flex flex-wrap items-start gap-2 rounded-lg border p-2.5",
-        code === "pending"
-          ? "border-border bg-muted/30"
-          : "border-border bg-muted/20"
-      )}
-    >
-      <Lock
-        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
-        aria-hidden
-      />
-      <p className="min-w-0 flex-1 text-xs leading-relaxed text-muted-foreground">
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-lg border border-border bg-muted/30 px-2.5 py-2">
+      <Lock className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+      <p className="min-w-0 flex-1 text-xs text-muted-foreground">
         {reason}
         <InfoTip term="Why there is nothing to press">
           {code === "pending" ? (
             <>
               Confirming is the point an order stops being a request and becomes
-              work: the customer is emailed and a free, unbooked draft is staged
-              with NimbusPost. Use <b>Confirm order</b> above. Shipping controls
-              appear here the moment it is confirmed.
+              work. Use <b>Confirm order</b> above; the shipping controls appear
+              here the moment it is confirmed.
+            </>
+          ) : code === "done" ? (
+            <>
+              This order has already arrived, so there is no forward leg left to
+              book. A parcel coming back is a <b>return</b>, handled in Admin →
+              Returns, not a second shipment on this order.
             </>
           ) : (
             <>
@@ -125,10 +190,17 @@ function ShipmentBlocked({
           )}
         </InfoTip>
       </p>
-      {order.nimbusShipmentId && (
-        <Badge tone="info" title="A draft was staged before this order reached its current state.">
-          Draft still in NimbusPost
-        </Badge>
+
+      {canCancelDraft && (
+        <>
+          <Badge
+            tone="info"
+            title="An unbooked draft was staged before this order reached its current state. It is still sitting in NimbusPost."
+          >
+            <FileText className="h-2.5 w-2.5" aria-hidden /> Draft still staged
+          </Badge>
+          <CancelDraftButton order={order} />
+        </>
       )}
     </div>
   );
@@ -144,14 +216,17 @@ function ShipmentBlocked({
  * old panel broke, and the reason is money: a second booking is a second AWB,
  * a second parcel and a second charge against one order.
  */
-function BookedShipment({ order }: { order: AdminOrder }) {
+function BookedShipment({
+  order,
+  canSync,
+}: {
+  order: AdminOrder;
+  canSync: boolean;
+}) {
   const router = useRouter();
   const [syncing, startSync] = useTransition();
   const [editing, setEditing] = useState(false);
 
-  // Only a parcel this app staged can be looked up in NimbusPost; a hand-typed
-  // AWB has nothing there to sync against.
-  const viaNimbus = Boolean(order.nimbusShipmentId);
   const awb = order.trackingNumber ?? "";
 
   function sync() {
@@ -177,86 +252,73 @@ function BookedShipment({ order }: { order: AdminOrder }) {
   }
 
   return (
-    <div className="space-y-2.5">
-      {/* ---- The shipment, read-only ---- */}
-      <div className="rounded-lg border border-accent/40 bg-accent/5 p-2.5">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <PackageCheck className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden />
-          <span className="text-xs font-medium">
-            Booked{order.courier ? ` with ${order.courier}` : ""}
-          </span>
-          <InfoTip term="Booked">
-            This parcel has an AWB, so it exists with the courier. Booking
-            controls are hidden on purpose — booking again would create a second
-            shipment and charge your NimbusPost wallet twice for one order.
-          </InfoTip>
-        </div>
+    <div className="space-y-1.5">
+      {/* ---- The shipment, read-only. One row, because that is all it is. ---- */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-accent/40 bg-accent/5 px-2.5 py-1.5 text-xs">
+        <PackageCheck className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden />
+        <span className="font-medium">
+          Booked{order.courier ? ` · ${order.courier}` : ""}
+        </span>
+        <CopyableId id={awb} label="AWB" />
+        <InfoTip term="Booked">
+          This parcel has an AWB, so it exists with the courier. Booking
+          controls are hidden on purpose — booking again would create a second
+          shipment and charge your NimbusPost wallet twice for one order.
+        </InfoTip>
 
-        <dl className="mt-2 space-y-1">
-          <TrackRow label="Courier" value={order.courier ?? "Not recorded"} />
-          <TrackRow label="AWB" value={<CopyableId id={awb} label="AWB" />} />
-          <TrackRow
-            label="Tracking link"
-            value={
-              order.trackingUrl ? (
-                <BtnLink
-                  href={order.trackingUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="px-2"
-                >
-                  <ExternalLink className="h-3 w-3" aria-hidden /> Open
-                </BtnLink>
-              ) : (
-                <span className="text-muted-foreground">None saved</span>
-              )
-            }
-          />
-        </dl>
+        {order.trackingUrl && (
+          <BtnLink
+            href={order.trackingUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="ml-auto px-2"
+            title="Open the courier's tracking page"
+          >
+            <ExternalLink className="h-3 w-3" aria-hidden /> Track
+          </BtnLink>
+        )}
       </div>
 
       {/* ---- Latest scan ---- */}
-      <div className="rounded-lg border border-border bg-muted/30 p-2.5">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-          <span className="font-medium">
-            {order.deliveryStatus ?? "Awaiting first scan"}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-border bg-muted/30 px-2.5 py-1.5 text-xs">
+        <span className="font-medium">
+          {order.deliveryStatus ?? "Awaiting first scan"}
+        </span>
+        {order.deliveryLocation && (
+          <span className="inline-flex items-center gap-1 text-muted-foreground">
+            <MapPin className="h-3 w-3" aria-hidden /> {order.deliveryLocation}
           </span>
-          {order.deliveryLocation && (
-            <span className="inline-flex items-center gap-1 text-muted-foreground">
-              <MapPin className="h-3 w-3" aria-hidden /> {order.deliveryLocation}
-            </span>
-          )}
-          {order.deliveryStatusAt && (
-            <span className="text-muted-foreground tabular-nums">
-              {new Date(order.deliveryStatusAt).toLocaleString("en-IN")}
-            </span>
-          )}
-          <InfoTip term="Courier scans">
-            Scans arrive on their own every 2 hours and whenever NimbusPost
-            sends a status webhook, so this is usually already current. Sync
-            asks the courier right now.
-            {order.lastSyncedAt
-              ? ` Last checked ${new Date(order.lastSyncedAt).toLocaleString("en-IN")}.`
-              : ""}
-          </InfoTip>
+        )}
+        {order.deliveryStatusAt && (
+          <span className="text-muted-foreground tabular-nums">
+            {new Date(order.deliveryStatusAt).toLocaleString("en-IN")}
+          </span>
+        )}
+        <InfoTip term="Courier scans">
+          Scans arrive on their own every 2 hours and whenever NimbusPost sends
+          a status webhook, so this is usually already current. Sync asks the
+          courier right now.
+          {order.lastSyncedAt
+            ? ` Last checked ${new Date(order.lastSyncedAt).toLocaleString("en-IN")}.`
+            : ""}
+        </InfoTip>
 
-          {viaNimbus && (
-            <Btn
-              tone="outline"
-              onClick={sync}
-              disabled={syncing}
-              className="ml-auto"
-              title="Ask NimbusPost where this parcel is now"
-            >
-              {syncing ? (
-                <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
-              ) : (
-                <RefreshCw className="h-3 w-3" aria-hidden />
-              )}
-              Sync
-            </Btn>
-          )}
-        </div>
+        {canSync && (
+          <Btn
+            tone="outline"
+            onClick={sync}
+            disabled={syncing}
+            className="ml-auto"
+            title="Ask NimbusPost where this parcel is now"
+          >
+            {syncing ? (
+              <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+            ) : (
+              <RefreshCw className="h-3 w-3" aria-hidden />
+            )}
+            Sync
+          </Btn>
+        )}
       </div>
 
       {/* ---- Hand-editing, folded ----
@@ -271,7 +333,7 @@ function BookedShipment({ order }: { order: AdminOrder }) {
         <button
           type="button"
           onClick={() => setEditing(true)}
-          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg text-[11px] text-muted-foreground underline underline-offset-2 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-9"
+          className="inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-lg text-[11px] text-muted-foreground underline underline-offset-2 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           Correct the courier details by hand
         </button>
@@ -280,40 +342,37 @@ function BookedShipment({ order }: { order: AdminOrder }) {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/*  3. Ready or staged — the manual dispatch path                      */
+/* ------------------------------------------------------------------ */
+
 /**
- * One `term: value` line of the booked shipment. Wraps, never truncates — an
- * AWB the admin cannot read is not a tracking view.
+ * The two depths of the manual path, triggered by a person — the same two the
+ * automatic path offers, which is the point:
  *
- * `min-h-11` on a phone because two of these hold real controls (the copy
- * button and the tracking link) and a row that hugs an 19px glyph is a
- * mis-tap between packing parcels.
+ *   - **Ship now** / **Book AWB** — live rates → pick a courier → a confirm
+ *     that names the courier, the wallet charge and what the courier collects
+ *     → book.
+ *   - **Send draft** — stage and stop. Free, reversible, no courier.
+ *
+ * Which pair is on screen comes from the gate, never from a local re-reading
+ * of `nimbusShipmentId`: `ready` shows Ship now + Send draft, `staged` shows
+ * Book AWB + Sync + cancel draft. "Send draft" is never rendered next to a
+ * staged draft, so the old disabled-button-that-says-Draft-staged is gone.
  */
-function TrackRow({
-  label,
-  value,
+function ShipmentActions({
+  order,
+  gate,
 }: {
-  label: string;
-  value: React.ReactNode;
+  order: AdminOrder;
+  gate: ReturnType<typeof shipmentGateFor>;
 }) {
-  return (
-    <div className="flex min-h-11 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border/60 text-xs last:border-0 sm:min-h-9">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 font-medium">{value}</dd>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  3. Ready to ship — two explicit actions                            */
-/* ------------------------------------------------------------------ */
-
-function ShipmentActions({ order }: { order: AdminOrder }) {
   const router = useRouter();
   const [drafting, startDraft] = useTransition();
   const [syncing, startSync] = useTransition();
   const [picking, setPicking] = useState(false);
 
-  const staged = Boolean(order.nimbusShipmentId);
+  const staged = gate.stage === "draft";
 
   function draft() {
     startDraft(async () => {
@@ -328,7 +387,7 @@ function ShipmentActions({ order }: { order: AdminOrder }) {
           : "Draft staged in NimbusPost — no courier, no AWB, nothing charged.",
         {
           description:
-            "Open the NimbusPost dashboard to book it, then press Sync here to pull the AWB back.",
+            "Book it here, or in the NimbusPost dashboard and then press Sync.",
           duration: 9000,
         }
       );
@@ -362,95 +421,83 @@ function ShipmentActions({ order }: { order: AdminOrder }) {
   const busy = drafting || syncing;
 
   return (
-    <div className="space-y-2.5">
-      {/* ---- Where this order stands ---- */}
-      <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground">
-        {staged ? (
-          <>
-            <Badge tone="info">
-              <FileText className="h-2.5 w-2.5" aria-hidden /> Draft staged
-            </Badge>
-            An unbooked draft is waiting in NimbusPost. Nothing has been charged.
-          </>
-        ) : (
-          <>
-            <Badge tone="neutral">
-              <Truck className="h-2.5 w-2.5" aria-hidden /> Not staged
-            </Badge>
-            Nothing has been sent to NimbusPost for this order yet.
-          </>
-        )}
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Badge tone={staged ? "info" : "neutral"} title={gate.reason}>
+          {staged ? (
+            <FileText className="h-2.5 w-2.5" aria-hidden />
+          ) : (
+            <Truck className="h-2.5 w-2.5" aria-hidden />
+          )}
+          {staged ? "Draft staged" : "Not staged"}
+        </Badge>
         <InfoTip term="Draft vs booked">
           A <b>draft</b> is an unbooked order sitting in NimbusPost: no courier,
-          no AWB, no charge, and you can delete it there. <b>Booking</b>{" "}
-          allocates the courier, generates the AWB and takes the money out of
-          your NimbusPost wallet. Those are the two buttons below, and they are
-          separate on purpose.
+          no AWB, no charge, and you can withdraw it. <b>Booking</b> allocates
+          the courier, generates the AWB and takes the money out of your
+          NimbusPost wallet. They are separate buttons on purpose.
         </InfoTip>
-      </p>
 
-      {/* ---- The two actions ---- */}
-      <div className="flex flex-wrap items-center gap-2">
-        <Btn
-          tone="accent"
-          onClick={() => setPicking((v) => !v)}
-          disabled={busy}
-          aria-expanded={picking}
-          title="Pick a courier from the live rates and book the AWB now"
-        >
-          {picking ? (
-            <>
-              <X className="h-3.5 w-3.5" aria-hidden /> Cancel
-            </>
-          ) : (
-            <>
-              <Truck className="h-3.5 w-3.5" aria-hidden /> Ship now
-            </>
+        <span className="ml-auto flex flex-wrap items-center gap-1.5">
+          {(gate.can.shipNow || gate.can.book) && (
+            <Btn
+              tone="accent"
+              onClick={() => setPicking((v) => !v)}
+              disabled={busy}
+              aria-expanded={picking}
+              title={
+                staged
+                  ? "Pick a courier from the live rates and book this draft now"
+                  : "Pick a courier from the live rates and book the AWB now"
+              }
+            >
+              {picking ? (
+                <>
+                  <X className="h-3.5 w-3.5" aria-hidden /> Cancel
+                </>
+              ) : (
+                <>
+                  <Truck className="h-3.5 w-3.5" aria-hidden />
+                  {staged ? "Book AWB" : "Ship now"}
+                </>
+              )}
+            </Btn>
           )}
-        </Btn>
 
-        <Btn
-          tone="outline"
-          onClick={draft}
-          disabled={busy || picking || staged}
-          title={
-            staged
-              ? "A draft is already staged — book it in the NimbusPost dashboard, then press Sync"
-              : "Stage the unbooked draft only. Free, and you can delete it in NimbusPost."
-          }
-        >
-          {drafting ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-          ) : (
-            <FileText className="h-3.5 w-3.5" aria-hidden />
+          {gate.can.draft && (
+            <Btn
+              tone="outline"
+              onClick={draft}
+              disabled={busy || picking}
+              title="Stage the unbooked draft only. Free, and you can withdraw it."
+            >
+              {drafting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : (
+                <FileText className="h-3.5 w-3.5" aria-hidden />
+              )}
+              Send draft
+            </Btn>
           )}
-          {staged ? "Draft staged" : "Draft in NimbusPost"}
-        </Btn>
 
-        {staged && (
-          <Btn
-            onClick={sync}
-            disabled={busy || picking}
-            title="Booked it in the NimbusPost dashboard? Pull the AWB in."
-          >
-            {syncing ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" aria-hidden />
-            )}
-            Sync from NimbusPost
-          </Btn>
-        )}
+          {gate.can.sync && (
+            <Btn
+              onClick={sync}
+              disabled={busy || picking}
+              title="Booked it in the NimbusPost dashboard? Pull the AWB in."
+            >
+              {syncing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+              )}
+              Sync
+            </Btn>
+          )}
+
+          {gate.can.cancelDraft && !picking && <CancelDraftButton order={order} />}
+        </span>
       </div>
-
-      {!picking && (
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          <b className="text-foreground">Ship now</b> charges your NimbusPost
-          wallet and generates the AWB here.{" "}
-          <b className="text-foreground">Draft in NimbusPost</b> costs nothing
-          and leaves the booking to you in their dashboard.
-        </p>
-      )}
 
       {/* Conditionally rendered, never parked offscreen with a transform —
           see the modal note in CLAUDE.md. */}
@@ -466,9 +513,9 @@ function ShipmentActions({ order }: { order: AdminOrder }) {
 /* ------------------------------------------------------------------ */
 
 /**
- * The "Ship now" flow, in one panel: fetch the live rates for this parcel and
- * pincode, show what the courier will be told to collect, and book on one
- * confirmed press.
+ * The "Ship now" / "Book AWB" flow, in one panel: fetch the live rates for this
+ * parcel and pincode, show what the courier will be told to collect, and book
+ * on one confirmed press.
  *
  * The collection line is read straight off `resolveCollection()` via the
  * server — it is not recomputed here. That rule is what stops a prepaid
@@ -581,9 +628,9 @@ function CourierPicker({
 
   return (
     <div className="overflow-hidden rounded-lg border border-accent/40">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-accent/5 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-accent/5 px-2.5 py-1.5">
         <p className="text-[11px] font-medium uppercase tracking-wider">
-          Ship now — pick a courier
+          Pick a courier
         </p>
         <InfoTip term="Courier rates">
           What your NimbusPost wallet is charged if you book with that courier —
@@ -597,7 +644,7 @@ function CourierPicker({
       {collection && (
         <p
           className={cn(
-            "flex flex-wrap items-center gap-1.5 border-b border-border px-3 py-2 text-xs",
+            "flex flex-wrap items-center gap-1.5 border-b border-border px-2.5 py-1.5 text-xs",
             collection.paymentType === "cod"
               ? "bg-orange-500/10 text-orange-700 dark:text-orange-400"
               : "bg-muted/40 text-muted-foreground"
@@ -624,14 +671,14 @@ function CourierPicker({
       )}
 
       {loading && (
-        <p className="flex items-center gap-2 px-3 py-4 text-xs text-muted-foreground">
+        <p className="flex items-center gap-2 px-2.5 py-3 text-xs text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
           Checking live rates for {order.pincode}…
         </p>
       )}
 
       {quoteError && (
-        <div className="space-y-2 p-3">
+        <div className="space-y-1.5 p-2.5">
           <p className="flex items-start gap-1.5 text-xs text-danger">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
             <span>{quoteError}</span>
@@ -652,17 +699,17 @@ function CourierPicker({
         // The one place a horizontal scroller is acceptable: six numeric
         // columns that mean nothing stacked. It scrolls inside its own card,
         // so the page itself never overflows at 320px.
-        <div className="max-h-72 overflow-auto overscroll-contain">
+        <div className="max-h-64 overflow-auto overscroll-contain">
           <table className="w-full min-w-[540px] text-xs">
             <thead className="sticky top-0 bg-card">
               <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-muted-foreground">
-                <th className="px-2.5 py-1.5 font-medium">Courier</th>
-                <th className="px-2.5 py-1.5 font-medium">ETA</th>
-                <th className="px-2.5 py-1.5 font-medium">Forward</th>
-                <th className="px-2.5 py-1.5 font-medium">RTO</th>
-                <th className="px-2.5 py-1.5 font-medium">COD</th>
-                <th className="px-2.5 py-1.5 font-medium">Charge</th>
-                <th className="px-2.5 py-1.5" />
+                <th className="px-2.5 py-1 font-medium">Courier</th>
+                <th className="px-2.5 py-1 font-medium">ETA</th>
+                <th className="px-2.5 py-1 font-medium">Forward</th>
+                <th className="px-2.5 py-1 font-medium">RTO</th>
+                <th className="px-2.5 py-1 font-medium">COD</th>
+                <th className="px-2.5 py-1 font-medium">Charge</th>
+                <th className="px-2.5 py-1" />
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
@@ -670,7 +717,7 @@ function CourierPicker({
                 const picked = order.nimbusCourierId === c.courierId;
                 return (
                   <tr key={c.courierId} className={picked ? "bg-accent/5" : ""}>
-                    <td className="px-2.5 py-1.5">
+                    <td className="px-2.5 py-1">
                       <span className="font-medium">{c.name}</span>
                       {i === 0 && (
                         <Badge tone="success" className="ml-1.5">
@@ -691,29 +738,26 @@ function CourierPicker({
                         </span>
                       )}
                     </td>
-                    <td className="px-2.5 py-1.5 text-muted-foreground">
+                    <td className="px-2.5 py-1 text-muted-foreground">
                       {c.tatDays ? `${c.tatDays} d` : "—"}
                     </td>
-                    <td className="px-2.5 py-1.5 tabular-nums">
+                    <td className="px-2.5 py-1 tabular-nums">
                       {formatINR(c.forward)}
                     </td>
-                    <td className="px-2.5 py-1.5 tabular-nums text-muted-foreground">
+                    <td className="px-2.5 py-1 tabular-nums text-muted-foreground">
                       {c.rto ? formatINR(c.rto) : "—"}
                     </td>
-                    <td className="px-2.5 py-1.5 tabular-nums text-muted-foreground">
+                    <td className="px-2.5 py-1 tabular-nums text-muted-foreground">
                       {c.cod ? formatINR(c.cod) : "—"}
                     </td>
-                    <td className="px-2.5 py-1.5 font-medium tabular-nums">
+                    <td className="px-2.5 py-1 font-medium tabular-nums">
                       {formatINR(c.total)}
                     </td>
-                    <td className="px-2.5 py-1.5 text-right">
+                    <td className="px-2.5 py-1 text-right">
                       <Btn
                         tone="accent"
                         onClick={() => book(c)}
                         disabled={booking}
-                        // Full 44px on a phone rather than the usual dense
-                        // table height: this is the button that spends money,
-                        // in a row you reach by scrolling sideways.
                         className="px-2"
                         title={`Book with ${c.name} and charge your wallet ${formatINR(c.total)}`}
                       >
@@ -733,19 +777,19 @@ function CourierPicker({
       )}
 
       {options && options.length === 0 && (
-        <p className="p-3 text-xs text-muted-foreground">
+        <p className="p-2.5 text-xs text-muted-foreground">
           No courier quoted a rate for this parcel and pincode.
         </p>
       )}
 
       {order.nimbusCourierName && (
-        <p className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
+        <p className="flex flex-wrap items-center gap-2 border-t border-border px-2.5 py-1.5 text-[11px] text-muted-foreground">
           Saved choice: <b className="text-foreground">{order.nimbusCourierName}</b>
           <button
             type="button"
             onClick={clearChoice}
             disabled={booking}
-            className="inline-flex min-h-11 cursor-pointer items-center underline underline-offset-2 hover:text-foreground disabled:opacity-50 sm:min-h-0"
+            className="inline-flex min-h-9 cursor-pointer items-center underline underline-offset-2 hover:text-foreground disabled:opacity-50"
           >
             clear
           </button>
@@ -794,7 +838,7 @@ function ManualTracking({
   }
 
   return (
-    <div className="space-y-2 rounded-lg border border-border bg-muted/20 p-2.5">
+    <div className="space-y-1.5 rounded-lg border border-border bg-muted/20 p-2.5">
       <p className="flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
         Editing the courier details by hand
         <InfoTip term="Editing by hand">
@@ -806,12 +850,12 @@ function ManualTracking({
         </InfoTip>
       </p>
 
-      <div className="grid gap-2 sm:grid-cols-3">
+      <div className="grid gap-1.5 sm:grid-cols-3">
         <LabelledField label="Courier">
           <input
             value={courier}
             onChange={(e) => setCourier(e.target.value)}
-            className="input h-11 text-xs sm:h-9"
+            className="input h-9 text-xs"
             placeholder="e.g. Delhivery"
           />
         </LabelledField>
@@ -819,7 +863,7 @@ function ManualTracking({
           <input
             value={trackingNumber}
             onChange={(e) => setTrackingNumber(e.target.value)}
-            className="input h-11 text-xs sm:h-9"
+            className="input h-9 text-xs"
             placeholder="e.g. 1234567890"
           />
         </LabelledField>
@@ -827,13 +871,13 @@ function ManualTracking({
           <input
             value={trackingUrl}
             onChange={(e) => setTrackingUrl(e.target.value)}
-            className="input h-11 text-xs sm:h-9"
+            className="input h-9 text-xs"
             placeholder="https://…"
           />
         </LabelledField>
       </div>
 
-      <div className="flex flex-wrap justify-end gap-2">
+      <div className="flex flex-wrap justify-end gap-1.5">
         <Btn tone="ghost" onClick={onClose} disabled={pending}>
           Cancel
         </Btn>

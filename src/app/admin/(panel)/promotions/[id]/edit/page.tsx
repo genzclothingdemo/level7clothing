@@ -51,7 +51,7 @@ export default async function EditPromotionPage({
       >
         <ChevronLeft className="h-4 w-4" /> Promotions
       </Link>
-      <h1 className="mb-6 break-words font-serif text-3xl">Edit promotion</h1>
+      <h1 className="mb-6 break-words font-serif text-2xl">Edit promotion</h1>
 
       <PromotionForm
         promotionId={promotion.id}

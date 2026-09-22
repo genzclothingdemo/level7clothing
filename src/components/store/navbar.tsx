@@ -47,18 +47,29 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
 
   return (
     <>
-      {/* ── Top header (all sizes) ── */}
+      {/* ── Top header (all sizes) ──
+          `top-safe`, not `top-0`: a sticky element pins to the scrollport's
+          top edge, which with `viewportFit: "cover"` is underneath the Dynamic
+          Island. `top-safe` resolves to 0 in a browser tab. */}
       <header
         className={cn(
-          "sticky top-0 z-40 transition-all duration-500",
+          // NOT `transition-all`: that also transitions `top`, and `top` is now
+          // the safe-area inset. Rotating an iPhone changes that inset from
+          // 59px to 0, and `transition-all` turned the correction into a
+          // half-second slide of the whole header. Only the four properties
+          // that actually change on scroll are animated.
+          "sticky top-safe z-40 transition-[background-color,border-color,box-shadow,backdrop-filter] duration-500",
           scrolled
             ? "border-b border-border bg-background/80 shadow-lg shadow-primary/5 backdrop-blur-md"
             : "border-b border-transparent bg-background/0"
         )}
       >
-        <nav className="container-px mx-auto flex h-14 max-w-7xl items-center justify-between gap-3 md:h-20">
-          {/* Logo */}
-          <Link href="/" className="flex shrink-0 items-center gap-2">
+        <nav className="container-px mx-auto flex h-14 max-w-7xl items-center justify-between gap-2 md:h-20">
+          {/* Logo.
+              `min-w-0` + `truncate`, not `shrink-0`: at 320px the brand name
+              and the icon cluster together want more room than there is, and a
+              logo that refuses to give any back is how a row overflows. */}
+          <Link href="/" className="flex min-w-0 items-center gap-2">
             {settings.logoUrl ? (
               <Image
                 src={settings.logoUrl}
@@ -68,7 +79,12 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
                 className="h-7 w-auto object-contain md:h-8"
               />
             ) : (
-              <span className="font-serif text-xl tracking-tight md:text-2xl">
+              // Measured, not guessed: "Level7 Clothing" is 140px at 20px, the
+              // three icons are 132px and a 320px screen offers 280px of nav —
+              // 140 + 8 + 132 lands exactly on 280 and the name loses its last
+              // letters to the ellipsis. One step down to 18px costs 14px and
+              // buys the slack back. Only below 360px; 375 and up keep 20px.
+              <span className="truncate font-serif text-lg tracking-tight min-[360px]:text-xl md:text-2xl">
                 {settings.brandName}
               </span>
             )}
@@ -95,8 +111,21 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
             })}
           </ul>
 
-          {/* Right: action icons */}
-          <div className="flex items-center gap-1.5 md:gap-2">
+          {/*
+            Right: action icons.
+
+            Flush (`gap-0`), borderless and squared — see `.icon-btn` in
+            globals.css for why. The gaps existed to keep the old badges, which
+            hung OUTSIDE each circle, from colliding; the badges now sit inside
+            the button box, so the gaps have nothing left to do and the row
+            fits a 320px phone with room to spare.
+
+            Install and notifications deliberately do NOT live here — they are
+            in the utility strip above (announcement-bar.tsx). Five 44px
+            targets plus a wordmark is 220px of icons against 280px of usable
+            width at 320px, which is not a row, it is a queue.
+          */}
+          <div className="flex shrink-0 items-center gap-0 md:gap-0.5">
             {/*
               No search icon here, on either breakpoint.
               /shop carries a real search field with filters and sorting
@@ -118,7 +147,7 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
                 badge is the same number the customer sees on any device. */}
             <Link
               href="/wishlist"
-              className="relative grid h-11 w-11 place-items-center rounded-full border border-border transition-colors hover:border-primary/40 hover:bg-primary/5 cursor-pointer"
+              className="icon-btn"
               aria-label={
                 wishlistCount > 0
                   ? `Wishlist (${wishlistCount} saved)`
@@ -127,7 +156,7 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
             >
               <Heart className="h-[18px] w-[18px]" />
               {wishlistCount > 0 && (
-                <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1 text-[11px] font-medium text-accent-foreground">
+                <span className="absolute right-1 top-1 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[10px] font-medium text-accent-foreground ring-2 ring-background">
                   {wishlistCount > 9 ? "9+" : wishlistCount}
                 </span>
               )}
@@ -136,18 +165,18 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
             {/* Account — desktop only (mobile uses bottom bar) */}
             <Link
               href="/account"
-              className="relative hidden md:grid h-11 w-11 place-items-center rounded-full border border-border transition-colors hover:border-primary/40 hover:bg-primary/5 cursor-pointer"
+              className="icon-btn hidden md:grid"
               aria-label={account ? "My account" : "Log in"}
               title={account ? `Hi, ${account.name.split(" ")[0]}` : "Log in"}
             >
               <User className="h-[18px] w-[18px]" />
               {account && (
-                <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-success ring-2 ring-background" />
+                <span className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full bg-success ring-2 ring-background" />
               )}
             </Link>
             <button
               onClick={() => setOpen(true)}
-              className="relative grid h-11 w-11 place-items-center rounded-full border border-border transition-colors hover:border-primary/40 hover:bg-primary/5 cursor-pointer"
+              className="icon-btn"
               aria-label="Open cart"
             >
               <ShoppingBag className="h-[18px] w-[18px]" />
@@ -156,7 +185,7 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
                 // pops every time something is added to the cart.
                 <span
                   key={count}
-                  className="animate-pop absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-primary px-1 text-[11px] font-medium text-primary-foreground shadow-md shadow-primary/30"
+                  className="animate-pop absolute right-1 top-1 grid h-4 min-w-4 place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground ring-2 ring-background"
                 >
                   {count}
                 </span>
@@ -173,7 +202,10 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
         className={cn(
           "fixed bottom-0 inset-x-0 z-50 md:hidden",
           "border-t border-border bg-background/95 backdrop-blur-xl",
-          "pb-safe" // respects iPhone home-indicator
+          // Home indicator at the bottom, and the notch at whichever side it
+          // lands on in landscape — without `px-safe` the first tab sits under
+          // the camera housing on a rotated iPhone.
+          "pb-safe px-safe"
         )}
       >
         <ul className="flex items-stretch">

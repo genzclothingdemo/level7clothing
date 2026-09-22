@@ -7,24 +7,36 @@ import { getAdminSession } from "@/lib/auth";
 import { DEFAULT_SETTINGS } from "@/lib/settings";
 import { draftReturnPickup } from "@/lib/fulfilment";
 import {
+  bookReturnPickup,
+  listRtoOrders,
+  quoteReturnPickup,
+  syncAllOpenReturns,
+  syncReturnFromNimbus,
+} from "@/lib/nimbus-returns";
+import {
   DEFAULT_REFUND_SETTINGS,
   MAX_REFUND_REFERENCE_LENGTH,
   MAX_RETURN_REASONS,
   MAX_RETURN_REASON_LENGTH,
+  PARCEL_HOLDER_LABEL,
   REFUND_METHODS,
   RETURN_STATUSES,
   computeRefund,
   evaluateReturnEligibility,
   formatReturnDate,
   generateReturnNumber,
+  goodsAreBack,
   isReturnStatus,
   matchReturnReason,
   normaliseReturnReasons,
   normaliseUpiId,
+  parcelHolder,
+  reverseLegOf,
   type RefundMethod,
   type RefundOrder,
   type RefundSettings,
   type ReturnBlock,
+  type ReturnStatus,
 } from "@/lib/returns";
 
 async function requireAdmin() {
@@ -698,6 +710,16 @@ const paidSchema = z.object({
   upi: z.string().trim().max(100).optional(),
   /** Optional extra line for the customer. */
   note: z.string().trim().max(500).optional(),
+  /**
+   * "Pay anyway — I know the goods aren't back yet."
+   *
+   * Required only when there is money to send AND the parcel is demonstrably
+   * not with us. Deliberately a *choice* rather than a block: paying early is a
+   * legitimate goodwill call, and a hard refusal would only push the owner into
+   * ticking "received" dishonestly to get past it — which would destroy the one
+   * record of where the goods actually are. See `markRefundPaid`.
+   */
+  acknowledgeNotReceived: z.boolean().default(false),
 });
 
 export type MarkRefundPaidInput = z.input<typeof paidSchema>;
@@ -715,6 +737,21 @@ export type MarkRefundPaidInput = z.input<typeof paidSchema>;
  * that a settings change between approval and payout cannot move the number.
  * The only exception is a request approved before refunds existed, which has
  * no stored figure at all; that one is computed once, here, and then stored.
+ *
+ * ## Money and physical reality
+ *
+ * The status machine alone cannot answer "are the goods back?": `approved` is
+ * a payable status, and an approved return's parcel is normally still in the
+ * customer's hallway. So a payout is measured against the **reverse leg** —
+ * where the courier says the parcel actually is — and paying before it arrives
+ * requires `acknowledgeNotReceived`.
+ *
+ * That is a confirmation, not a block, and the difference matters: a hard
+ * refusal would be routed around by marking the return "received" when it
+ * isn't, which would corrupt the only record of where the goods are. The
+ * choice is instead made deliberately and written into the timeline, so
+ * "refunded before it came back" is auditable rather than indistinguishable
+ * from the normal path.
  */
 export async function markRefundPaid(input: MarkRefundPaidInput) {
   await requireAdmin();
@@ -799,6 +836,27 @@ export async function markRefundPaid(input: MarkRefundPaidInput) {
     };
   }
 
+  // Where the parcel actually is, from the reverse leg rather than from the
+  // return's status word. Same function the admin panel renders from, so the
+  // sentence on screen and the condition enforced here are one rule.
+  const legInput = {
+    status: existing.status as ReturnStatus,
+    nimbusOrderId: existing.nimbusOrderId,
+    nimbusAwb: existing.nimbusAwb,
+    nimbusError: existing.nimbusError,
+  };
+  const back = goodsAreBack(legInput);
+  const holder = parcelHolder(reverseLegOf(legInput));
+
+  if (net > 0 && !back && !data.acknowledgeNotReceived) {
+    return {
+      ok: false as const,
+      error: `${PARCEL_HOLDER_LABEL[holder]} — nothing has come back yet. Tick “pay before it arrives” if you mean to refund now anyway.`,
+      needsAcknowledgement: true as const,
+      holder,
+    };
+  }
+
   const now = new Date();
   const history = readHistory(existing.statusHistory);
   history.push({
@@ -807,6 +865,11 @@ export async function markRefundPaid(input: MarkRefundPaidInput) {
       [
         net > 0 ? `Refund of ${net} paid by ${method}` : "Closed with no payout",
         reference ? `ref ${reference}` : null,
+        // Recorded on the row, not just permitted. Six weeks later "why did we
+        // pay this one out early?" has an answer.
+        net > 0 && !back
+          ? `PAID BEFORE COLLECTION — ${PARCEL_HOLDER_LABEL[holder].toLowerCase()} at the time of payout`
+          : null,
         data.note?.trim() || null,
       ]
         .filter(Boolean)
@@ -967,11 +1030,32 @@ export async function setReturnStatus(id: string, status: string, note?: string)
   return { ok: true as const };
 }
 
-/** Retry a reverse pickup that failed (bad pincode, wallet, Nimbus outage). */
+/**
+ * Retry a reverse pickup **draft** that failed (bad pincode, Nimbus outage).
+ *
+ * Only ever re-stages a draft — it does not book, so it never spends the
+ * wallet. The stale draft id is cleared first so `draftReturnPickup` doesn't
+ * short-circuit on "already staged" after a half-succeeded attempt.
+ *
+ * Refuses outright once an AWB exists. Clearing `nimbusOrderId` on a booked
+ * shipment would orphan a real, already-paid-for courier job in NimbusPost and
+ * leave us drafting a second one beside it.
+ */
 export async function retryReturnPickup(id: string) {
   await requireAdmin();
-  // Clear the stale draft id so `draftReturnPickup` doesn't short-circuit on
-  // "already staged" when a previous attempt half-succeeded.
+
+  const existing = await prisma.returnRequest.findUnique({
+    where: { id },
+    select: { nimbusAwb: true },
+  });
+  if (!existing) return { ok: false as const, error: "Return request not found" };
+  if (existing.nimbusAwb) {
+    return {
+      ok: false as const,
+      error: `This pickup is already booked (AWB ${existing.nimbusAwb}). Use “Sync from NimbusPost” instead — re-drafting would leave a paid-for shipment orphaned.`,
+    };
+  }
+
   await prisma.returnRequest.update({
     where: { id },
     data: { nimbusOrderId: null, nimbusError: null },
@@ -981,6 +1065,81 @@ export async function retryReturnPickup(id: string) {
   return result.ok
     ? { ok: true as const }
     : { ok: false as const, error: result.error ?? result.skipped ?? "Could not book pickup" };
+}
+
+/* --------------------------------------------------- reverse leg: courier */
+
+/**
+ * What booking this pickup would cost, and what is in the wallet.
+ *
+ * Read before the confirmation is shown, so the charge can be **named** rather
+ * than implied. Read-only — it books nothing.
+ */
+export async function quoteReturnPickupAction(id: string) {
+  await requireAdmin();
+  const res = await quoteReturnPickup(id);
+  return res.ok
+    ? { ok: true as const, quote: res.quote }
+    : { ok: false as const, error: res.error };
+}
+
+/**
+ * Book a staged reverse draft — **this charges the NimbusPost wallet.**
+ *
+ * The only call in the returns flow that spends money, and it is deliberately
+ * separate from approval: approving a return is our decision, paying a courier
+ * is not the same act and must not ride along on it. Draft-first is enforced in
+ * `bookReturnPickup`, which refuses to create anything.
+ */
+export async function bookReturnPickupAction(id: string, courierId?: string | null) {
+  await requireAdmin();
+  const res = await bookReturnPickup(id, courierId ?? null);
+  revalidateReturns();
+  return res;
+}
+
+/**
+ * Pull a reverse booking (or its latest scan) back from NimbusPost.
+ *
+ * The returns-side twin of "Sync from NimbusPost" on an order. Needed for
+ * exactly the same reason: a draft booked in the NimbusPost dashboard has an
+ * AWB there and none here, and the status webhook matches on AWB — so without
+ * this, booking outside the admin means the return can never hear from the
+ * courier again.
+ */
+export async function syncReturnPickupAction(id: string) {
+  await requireAdmin();
+  const res = await syncReturnFromNimbus(id);
+  revalidateReturns();
+  return res;
+}
+
+/**
+ * Sync every open reverse shipment in one pass.
+ *
+ * The cron at `/api/cron/nimbus-sync` only walks `Order`, so reverse shipments
+ * are never polled automatically. Until that route calls `syncAllOpenReturns`
+ * too, this button is the way the queue catches up.
+ */
+export async function syncAllReturnPickupsAction() {
+  await requireAdmin();
+  const res = await syncAllOpenReturns();
+  revalidateReturns();
+  return res;
+}
+
+/**
+ * Forward shipments the courier is bringing back to us (RTO).
+ *
+ * Not customer-raised returns — there is no `ReturnRequest` behind these — but
+ * they end the same way: stock returning to the shelf and, on a prepaid order,
+ * money owed. They are surfaced on the returns screen because that is where
+ * someone is already looking for "goods coming back"; nothing else in the app
+ * mentions them outside an analytics count.
+ */
+export async function listRtoOrdersAction() {
+  await requireAdmin();
+  return listRtoOrders();
 }
 
 export async function deleteReturnRequest(id: string) {

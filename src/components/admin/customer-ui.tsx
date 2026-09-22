@@ -10,6 +10,17 @@
  */
 
 import Link from "next/link";
+import {
+  CreditCard,
+  IndianRupee,
+  Mail,
+  MessageCircle,
+  MessageSquare,
+  Phone,
+  RotateCcw,
+  ShoppingCart,
+  type LucideIcon,
+} from "lucide-react";
 import { Badge } from "@/components/admin/order-ui";
 import { InfoTip } from "@/components/store/info-tip";
 import { cn } from "@/lib/utils";
@@ -19,6 +30,7 @@ import {
   CUSTOMER_STATUS_TONE,
   type CustomerRecord,
   type CustomerSignal,
+  type CustomerSignalKind,
   type CustomerStatus,
 } from "@/lib/customers";
 
@@ -172,6 +184,143 @@ export function sourceSummary(customer: CustomerRecord): string {
  * to the person and five more destinations per row would fight it, and on
  * wherever the reader is meant to act — the detail page's strip.
  */
+/**
+ * One glyph per signal kind.
+ *
+ * The icon is not decoration, and it is the same rule `ORDER_STATUS` states in
+ * `order-ui`: roughly one man in twelve cannot separate warn-orange from
+ * danger-red, and this is a column people scan straight down. So each signal
+ * gets a **distinct shape** and a **number**, and the colour is the third cue
+ * rather than the only one.
+ */
+const SIGNAL_ICON: Record<CustomerSignalKind, LucideIcon> = {
+  unread: MessageCircle,
+  failed: CreditCard,
+  due: IndianRupee,
+  return: RotateCcw,
+  cart: ShoppingCart,
+};
+
+const SIGNAL_TONE: Record<CustomerSignalKind, string> = {
+  unread: "border-accent/30 bg-accent/10 text-accent hover:bg-accent/20",
+  failed: "border-danger/30 bg-danger/10 text-danger hover:bg-danger/20",
+  due: "border-orange-500/30 bg-orange-500/10 text-orange-600 hover:bg-orange-500/20 dark:text-orange-400",
+  return: "border-orange-500/30 bg-orange-500/10 text-orange-600 hover:bg-orange-500/20 dark:text-orange-400",
+  cart: "border-blue-500/30 bg-blue-500/10 text-blue-600 hover:bg-blue-500/20 dark:text-blue-400",
+};
+
+/**
+ * The list's "needs attention" cell: a colour icon and a count, not a sentence.
+ *
+ * It used to print the words — "1 PAYMENT FAILED · ₹10 DUE · 1 RETURN OPEN" —
+ * which was three word-chips wide on the row that needed the least reading.
+ * The label is still there, in the `title` and behind the number, so nothing
+ * is lost: what changed is that scanning the column is now a glance rather
+ * than a read.
+ *
+ * `label` already carries the count ("₹10 due", "2 unread"), so the number
+ * shown is pulled from the signal rather than recomputed — one source.
+ */
+export function SignalIcons({
+  signals,
+  className,
+}: {
+  signals: CustomerSignal[];
+  className?: string;
+}) {
+  if (signals.length === 0) {
+    return (
+      <span className={cn("text-xs text-muted-foreground", className)}>—</span>
+    );
+  }
+
+  return (
+    <span className={cn("inline-flex flex-wrap items-center gap-1", className)}>
+      {signals.map((s) => {
+        const Icon = SIGNAL_ICON[s.kind];
+        return (
+          <Link
+            key={s.kind}
+            href={s.href}
+            title={`${s.label} — ${s.help}`}
+            aria-label={`${s.label}. ${s.help}`}
+            className={cn(
+              "inline-flex h-7 items-center gap-1 rounded-md border px-1.5 text-[11px] font-medium leading-none tabular-nums transition-colors",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+              SIGNAL_TONE[s.kind]
+            )}
+          >
+            <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            {/* The leading number of "₹10 due" / "2 unread" — the part worth
+                seeing at a glance. Money keeps its symbol. */}
+            {s.label.split(" ")[0]}
+          </Link>
+        );
+      })}
+    </span>
+  );
+}
+
+/**
+ * How to reach someone, as actions rather than as printed data.
+ *
+ * The list used to print the full email, the full phone number and the city on
+ * every row — three lines of the longest strings on the screen, in a column
+ * nobody reads, on a page whose job is to let you *pick* a person. The address
+ * is still one hover (or one tap) away and still copyable from the detail
+ * page; what is gone is it being shouted at you eleven rows at a time.
+ */
+export function ContactActions({
+  email,
+  phone,
+  className,
+}: {
+  email?: string | null;
+  phone?: string | null;
+  className?: string;
+}) {
+  if (!email && !phone) {
+    return (
+      <span
+        className={cn("text-xs text-muted-foreground", className)}
+        title="No email and no phone number on any record for this person."
+      >
+        —
+      </span>
+    );
+  }
+
+  const cls =
+    "inline-grid h-8 w-8 place-items-center rounded-lg border border-border text-muted-foreground transition-colors hover:border-accent/40 hover:bg-accent/5 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+  return (
+    <span className={cn("inline-flex items-center gap-1", className)}>
+      {email && (
+        <a href={`mailto:${email}`} title={email} aria-label={`Email ${email}`} className={cls}>
+          <Mail className="h-3.5 w-3.5" aria-hidden="true" />
+        </a>
+      )}
+      {phone && (
+        <>
+          <a href={`tel:${phone}`} title={phone} aria-label={`Call ${phone}`} className={cls}>
+            <Phone className="h-3.5 w-3.5" aria-hidden="true" />
+          </a>
+          <a
+            href={`https://wa.me/${phone.replace(/\D/g, "")}`}
+            target="_blank"
+            rel="noreferrer"
+            title={`WhatsApp ${phone}`}
+            aria-label={`WhatsApp ${phone}`}
+            className={cls}
+          >
+            <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
+          </a>
+        </>
+      )}
+    </span>
+  );
+}
+
 export function SignalBadges({
   signals,
   linked = false,

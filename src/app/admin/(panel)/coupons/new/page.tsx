@@ -22,7 +22,7 @@ export default async function NewCouponPage() {
       >
         <ChevronLeft className="h-4 w-4" /> Coupons
       </Link>
-      <h1 className="mb-6 font-serif text-3xl">New coupon</h1>
+      <h1 className="mb-6 font-serif text-2xl">New coupon</h1>
 
       <CouponForm initial={EMPTY_COUPON} products={products} />
     </div>

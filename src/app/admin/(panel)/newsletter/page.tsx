@@ -14,7 +14,7 @@ export default async function AdminNewsletter() {
   return (
     <div>
       <div>
-        <h1 className="font-serif text-3xl">Newsletter</h1>
+        <h1 className="font-serif text-2xl">Newsletter</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           {active.length} active subscriber{active.length === 1 ? "" : "s"}
           {subscribers.length !== active.length &&

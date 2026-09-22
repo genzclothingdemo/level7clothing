@@ -151,7 +151,7 @@ export function AdminShell({
           <aside className="fixed left-0 top-0 z-50 h-full w-64 border-r border-border bg-card lg:hidden">
             <button
               onClick={() => setOpen(false)}
-              className="absolute right-3 top-4 grid h-9 w-9 place-items-center rounded-full hover:bg-muted"
+              className="absolute right-3 top-4 grid h-9 w-9 place-items-center rounded-lg hover:bg-muted"
               aria-label="Close"
             >
               <X className="h-5 w-5" />
@@ -163,22 +163,30 @@ export function AdminShell({
 
       {/* Main */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-border bg-background/80 px-4 backdrop-blur-md md:px-8">
+        {/* 56px, not 64px. This strip carries a hamburger, the signed-in
+            address and the theme toggle — it is chrome, and it was spending
+            more height than several of the panels underneath it. It is sticky,
+            so every pixel here is taken from every screen permanently. */}
+        <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border bg-background/80 px-4 backdrop-blur-md md:px-6">
           <button
             onClick={() => setOpen(true)}
-            className="grid h-10 w-10 place-items-center rounded-full hover:bg-muted lg:hidden"
+            className="grid h-10 w-10 place-items-center rounded-lg hover:bg-muted lg:hidden"
             aria-label="Open menu"
           >
             <Menu className="h-5 w-5" />
           </button>
           <div className="ml-auto flex items-center gap-3">
-            <span className="hidden text-sm text-muted-foreground sm:inline">
+            <span className="hidden text-xs text-muted-foreground sm:inline">
               {email}
             </span>
             <ThemeToggle />
           </div>
         </header>
-        <main className="flex-1 p-4 md:p-8">{children}</main>
+        {/* 24px, not 32px, and no max-width: the owner's note was that the
+            admin wastes space and reads zoomed. 32px on each side of a
+            content column that already sits behind a 256px sidebar is a lot
+            of nothing on a laptop. */}
+        <main className="flex-1 p-4 md:p-6">{children}</main>
       </div>
     </div>
   );

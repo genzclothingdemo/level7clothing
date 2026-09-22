@@ -26,7 +26,14 @@
  */
 
 import Link from "next/link";
-import { ArrowDown, ArrowRight, ArrowUp, CheckCircle2, Minus } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowDown,
+  ArrowRight,
+  ArrowUp,
+  CheckCircle2,
+  Minus,
+} from "lucide-react";
 import { InfoTip } from "@/components/store/info-tip";
 import { Disclosure } from "@/components/store/disclosure";
 import { cn, formatINR } from "@/lib/utils";
@@ -60,20 +67,31 @@ export function formatDelta(pct: number | null): string {
  * One titled section. `min-w-0` because a panel is almost always a grid item,
  * and a grid item's automatic minimum size is its content — one wide table
  * would otherwise widen the column and take the page with it at 320px.
+ *
+ * **There is no `subtitle`, on purpose.** Every panel used to print one, and on
+ * Overview the trend chart's ran to three lines of prose about IST midnight and
+ * refund dating *above the chart* — words competing with the figure they
+ * describe, on every visit, forever. The prose is not gone: `note` puts it in
+ * the same (i) as the definition, under a rule. One tap, nothing printed.
  */
 export function Panel({
   title,
   tip,
+  note,
   aside,
-  subtitle,
   children,
   className,
 }: {
   title: string;
+  /** The definition — what the figure in this panel actually measures. */
   tip?: React.ReactNode;
+  /**
+   * Scope, caveats and cross-references: what used to be the subtitle. Appended
+   * to the same (i) bubble under a hairline, and never rendered on the page.
+   */
+  note?: React.ReactNode;
+  /** Pinned right of the title — a badge, a `PanelLink`, a count. */
   aside?: React.ReactNode;
-  /** One line under the title — scope or caveat, never an explanation. */
-  subtitle?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
 }) {
@@ -84,15 +102,47 @@ export function Panel({
       <div className="mb-3 flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <h2 className="flex items-center gap-1 font-serif text-lg leading-none">
           {title}
-          {tip && <InfoTip term={title}>{tip}</InfoTip>}
+          {(tip || note) && (
+            <InfoTip term={title}>
+              {tip}
+              {note && (
+                // `span`, not `div` — InfoTip's body is a `<span>`, and a block
+                // element inside it is invalid HTML that React will hydrate
+                // differently from the server render.
+                <span className={cn("block", tip && "mt-2 border-t border-border pt-2")}>
+                  {note}
+                </span>
+              )}
+            </InfoTip>
+          )}
         </h2>
         {aside}
       </div>
-      {subtitle && (
-        <p className="-mt-1 mb-3 text-xs leading-relaxed text-muted-foreground">{subtitle}</p>
-      )}
       {children}
     </section>
+  );
+}
+
+/**
+ * The "view more" an owner asked for, as a panel's `aside`: one uppercase link
+ * to the section that has the detail behind this panel's figures.
+ *
+ * It replaces the sentence that used to sit under several panels — "Customers
+ * has the segments and the cohort retention behind these" — which was a
+ * paragraph doing a link's job.
+ */
+export function PanelLink({ href, children }: { href: string; children: React.ReactNode }) {
+  return (
+    <Link
+      href={href}
+      className={cn(
+        "inline-flex min-h-8 shrink-0 items-center gap-1 rounded-lg text-[11px] font-medium uppercase tracking-wider text-accent transition-colors hover:text-foreground",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+      )}
+    >
+      {children}
+      <ArrowRight className="h-3 w-3 shrink-0" aria-hidden="true" />
+    </Link>
   );
 }
 
@@ -111,25 +161,43 @@ export function StatTile({
   label,
   value,
   tip,
+  note,
   delta,
   deltaLabel,
   good = "up",
   sub,
   emphasis,
+  bare,
 }: {
   label: string;
   value: string;
   /** The metric's definition. Comes from `METRIC` — never written inline. */
   tip: React.ReactNode;
+  /** Scope and caveats, appended to the same (i) under a rule. Never printed. */
+  note?: React.ReactNode;
   /** Signed percent vs the previous window; `null` renders nothing. */
   delta?: number | null;
   /** Names the period being compared against, e.g. "vs previous 30 days". */
   deltaLabel?: string;
   good?: GoodDirection;
-  /** A second, smaller line — a count behind the money, a caveat. */
-  sub?: React.ReactNode;
+  /**
+   * One short line under the value — a count behind the money, never a
+   * sentence. Typed as `string` and rendered `truncate` on purpose: a row of
+   * four tiles each carrying a wrapped clause is four small paragraphs, which
+   * is what this row used to be. Anything longer belongs in `note`.
+   */
+  sub?: string;
   /** The one tile a view leads with. Exactly one per screen. */
   emphasis?: boolean;
+  /**
+   * No border, no surface, no padding — for tiles nested inside a `Panel`,
+   * where a bordered card on a card is a box drawn around nothing.
+   *
+   * Named `bare`, not `flat`: `flat` is already taken below for a delta of
+   * zero, and two meanings of one word inside forty lines is how a styling
+   * prop ends up silently reading a statistic.
+   */
+  bare?: boolean;
 }) {
   const showDelta = delta !== undefined && delta !== null;
   const rising = (delta ?? 0) > 0;
@@ -147,7 +215,8 @@ export function StatTile({
   return (
     <div
       className={cn(
-        "min-w-0 rounded-2xl border border-border bg-card p-4",
+        "min-w-0",
+        !bare && "rounded-2xl border border-border bg-card p-4",
         // The headline number takes the full width of a two-column phone grid.
         // At 320px a tile is ~140px, and a figure like ₹12,34,567 set at 30px
         // does not fit in that — it would wrap mid-number, which is worse than
@@ -157,24 +226,35 @@ export function StatTile({
     >
       <div className="flex items-start gap-1">
         <p className="eyebrow min-w-0 break-words">{label}</p>
-        <InfoTip term={label}>{tip}</InfoTip>
+        <InfoTip term={label}>
+          {tip}
+          {note && (
+            <span className="mt-2 block border-t border-border pt-2">{note}</span>
+          )}
+        </InfoTip>
       </div>
       <p
         className={cn(
-          "mt-2 font-medium leading-tight break-words",
-          emphasis ? "text-3xl sm:text-4xl" : "text-2xl"
+          "mt-1.5 font-medium leading-tight break-words",
+          emphasis ? "text-3xl sm:text-4xl" : bare ? "text-xl" : "text-2xl"
         )}
       >
         {value}
       </p>
       {showDelta && (
-        <p className={cn("mt-1.5 flex items-center gap-1 text-xs", tone)}>
+        <p className={cn("mt-1 flex items-center gap-1 text-xs", tone)}>
           <Arrow className="h-3 w-3 shrink-0" aria-hidden="true" />
           <span className="tabular-nums">{formatDelta(delta ?? null)}</span>
           {deltaLabel && <span className="truncate text-muted-foreground">{deltaLabel}</span>}
         </p>
       )}
-      {sub && <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{sub}</p>}
+      {sub && (
+        // One line, clipped. `title` keeps the whole string reachable on hover
+        // for the rare case where a count and its noun do not fit.
+        <p className="mt-1 truncate text-xs text-muted-foreground" title={sub}>
+          {sub}
+        </p>
+      )}
     </div>
   );
 }
@@ -245,19 +325,67 @@ export function Empty({ children }: { children: React.ReactNode }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Degraded banner                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * "A query failed, so a figure you are about to act on may be wrong."
+ *
+ * One line, because it is a banner and not an essay — the distinction between a
+ * reporting failure and a business one is the whole message and it is behind
+ * the (i). It lived as a near-identical three-line paragraph in five of the six
+ * sections, which is five chances for the wording to drift.
+ */
+export function Degraded() {
+  return (
+    <p className="flex flex-wrap items-center gap-x-1 rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger">
+      <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+      <span className="font-medium">A query failed — some figures may read zero.</span>
+      <InfoTip term="Query failed">
+        This is a reporting failure, not a business one: the database could not
+        be reached for at least one panel, and a panel that fails reads as zero
+        rather than as an error. Check the database connection before acting on
+        anything on this screen — in particular, do not read an empty chart as a
+        quiet week.
+      </InfoTip>
+    </p>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Caveat                                                             */
 /* ------------------------------------------------------------------ */
 
 /**
- * A stated limitation, in the flow of the page rather than in a footnote
- * nobody scrolls to. Deliberately plain — an admonition box with an icon and
- * a colour would read as an error, and none of these are errors.
+ * A stated limitation — kept in full, and closed.
+ *
+ * It used to print three or four lines of prose at the foot of a panel. Every
+ * one of them is true on the first visit and on the four-hundredth, so on an
+ * operational screen they are permanent furniture: the reader stops seeing
+ * them, and meanwhile they are the tallest thing under several panels.
+ *
+ * So the text is unchanged and the default is closed. One 44px row states that
+ * there is a caveat and names what kind; the sentences are one tap away. This
+ * is the same trade `NotMeasured` already makes, for the same reason.
+ *
+ * Deliberately still not an admonition box with an icon and a colour: none of
+ * these is an error, and dressing a measurement note in danger red teaches the
+ * reader to dismiss it.
  */
-export function Caveat({ children }: { children: React.ReactNode }) {
+export function Caveat({
+  label = "How to read this",
+  children,
+}: {
+  /** Names the kind of caveat, so a closed row is still informative. */
+  label?: string;
+  children: React.ReactNode;
+}) {
   return (
-    <p className="mt-3 border-l-2 border-border pl-3 text-xs leading-relaxed text-muted-foreground">
-      {children}
-    </p>
+    <div className="mt-2 border-t border-border/60">
+      <Disclosure label={label}>
+        <p className="text-xs leading-relaxed text-muted-foreground">{children}</p>
+      </Disclosure>
+    </div>
   );
 }
 

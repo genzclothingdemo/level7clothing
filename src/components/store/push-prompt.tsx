@@ -72,7 +72,7 @@ export function PushPrompt() {
       className={[
         // Sits above the fixed mobile tab bar rather than under it; on md+
         // there is no tab bar, so it meets the bottom edge.
-        "fixed inset-x-0 bottom-[calc(4rem+env(safe-area-inset-bottom,0px))] z-40 md:bottom-0",
+        "fixed inset-x-0 bottom-[calc(4rem+var(--sa-bottom))] z-40 md:bottom-0",
         "border-t border-background/15 bg-foreground text-background",
         // Opacity only. Its resting position is its own `bottom`, so an
         // interrupted animation can never strand it off screen.

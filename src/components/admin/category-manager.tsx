@@ -110,7 +110,7 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-serif text-3xl">Categories</h1>
+          <h1 className="font-serif text-2xl">Categories</h1>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
             Plain text names, top of the shelf. Open a category to manage the
             subcategories inside it — that&apos;s where products actually live.
@@ -118,7 +118,7 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
         </div>
         <button
           onClick={() => setShowAddForm((v) => !v)}
-          className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm text-primary-foreground hover:opacity-90 transition-opacity"
+          className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm text-primary-foreground hover:opacity-90 transition-opacity"
         >
           {showAddForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
           {showAddForm ? "Cancel" : "Add category"}
@@ -165,7 +165,7 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
             <button
               type="submit"
               disabled={pending}
-              className="inline-flex items-center gap-2 rounded-full bg-foreground px-5 py-2 text-sm font-medium text-background disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-lg bg-foreground px-5 py-2 text-sm font-medium text-background disabled:opacity-50"
             >
               {pending && <Loader2 className="h-4 w-4 animate-spin" />}
               Save Category
@@ -186,7 +186,7 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
           <button
             type="button"
             onClick={() => setQuery("")}
-            className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 cursor-pointer place-items-center rounded-full text-muted-foreground hover:bg-muted"
+            className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 cursor-pointer place-items-center rounded-lg text-muted-foreground hover:bg-muted"
             aria-label="Clear filter"
           >
             <X className="h-4 w-4" />
@@ -312,14 +312,14 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
                           <div className="flex justify-end gap-1.5">
                             <button
                               onClick={() => startEditing(cat)}
-                              className="grid h-9 w-9 place-items-center rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                              className="grid h-9 w-9 place-items-center rounded-lg border border-border text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
                               title="Edit"
                             >
                               <Edit2 className="h-3.5 w-3.5" />
                             </button>
                             <button
                               onClick={() => handleDelete(cat.id, cat.name)}
-                              className="grid h-9 w-9 place-items-center rounded-full border border-border text-muted-foreground hover:bg-danger/10 hover:text-danger hover:border-danger/20 transition-colors"
+                              className="grid h-9 w-9 place-items-center rounded-lg border border-border text-muted-foreground hover:bg-danger/10 hover:text-danger hover:border-danger/20 transition-colors"
                               title="Delete"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
@@ -361,7 +361,7 @@ export function CategoryManager({ initialCategories }: { initialCategories: Cate
             <button
               onClick={() => handleUpdate(editingId)}
               disabled={pending}
-              className="inline-flex items-center gap-2 rounded-full bg-foreground px-5 py-2 text-sm font-medium text-background disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-lg bg-foreground px-5 py-2 text-sm font-medium text-background disabled:opacity-50"
             >
               {pending && <Loader2 className="h-4 w-4 animate-spin" />}
               Update Details

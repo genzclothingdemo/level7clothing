@@ -414,7 +414,7 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 80, opacity: 0 }}
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-            className="fixed inset-x-0 bottom-[calc(3.75rem+env(safe-area-inset-bottom,0px))] z-40 border-t border-border bg-background/95 px-4 py-2.5 backdrop-blur-xl md:hidden"
+            className="fixed inset-x-0 bottom-[calc(3.75rem+var(--sa-bottom))] z-40 border-t border-border bg-background/95 px-4 py-2.5 backdrop-blur-xl md:hidden"
           >
             <div className="flex items-center gap-2">
               <div className="min-w-0 flex-1">

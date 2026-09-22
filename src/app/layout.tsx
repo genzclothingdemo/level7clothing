@@ -183,7 +183,23 @@ export default async function RootLayout({
       suppressHydrationWarning
       className={`${inter.variable} ${grotesk.variable} h-full`}
     >
-      <body className="min-h-full flex flex-col antialiased">
+      {/*
+        `pt-safe` / `px-safe` are what stop `viewportFit: "cover"` above from
+        putting the top bar under an iPhone's Dynamic Island once the store is
+        installed to the home screen. They are on `body` rather than on each
+        bar on purpose: the announcement strip, the promo banner and the sticky
+        header are all candidates for "the thing currently at the top edge", and
+        padding whichever one happens to be first is how you end up with a
+        59px gap between two of them. One inset, on the scroll container, and
+        every top-anchored element inherits the right starting point.
+
+        Both resolve to 0px in a browser tab, so nothing changes off-device.
+      */}
+      <body className="min-h-full flex flex-col antialiased pt-safe px-safe">
+        {/* Paints the band the status bar sits in, so content scrolling past
+            it is hidden behind an opaque strip instead of appearing under the
+            clock. Zero-height wherever there is no inset. */}
+        <div className="status-bar-scrim" aria-hidden="true" />
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}

@@ -218,23 +218,31 @@ export default async function AccountPage({
   }));
 
   return (
-    <div className="container-px mx-auto max-w-6xl py-8 md:py-12">
-      {/* ── Header ── */}
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="font-serif text-3xl md:text-4xl">
+    <div className="container-px mx-auto max-w-6xl py-6 sm:py-8 md:py-12">
+      {/* ── Header ──
+          `items-start`, not `items-end`: the greeting wraps to two lines at
+          320px and an end-aligned Log out then floated halfway down it.
+          `min-w-0` + `truncate` so a long first name pushes nothing off-screen. */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="truncate font-serif text-2xl sm:text-3xl md:text-4xl">
             Hello, {user.name.split(" ")[0]} 👋
           </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-1 text-xs text-muted-foreground sm:text-sm">
             Manage your profile, view orders, and explore our portfolio
           </p>
         </div>
         <form action={logout}>
+          {/* Squared, per the design system in CLAUDE.md. The label is hidden
+              below `sm` — at 320px "Log out" plus its border was 96px taken
+              from a heading that needed them; the icon carries it, and the
+              44px target is unchanged. */}
           <button
             type="submit"
-            className="inline-flex min-h-11 items-center gap-2 rounded-full border border-border px-4 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer"
+            className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-border px-3 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:px-4"
           >
-            <LogOut className="h-4 w-4" /> Log out
+            <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="sr-only sm:not-sr-only">Log out</span>
           </button>
         </form>
       </div>

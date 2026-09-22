@@ -15,6 +15,7 @@
 // `prisma` and any server-only import. Everything here is pure.
 
 import { formatINR } from "@/lib/utils";
+import { mapNimbusStatus } from "@/lib/nimbus-status";
 
 export const RETURN_STATUSES = [
   "pending",
@@ -63,6 +64,190 @@ export const OPEN_RETURN_STATUSES: ReturnStatus[] = [
   "picked_up",
   "received",
 ];
+
+/**
+ * How far along its lifecycle a status is, for the one rule every writer needs:
+ * **never walk a return backwards.** A late or duplicated courier scan must not
+ * turn a received parcel back into one in transit.
+ *
+ * `rejected` / `cancelled` are deliberately absent — they are side exits, not
+ * points on this line, and are handled by {@link isTerminalReturnStatus}.
+ */
+const RETURN_RANK: Record<ReturnStatus, number> = {
+  pending: 0,
+  approved: 1,
+  picked_up: 2,
+  received: 3,
+  refunded: 4,
+  rejected: -1,
+  cancelled: -1,
+};
+
+/** Nothing automated may move a return out of one of these. */
+export function isTerminalReturnStatus(status: ReturnStatus): boolean {
+  return status === "refunded" || status === "rejected" || status === "cancelled";
+}
+
+/**
+ * The next status a courier scan may set, or `null` for "leave it alone".
+ *
+ * Same discipline as `mapNimbusStatus` returning null: an event that doesn't
+ * clearly advance the request changes nothing, because a wrong automatic move
+ * is far worse than a missed one.
+ */
+export function advanceReturnStatus(
+  current: ReturnStatus,
+  proposed: ReturnStatus
+): ReturnStatus | null {
+  if (isTerminalReturnStatus(current)) return null;
+  if (RETURN_RANK[proposed] <= RETURN_RANK[current]) return null;
+  return proposed;
+}
+
+/* ------------------------------------------------------------ reverse leg */
+/*
+ * The physical journey of the goods coming back, which is a different thing
+ * from the *decision* recorded in `status`. An admin can mark a return
+ * "received" by hand the moment it is approved; that says what a human
+ * believes, not where the parcel is. These helpers answer the second question,
+ * and they are what the refund panel shows beside the payout button.
+ *
+ * There is NO second status vocabulary here. The courier's own words are read
+ * by `mapNimbusStatus` — the one table the webhook and the poller share — and
+ * translated into this store's return statuses by `reverseReturnStatus` below.
+ */
+
+export type ReverseLeg =
+  /** Nothing staged with the courier at all. */
+  | "none"
+  /** An unbooked draft exists in NimbusPost. No courier has been paid or sent. */
+  | "drafted"
+  /** Booked: an AWB exists and a courier is due to collect. */
+  | "booked"
+  /** Collected from the customer and travelling back to us. */
+  | "in_transit"
+  /** Back with us. */
+  | "back"
+  /** The courier leg broke — nothing is coming until someone acts. */
+  | "failed";
+
+export const REVERSE_LEG_LABEL: Record<ReverseLeg, string> = {
+  none: "No pickup arranged",
+  drafted: "Draft only — not booked",
+  booked: "Booked, awaiting collection",
+  in_transit: "On its way back",
+  back: "Back with you",
+  failed: "Pickup failed",
+};
+
+/** Who is physically holding the goods right now. */
+export type ParcelHolder = "customer" | "courier" | "store";
+
+export const PARCEL_HOLDER_LABEL: Record<ParcelHolder, string> = {
+  customer: "Still with the customer",
+  courier: "With the courier",
+  store: "Back with you",
+};
+
+/** Just the columns the reverse-leg reading needs, so any caller can build one. */
+export type ReverseLegInput = {
+  status: ReturnStatus;
+  /** The NimbusPost draft id, set the moment a reverse pickup is staged. */
+  nimbusOrderId?: string | null;
+  /** The reverse AWB. Only ever set once the draft has actually been booked. */
+  nimbusAwb?: string | null;
+  /** Last reverse-pickup failure, if any. */
+  nimbusError?: string | null;
+};
+
+/**
+ * Where the parcel has got to, read from the row rather than assumed.
+ *
+ * The return's own status is allowed to *win* — someone who ticks "received"
+ * has the box in their hands, whatever the courier's API last said — but it is
+ * never allowed to invent a courier leg that does not exist. A return sitting
+ * at "approved" with no draft is `none`, and that is exactly the state the
+ * refund panel needs to be able to say out loud.
+ */
+export function reverseLegOf(input: ReverseLegInput): ReverseLeg {
+  const { status } = input;
+
+  // A human has confirmed the goods are here. Nothing the courier says later
+  // moves this backwards.
+  if (status === "received" || status === "refunded") return "back";
+
+  if (input.nimbusError) return "failed";
+  if (status === "picked_up") return "in_transit";
+  if (input.nimbusAwb) return "booked";
+  if (input.nimbusOrderId) return "drafted";
+  return "none";
+}
+
+/**
+ * Who is holding the goods. The honest answer the refund action is shown
+ * beside — the point is not to block a payout but to stop one happening by
+ * accident while the box is still in the customer's hallway.
+ */
+export function parcelHolder(leg: ReverseLeg): ParcelHolder {
+  if (leg === "back") return "store";
+  if (leg === "in_transit") return "courier";
+  return "customer";
+}
+
+/**
+ * True when the goods are demonstrably back. The single rule both the admin UI
+ * and `markRefundPaid` branch on, so the checkbox the owner ticks and the
+ * condition the server enforces cannot drift.
+ */
+export function goodsAreBack(input: ReverseLegInput): boolean {
+  return parcelHolder(reverseLegOf(input)) === "store";
+}
+
+/**
+ * A courier status, for a parcel travelling the REVERSE leg, as one of this
+ * store's return statuses.
+ *
+ * Built on `mapNimbusStatus` on purpose — the courier vocabulary is read once,
+ * in one table, and only its *meaning* is reinterpreted here. On the reverse
+ * leg the two ends swap over:
+ *
+ *   `shipped`   — it left the customer, so the return is `picked_up`
+ *   `delivered` — it arrived at OUR warehouse, so the return is `received`
+ *
+ * Everything else returns `null`, i.e. "record the scan, change nothing".
+ * `cancelled` in particular must NOT cancel the return: a dead courier job
+ * means the pickup needs rebooking, not that the customer's return is void.
+ */
+export function reverseReturnStatus(raw: string | null | undefined): ReturnStatus | null {
+  switch (mapNimbusStatus(raw)) {
+    case "shipped":
+      return "picked_up";
+    case "delivered":
+      return "received";
+    default:
+      return null;
+  }
+}
+
+/**
+ * True when the courier is reporting a **return to origin** on a FORWARD
+ * shipment: delivery failed and the parcel is being carried back to us.
+ *
+ * Read off the raw courier text rather than `mapNimbusStatus`, which
+ * deliberately collapses RTO into `shipped` / `cancelled` and so cannot tell an
+ * ordinary cancellation apart from goods physically coming back. That
+ * distinction is the whole point: an RTO ends with stock on our shelf and money
+ * the customer may be owed, and nothing else in the pipeline says so.
+ */
+export function isRtoStatus(raw: string | null | undefined): boolean {
+  return /\brto\b|return to origin/i.test(String(raw ?? ""));
+}
+
+/** True once an RTO parcel has actually completed its journey back. */
+export function isRtoComplete(raw: string | null | undefined): boolean {
+  const v = String(raw ?? "").trim().toLowerCase();
+  return isRtoStatus(v) && (v.includes("delivered") || v.includes("received"));
+}
 
 /* ----------------------------------------------------------------- reasons */
 

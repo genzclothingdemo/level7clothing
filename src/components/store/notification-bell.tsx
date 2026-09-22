@@ -11,22 +11,24 @@ import { cn } from "@/lib/utils";
  * opens a small panel: what the current state is, the one control that changes
  * it, and a test send that proves it works.
  *
- * It renders **nothing at all** unless subscribing could actually succeed.
- * Three cases are hidden rather than shown disabled, because a control that
- * cannot do its job is worse than no control:
+ * It renders **nothing at all** when subscribing could never succeed, because a
+ * control that cannot do its job is worse than no control:
  *
  * - The deployment has no VAPID public key.
  * - The browser has no Push API (older Firefox ESR, most in-app webviews).
- * - iOS Safari in a normal tab. Apple only exposes `PushManager` once the site
- *   is installed to the home screen, so the bell would be a dead switch. The
- *   route out of that state is installation, which `InstallAppButton` already
- *   offers, so this component stays out of the way.
  *
- * The one state it does render without an enable button is `denied`: the site
- * cannot reopen that prompt, so the panel says where the real switch is.
+ * Two states render *without* an enable button, because in both the customer
+ * has somewhere to go and hiding the bell would hide the reason:
  *
- * Mount it in the navbar's right-hand icon cluster — see the note in that
- * file's icon row.
+ * - `denied` — the site cannot reopen that prompt, so the panel says where the
+ *   real switch is.
+ * - `needs-install` — iOS Safari in a normal tab. Apple only exposes
+ *   `PushManager` once the site is on the home screen. This used to render
+ *   nothing and let the account page's settings card carry the explanation;
+ *   that card is gone, so the rule lives here now, next to the control it
+ *   governs, pointing at the install icon beside it.
+ *
+ * Mounted in the utility strip above the navbar, via `AppQuickActions`.
  */
 export function NotificationBell({ className }: { className?: string }) {
   const push = usePush();
@@ -62,10 +64,14 @@ export function NotificationBell({ className }: { className?: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  if (push.support !== "ready") return null;
+  // `needs-install` is iOS-in-a-tab: the switch cannot work yet, but the way
+  // out is one tap away on the install icon beside this one, so the bell stays
+  // and explains rather than vanishing.
+  const needsInstall = push.support === "needs-install";
+  if (push.support !== "ready" && !needsInstall) return null;
 
-  const on = push.permission === "granted" && push.subscribed;
-  const blocked = push.permission === "denied";
+  const on = !needsInstall && push.permission === "granted" && push.subscribed;
+  const blocked = !needsInstall && push.permission === "denied";
   const Icon = on ? BellRing : Bell;
 
   return (
@@ -76,13 +82,23 @@ export function NotificationBell({ className }: { className?: string }) {
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
         aria-label={
-          on ? "Notifications are on" : blocked ? "Notifications are blocked" : "Turn on notifications"
+          on
+            ? "Notifications are on"
+            : blocked
+              ? "Notifications are blocked"
+              : "Turn on notifications"
         }
-        className="relative grid h-11 w-11 cursor-pointer place-items-center rounded-full border border-border transition-colors hover:border-primary/40 hover:bg-primary/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        // Squared and borderless, matching the rest of the top bar — see
+        // `.icon-btn` in globals.css.
+        className="icon-btn"
       >
         <Icon className="h-[18px] w-[18px]" />
+        {/* No `ring-background` here, unlike the navbar's badges: this button
+            sits on the inverted utility strip, where the surface behind it is
+            `--foreground`, not `--background`. The dot clears the bell glyph on
+            its own, so it needs no separator. */}
         {on && (
-          <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-success ring-2 ring-background" />
+          <span className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full bg-success" />
         )}
       </button>
 
@@ -95,6 +111,9 @@ export function NotificationBell({ className }: { className?: string }) {
           aria-label="Notifications"
           className={cn(
             "absolute right-0 top-full z-50 mt-2 w-[min(19rem,calc(100vw-2.5rem))] rounded-lg border border-border bg-card p-4 text-left shadow-xl",
+            // The strip this hangs from is inverted (`text-background`), and an
+            // inherited text colour there is white-on-white.
+            "text-foreground",
             "animate-[fadeIn_0.15s_ease-out_both] motion-reduce:animate-none"
           )}
         >
@@ -109,12 +128,25 @@ export function NotificationBell({ className }: { className?: string }) {
           </p>
 
           <p className="mt-2 text-sm leading-relaxed text-foreground">
-            {on
-              ? "On for this device. You'll hear about your orders."
-              : blocked
-                ? "Blocked for this site."
-                : "Off. Turn them on to hear when your order is packed and dispatched."}
+            {needsInstall
+              ? "Install the app first."
+              : on
+                ? "On for this device. You'll hear about your orders."
+                : blocked
+                  ? "Blocked for this site."
+                  : "Off. Turn them on to hear when your order is packed and dispatched."}
           </p>
+
+          {/* The rule this carries used to live in a paragraph on the account
+              page. iPhone genuinely cannot subscribe from a Safari tab, so the
+              only honest control here is a pointer to the icon next door. */}
+          {needsInstall && (
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+              iPhone only delivers notifications to an app on the home screen.
+              Add the store with the install icon beside this one, open it from
+              there, and this switch starts working.
+            </p>
+          )}
 
           {blocked && (
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
@@ -125,7 +157,7 @@ export function NotificationBell({ className }: { className?: string }) {
             </p>
           )}
 
-          {!blocked && (
+          {!blocked && !needsInstall && (
             <div className="mt-4 flex flex-wrap gap-2">
               <button
                 type="button"

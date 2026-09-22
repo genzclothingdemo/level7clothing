@@ -176,7 +176,7 @@ export function ProductGallery({
                 }}
                 aria-label={`View image ${i + 1}`}
                 className={cn(
-                  "relative h-[68px] w-[68px] shrink-0 overflow-hidden rounded-lg bg-muted transition-all duration-300 hover:-translate-y-0.5 md:h-[76px] md:w-[76px]",
+                  "relative h-[68px] w-[68px] shrink-0 overflow-hidden rounded-lg bg-muted transition-all duration-300 md:h-[76px] md:w-[76px]",
                   i === activeIndex
                     ? "ring-2 ring-primary ring-offset-1"
                     : "opacity-70 hover:opacity-100 hover:shadow-md"

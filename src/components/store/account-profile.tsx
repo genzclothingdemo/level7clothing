@@ -3,13 +3,12 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, MapPin, Plus } from "lucide-react";
+import { Loader2, MapPin, Plus, Smartphone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { InfoTip } from "@/components/store/info-tip";
 import { updateProfile } from "@/app/actions/account";
 import type { SavedAddress } from "@/app/actions/addresses";
 import { AddressSummary } from "./address-card";
-import { AppSettingsCard } from "@/components/store/app-settings-card";
 
 /**
  * Identity, and a read-only glance at where parcels go.
@@ -59,22 +58,15 @@ export function AccountProfile({
 
   return (
     <div className="space-y-4">
-      {/* Install + notifications, first.
-          Both were effectively unreachable before: install lived only in the
-          footer, and notifications could only be switched on from a prompt
-          bar that shows once and never returns — so anyone who dismissed it
-          had no way back. This is where people look for their own settings. */}
-      <AppSettingsCard />
-
       {/* ── Identity ── */}
-      <section className="rounded-lg border border-border bg-card p-5 sm:p-6">
+      <section className="rounded-lg border border-border bg-card p-4 sm:p-6">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="font-serif text-xl">Your details</h3>
+          <h3 className="font-serif text-lg sm:text-xl">Your details</h3>
           {!editing && (
             <button
               type="button"
               onClick={() => setEditing(true)}
-              className="inline-flex min-h-11 cursor-pointer items-center text-xs uppercase tracking-widest text-accent transition-colors hover:text-foreground"
+              className="-mr-2 inline-flex min-h-11 cursor-pointer items-center px-2 text-xs uppercase tracking-widest text-accent transition-colors hover:text-foreground"
             >
               Edit
             </button>
@@ -118,7 +110,7 @@ export function AccountProfile({
               account.
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button type="submit" size="sm" disabled={saving}>
+              <Button type="submit" disabled={saving}>
                 {saving ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" /> Saving…
@@ -130,7 +122,6 @@ export function AccountProfile({
               <Button
                 type="button"
                 variant="ghost"
-                size="sm"
                 disabled={saving}
                 onClick={() => {
                   setEditing(false);
@@ -151,9 +142,9 @@ export function AccountProfile({
       </section>
 
       {/* ── Default address: a summary, never a second editor ── */}
-      <section className="rounded-lg border border-border bg-card p-5 sm:p-6">
+      <section className="rounded-lg border border-border bg-card p-4 sm:p-6">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="font-serif text-xl">
+          <h3 className="font-serif text-lg sm:text-xl">
             Delivery address
             <InfoTip term="Default address">
               The address your checkout starts on. Your other saved addresses
@@ -164,7 +155,7 @@ export function AccountProfile({
             <button
               type="button"
               onClick={onManageAddresses}
-              className="inline-flex min-h-11 shrink-0 cursor-pointer items-center text-xs uppercase tracking-widest text-accent transition-colors hover:text-foreground"
+              className="-mr-2 inline-flex min-h-11 shrink-0 cursor-pointer items-center px-2 text-xs uppercase tracking-widest text-accent transition-colors hover:text-foreground"
             >
               Change
             </button>
@@ -193,7 +184,6 @@ export function AccountProfile({
               No delivery address saved yet.
             </p>
             <Button
-              size="sm"
               className="mt-4"
               type="button"
               onClick={onManageAddresses}
@@ -203,15 +193,41 @@ export function AccountProfile({
           </div>
         )}
       </section>
+
+      {/*
+        What is left of the old "App & notifications" card: one line.
+
+        The controls themselves moved to the strip at the top of every page
+        (`AppQuickActions`), where they cost two icons instead of ~40% of this
+        screen. This line exists only because moving them costs discoverability
+        — the account page is where people look for their own settings, and a
+        pointer is cheap. It is a sentence, not a section: no border, no
+        heading, no card.
+      */}
+      <p className="flex items-start gap-1.5 px-1 text-xs leading-relaxed text-muted-foreground">
+        <Smartphone className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span>
+          Install the app and switch order notifications on or off from the two
+          icons at the very top of the screen.
+        </span>
+      </p>
     </div>
   );
 }
 
 function Row({ term, desc }: { term: string; desc: string }) {
   return (
-    <div className="flex justify-between gap-4">
+    <div className="flex justify-between gap-3">
       <dt className="shrink-0 text-muted-foreground">{term}</dt>
-      <dd className="break-words text-right font-medium">{desc}</dd>
+      {/*
+        `min-w-0` is the load-bearing part. A flex item's default `min-width:
+        auto` refuses to shrink below its content, so `break-words` never got
+        the chance to break anything — an email address simply ran out past the
+        card's right edge at 320px. `break-all` on top of it, because
+        `overflow-wrap: break-word` will not split inside a long token that has
+        no break opportunity at all, which is exactly what an email is.
+      */}
+      <dd className="min-w-0 break-all text-right font-medium">{desc}</dd>
     </div>
   );
 }

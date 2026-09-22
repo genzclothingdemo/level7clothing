@@ -309,7 +309,7 @@ export function PhotoPicker({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-full border border-border px-4 py-2.5 text-sm hover:bg-muted"
+        className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg border border-border px-4 py-2.5 text-sm hover:bg-muted"
       >
         <Images className="h-4 w-4" />
         {label}
@@ -365,7 +365,7 @@ export function PhotoPicker({
                 <button
                   type="button"
                   onClick={close}
-                  className="grid h-11 w-11 shrink-0 cursor-pointer place-items-center rounded-full border border-border text-muted-foreground hover:bg-muted"
+                  className="grid h-11 w-11 shrink-0 cursor-pointer place-items-center rounded-lg border border-border text-muted-foreground hover:bg-muted"
                   aria-label="Close photo library"
                 >
                   <X className="h-4 w-4" />
@@ -490,7 +490,7 @@ export function PhotoPicker({
                             className="object-cover"
                           />
                           {on && (
-                            <span className="absolute right-1.5 top-1.5 grid h-6 w-6 place-items-center rounded-full bg-accent text-accent-foreground shadow">
+                            <span className="absolute right-1.5 top-1.5 grid h-6 w-6 place-items-center rounded-lg bg-accent text-accent-foreground shadow">
                               <Check className="h-3.5 w-3.5" />
                             </span>
                           )}

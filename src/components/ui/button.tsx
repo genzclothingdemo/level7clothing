@@ -23,8 +23,23 @@ const sizes: Record<Size, string> = {
   icon: "h-10 w-10",
 };
 
+/**
+ * `rounded-lg`, and no hover-bounce.
+ *
+ * Both were already the stated design system — CLAUDE.md says buttons are
+ * "squared `rounded-lg`, uppercase, wide tracking, **colour-change only**",
+ * and lists "button shine and hover-bounce" among the effects removed on
+ * purpose because they read as template rather than retail. The shine went
+ * (`.btn-shine` is now an inert `position: relative`, kept because a button
+ * may position a badge against it), but the pill shape and the
+ * `hover:-translate-y-0.5` survived here — on the one component every button
+ * on the storefront is built from.
+ *
+ * `transition-all` stays: the primary variant animates its shadow and
+ * brightness, which is colour and depth, not motion.
+ */
 const base =
-  "btn-shine inline-flex items-center justify-center gap-2 rounded-full font-medium tracking-wide transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer";
+  "btn-shine inline-flex items-center justify-center gap-2 rounded-lg font-medium tracking-wide transition-all duration-200 disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer";
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: Variant;

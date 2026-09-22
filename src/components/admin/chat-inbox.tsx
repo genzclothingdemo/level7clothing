@@ -475,7 +475,7 @@ export function ChatInbox({
         <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
           <span className="eyebrow">Conversations</span>
           {totalUnread > 0 && (
-            <span className="grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1.5 text-[11px] font-medium text-accent-foreground">
+            <span className="grid h-5 min-w-5 place-items-center rounded-lg bg-accent px-1.5 text-[11px] font-medium text-accent-foreground">
               {totalUnread}
             </span>
           )}
@@ -533,7 +533,7 @@ export function ChatInbox({
                           {shortAgo(t.lastMessageAt)}
                         </span>
                         {t.adminUnread > 0 && (
-                          <span className="grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1.5 text-[11px] font-medium text-accent-foreground">
+                          <span className="grid h-5 min-w-5 place-items-center rounded-lg bg-accent px-1.5 text-[11px] font-medium text-accent-foreground">
                             {t.adminUnread}
                           </span>
                         )}

@@ -151,15 +151,97 @@ body {
   display: none;
 }
 
-/* Bottom safe area for devices with home indicator (iPhones) */
-.pb-safe {
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+/* ---------------------------------------------------------------------------
+   Safe areas — notch, Dynamic Island, home indicator
+
+   `viewport.viewportFit = "cover"` in src/app/layout.tsx deliberately extends
+   the page under the status bar; that is what makes an installed app look
+   native. It is also what put the top bar UNDER the Dynamic Island once the
+   store was added to an iPhone 14's home screen: nothing padded the top, so in
+   `display: standalone` the announcement bar and the sticky header both drew
+   into a region the system owns.
+
+   Every inset is read ONCE into a custom property and consumed through `var()`
+   everywhere else. That indirection is the point, not decoration: `env()` can
+   only be exercised on a physical device, whereas a variable can be simulated
+   in any browser with
+
+     document.documentElement.style.setProperty("--sa-top", "59px")
+
+   which is how this was verified without an iPhone in hand. Keep new
+   safe-area code on these tokens rather than reaching for `env()` inline.
+
+   All of it sits inside `@layer` — see the cascade-layer note in CLAUDE.md: an
+   unlayered rule silently outranks every Tailwind utility.
+--------------------------------------------------------------------------- */
+@layer base {
+  :root {
+    --sa-top: env(safe-area-inset-top, 0px);
+    --sa-right: env(safe-area-inset-right, 0px);
+    --sa-bottom: env(safe-area-inset-bottom, 0px);
+    --sa-left: env(safe-area-inset-left, 0px);
+
+    /* Painted behind the status bar by `.status-bar-scrim`. Matches
+       `themeColor` in src/app/layout.tsx and `theme_color` in
+       src/app/manifest.ts — change one, change all three or a seam appears. */
+    --status-bar: #0a0a0a;
+  }
+  .dark {
+    --status-bar: #09090b;
+  }
 }
 
-/* Extra bottom padding on mobile so content doesn't hide behind the fixed tab bar */
-@media (max-width: 767px) {
-  .mobile-bottom-pad {
-    padding-bottom: calc(4rem + env(safe-area-inset-bottom, 0px));
+@layer utilities {
+  .pt-safe {
+    padding-top: var(--sa-top);
+  }
+  /* Bottom safe area for devices with a home indicator (iPhones) */
+  .pb-safe {
+    padding-bottom: var(--sa-bottom);
+  }
+  /* Landscape: the notch eats one edge, so anything pinned edge-to-edge needs
+     these or its first/last control lands under the camera housing. */
+  .px-safe {
+    padding-left: var(--sa-left);
+    padding-right: var(--sa-right);
+  }
+  /* For `position: sticky` chrome, which pins to the scrollport's top edge —
+     i.e. under the island — unless it is told otherwise. */
+  .top-safe {
+    top: var(--sa-top);
+  }
+
+  /* Extra bottom padding on mobile so content doesn't hide behind the fixed tab bar */
+  @media (max-width: 767px) {
+    .mobile-bottom-pad {
+      padding-bottom: calc(4rem + var(--sa-bottom));
+    }
+  }
+}
+
+@layer components {
+  /*
+   * Opaque strip behind the status bar / Dynamic Island.
+   *
+   * `body` carries `pt-safe`, so nothing STARTS underneath the island — but the
+   * page scrolls, and without this the content passing through that band would
+   * be half-hidden behind the system clock. A fixed scrim is the same thing a
+   * native app gets for free.
+   *
+   * Zero-height wherever there is no inset (every desktop browser, and Safari
+   * in a normal tab), so it costs nothing and needs no `display-mode` gate.
+   */
+  .status-bar-scrim {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--sa-top);
+    background: var(--status-bar);
+    /* Above the sticky header (z-40) and every overlay, because this band is
+       the system's, not the page's. */
+    z-index: 100;
+    pointer-events: none;
   }
 }
 
@@ -207,6 +289,44 @@ body {
     margin-bottom: 0.375rem;
     font-size: 0.8125rem;
     color: var(--muted-foreground);
+  }
+
+  /*
+   * Icon button — the top bar's chrome.
+   *
+   * These used to be 44px circles with a visible border each. Two problems:
+   * the design system in CLAUDE.md says buttons are squared `rounded-lg` and
+   * change colour only, so the circles were already off-system; and four
+   * bordered pills plus the gaps they needed to keep their badges apart cost
+   * more horizontal room than a 320px phone has once install and notification
+   * controls join the row.
+   *
+   * The CHROME shrank — border gone, gaps gone, corners squared. The hit area
+   * did not: still 44px square, which is the floor for a thumb.
+   *
+   * Hover is mixed from `currentColor`, so one class works unchanged on the
+   * light navbar and on the inverted utility strip above it; a second
+   * dark-background variant would otherwise be needed.
+   */
+  .icon-btn {
+    position: relative;
+    display: grid;
+    place-items: center;
+    height: 2.75rem;
+    width: 2.75rem;
+    border-radius: 0.5rem;
+    color: inherit;
+    cursor: pointer;
+    transition: background-color 0.15s, color 0.15s;
+  }
+  .icon-btn:hover {
+    background-color: color-mix(in srgb, currentColor 10%, transparent);
+  }
+  .icon-btn:focus-visible {
+    outline: 2px solid var(--ring);
+    /* Inset, because adjacent buttons are now flush — an outward ring would
+       be clipped by the neighbour. */
+    outline-offset: -2px;
   }
 }
 

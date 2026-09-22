@@ -98,7 +98,7 @@ export default async function AdminCoupons({
     <div className="min-w-0">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="font-serif text-3xl">Coupons</h1>
+          <h1 className="font-serif text-2xl">Coupons</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {filtered
               ? `${coupons.length} of ${allCoupons.length} match`

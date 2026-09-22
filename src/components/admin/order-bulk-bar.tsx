@@ -12,10 +12,48 @@ import { Badge, Btn } from "@/components/admin/order-ui";
 import {
   BULK_ACTION_META,
   BULK_ORDER_ACTIONS,
+  type AdminOrder,
   type BulkOrderAction,
   type BulkRunResult,
 } from "@/components/admin/order-types";
+import { summariseBulk } from "@/lib/orders-pipeline";
 import { bulkOrderAction } from "@/app/actions/admin";
+
+/**
+ * The verbs that dropped out of the bar entirely, and why — so a missing
+ * button is an answer rather than a mystery.
+ *
+ * Only ever one short line: the bar itself is two rows high, and an explanation
+ * that pushes the orders down the page is the thing this screen was being
+ * rebuilt to stop.
+ */
+function BulkSkipLine({
+  actions,
+  orders,
+}: {
+  actions: readonly BulkOrderAction[];
+  orders: AdminOrder[];
+}) {
+  const missing = actions
+    .map((action) => ({ action, ...summariseBulk(action, orders) }))
+    .filter((a) => a.eligible.length === 0);
+
+  if (missing.length === 0) return null;
+
+  return (
+    <p className="basis-full px-1 text-[11px] text-muted-foreground">
+      Not possible for this selection:{" "}
+      {missing.map((m, i) => (
+        <span key={m.action}>
+          {i > 0 ? ", " : ""}
+          <b className="font-medium">{BULK_ACTION_META[m.action].label}</b> (
+          {[...new Set(m.skipped.map((s) => s.reason))].join(", ")})
+        </span>
+      ))}
+      .
+    </p>
+  );
+}
 
 /**
  * Select rows, then act on the selection.
@@ -30,10 +68,18 @@ import { bulkOrderAction } from "@/app/actions/admin";
  * 2. **Every row reports back.** A run renders one line per order, success and
  *    failure alike. A bulk action that fails three rows silently is worse than
  *    no bulk action, because the operator stops checking.
+ * 3. **A verb is only offered when it is possible, and says what it will
+ *    skip.** Eligibility comes from `summariseBulk`/`bulkEligibilityFor` in
+ *    `lib/orders-pipeline` — the same pure rules the server action re-applies
+ *    before it runs a row, and for the three shipment verbs the same
+ *    `shipmentGateFor` the order card draws its buttons from. So "Book AWB" is
+ *    absent when nothing in the selection has a draft, and reads "Book AWB 2/5"
+ *    when only two of five do. The old bar offered all five verbs always and
+ *    let the report explain the three failures afterwards.
  */
 export function OrderBulkBar({
   visibleIds,
-  selectedIds,
+  selectedOrders,
   totalMatching,
   onToggleAll,
   onClear,
@@ -41,7 +87,8 @@ export function OrderBulkBar({
 }: {
   /** The order ids rendered on this page, in display order. */
   visibleIds: string[];
-  selectedIds: string[];
+  /** The selected rows themselves — eligibility needs more than the id. */
+  selectedOrders: AdminOrder[];
   /** Orders matching the active filters across every page. */
   totalMatching: number;
   onToggleAll: (next: boolean) => void;
@@ -55,21 +102,30 @@ export function OrderBulkBar({
   const [report, setReport] = useState<BulkRunResult | null>(null);
 
   const shown = visibleIds.length;
-  const selected = selectedIds.length;
+  const selected = selectedOrders.length;
   const allShownSelected = shown > 0 && selected === shown;
   const morePages = totalMatching > shown;
 
-  function run(action: BulkOrderAction) {
+  function run(action: BulkOrderAction, eligibleIds: string[], skipNote: string) {
     const meta = BULK_ACTION_META[action];
-    if (selected === 0) return;
-    if (meta.confirm && !confirm(`${meta.confirm}\n\n${selected} order(s) selected.`)) {
+    if (eligibleIds.length === 0) return;
+    if (
+      meta.confirm &&
+      !confirm(
+        `${meta.confirm}\n\n${eligibleIds.length} order(s) selected.${
+          skipNote ? `\n\n${skipNote}` : ""
+        }`
+      )
+    ) {
       return;
     }
 
     setBusyAction(action);
     start(async () => {
       try {
-        const res = await bulkOrderAction(selectedIds, action);
+        // Only the rows that can take it are sent. The action re-checks each
+        // one anyway — this just means the report is not three-fifths excuses.
+        const res = await bulkOrderAction(eligibleIds, action);
         if (!res.ok) {
           toast.error(res.error || "Could not run that on the selection");
           return;
@@ -129,17 +185,47 @@ export function OrderBulkBar({
               {BULK_ORDER_ACTIONS.map((action) => {
                 const meta = BULK_ACTION_META[action];
                 const busy = busyAction === action;
+                const { eligible, skipped } = summariseBulk(action, selectedOrders);
+
+                // Not possible for a single selected row ⇒ not offered. A
+                // disabled button here would be one more thing to reason about
+                // on a bar that already has five.
+                if (eligible.length === 0) return null;
+
+                // "…skips 2: already booked, not confirmed yet" — the reasons,
+                // deduplicated, so it stays one line however many rows share a
+                // cause.
+                const reasons = [...new Set(skipped.map((s) => s.reason))];
+                const skipNote = skipped.length
+                  ? `Skips ${skipped.length} of ${selected}: ${reasons.join(", ")}.`
+                  : "";
+
                 return (
                   <Btn
                     key={action}
                     tone={meta.tone === "solid" ? "outline" : meta.tone}
-                    onClick={() => run(action)}
+                    onClick={() =>
+                      run(
+                        action,
+                        eligible.map((o) => o.id),
+                        skipNote
+                      )
+                    }
                     disabled={running}
                     className="min-h-11 sm:min-h-8"
-                    title={meta.confirm ?? `${meta.label} the ${selected} selected order(s)`}
+                    title={
+                      skipNote
+                        ? `${meta.label} ${eligible.length} of the ${selected} selected. ${skipNote}`
+                        : `${meta.label} all ${eligible.length} selected order(s)`
+                    }
                   >
                     {busy && <Loader2 className="h-3 w-3 animate-spin" aria-hidden />}
                     {busy ? meta.verb : meta.label}
+                    {skipped.length > 0 && (
+                      <span className="tabular-nums opacity-70">
+                        {eligible.length}/{selected}
+                      </span>
+                    )}
                   </Btn>
                 );
               })}
@@ -155,6 +241,12 @@ export function OrderBulkBar({
               <X className="h-3.5 w-3.5" aria-hidden /> Clear
             </Btn>
           </>
+        )}
+
+        {/* What the selection cannot do at all — named once, under the bar,
+            rather than discovered one failed row at a time. */}
+        {selected > 0 && (
+          <BulkSkipLine actions={BULK_ORDER_ACTIONS} orders={selectedOrders} />
         )}
       </div>
 

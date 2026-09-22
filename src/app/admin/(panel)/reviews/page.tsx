@@ -87,7 +87,7 @@ export default async function AdminReviews({
 
   return (
     <div>
-      <h1 className="font-serif text-3xl">Reviews</h1>
+      <h1 className="font-serif text-2xl">Reviews</h1>
       <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
         Every review a customer submits lands here <b>unpublished</b> — nothing
         appears on the storefront until you approve it. Product ratings are

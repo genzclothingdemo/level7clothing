@@ -114,7 +114,7 @@ function Lightbox({
       aria-labelledby={titleId}
       // `dvh`, not `vh` — see the header note.
       className={cn(
-        "fixed inset-0 z-[90] flex h-[100dvh] w-full items-center justify-center bg-background/95 p-3 sm:p-6",
+        "fixed inset-0 z-[90] flex h-[100dvh] w-full items-center justify-center bg-background/95 p-3 pt-[max(0.75rem,var(--sa-top))] pb-[max(0.75rem,var(--sa-bottom))] sm:p-6",
         "animate-[fadeIn_0.15s_ease-out_both] motion-reduce:animate-none"
       )}
       onClick={onClose}

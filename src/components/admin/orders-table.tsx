@@ -27,6 +27,7 @@ import { cn, formatINR, whatsappLink } from "@/lib/utils";
 import { CopyableId } from "@/components/admin/copy-id";
 import { InfoTip } from "@/components/store/info-tip";
 import { ExpandableText } from "@/components/store/expandable-text";
+import { Disclosure } from "@/components/store/disclosure";
 import { Check } from "@/components/admin/form-kit";
 import {
   Badge,
@@ -291,7 +292,7 @@ export function OrdersTable({
   // Intersected on read rather than trimmed on write: the rows underneath
   // change whenever the filters or the page number do, and a selection that
   // still counted a row nobody can see would make "3 of 25 selected" a lie.
-  const selectedIds = visibleIds.filter((id) => selected.has(id));
+  const selectedOrders = orders.filter((o) => selected.has(o.id));
 
   function toggleAll(next: boolean) {
     setSelected((prev) => {
@@ -317,7 +318,10 @@ export function OrdersTable({
     <div className="space-y-2">
       <OrderBulkBar
         visibleIds={visibleIds}
-        selectedIds={selectedIds}
+        // The rows themselves, not just their ids: the bar decides which verbs
+        // are possible with `shipmentGateFor`, which needs the order's status
+        // and its NimbusPost state.
+        selectedOrders={selectedOrders}
         totalMatching={totalMatching}
         onToggleAll={toggleAll}
         onClear={() => setSelected(new Set())}
@@ -585,6 +589,28 @@ function OrderRow({
   );
 }
 
+/**
+ * One expanded order, in the order the admin actually works in.
+ *
+ * The owner's complaint was that a single order ate the screen — *"abhi ek
+ * order status kitni space occupied karta hai… use dropdown & (i) button, make
+ * priority wised… dont create extra spacing padding margin"*. It was six
+ * equal-weight cards in a 2-column grid, each with its own header bar, each
+ * fully expanded whether or not anyone needed it. Everything had the same
+ * prominence, so nothing did.
+ *
+ * Three tiers now, by what the admin does with it:
+ *
+ * 1. **Act** — the status change and the one shipment action the gate allows.
+ *    Top, always visible, one strip.
+ * 2. **Check** — items, money, what the courier collects. Two columns, dense.
+ * 3. **Read-only** — address, notes, reference ids, history. Behind
+ *    `Disclosure` folds, each with a summary on the right so the fold usually
+ *    answers the question without being opened.
+ *
+ * Every explanation is behind an `InfoTip`; none of it is body text. That is
+ * most of the height that went.
+ */
 function OrderDetail({
   order: o,
   returnWindowDays,
@@ -597,183 +623,214 @@ function OrderDetail({
   const flagged = isCustom(o);
   const pay = paymentMeta(o);
   const rw = returnWindowState(o, returnWindowDays);
+  const itemCount = o.items.reduce((n, i) => n + i.quantity, 0);
 
   return (
-    <div className="grid gap-2.5 border-t border-border bg-muted/20 p-2.5 md:grid-cols-2">
-      {/* ---- Customisation banner ---- */}
-      {flagged && (
-        <div className="rounded-lg border border-accent/40 bg-accent/10 p-2.5 md:col-span-2">
-          <p className="flex flex-wrap items-center gap-1 text-xs font-medium text-accent">
-            <Sparkles className="h-3.5 w-3.5" aria-hidden /> Needs customisation
-            <InfoTip term="Needs customisation">
-              At least one piece in this order is made to order. Collect the
-              details below from the customer before you book the shipment —
-              customised pieces are also non-returnable by default.
-            </InfoTip>
-          </p>
-          {custom.length > 0 ? (
-            <ul className="mt-1.5 space-y-1">
-              {custom.map((it, i) => (
-                <li key={i} className="text-xs">
-                  <span className="font-medium">{it.name}</span>
-                  {it.customisationNote ? (
-                    <span className="text-muted-foreground">
-                      {" "}
-                      — collect: {it.customisationNote}
-                    </span>
-                  ) : (
-                    <span className="text-muted-foreground">
-                      {" "}
-                      — no collection note on this product yet
-                    </span>
-                  )}
-                  {it.note ? (
-                    <span className="mt-0.5 block text-muted-foreground">
-                      Customer wrote: {it.note}
-                    </span>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="mt-1 text-xs text-muted-foreground">
-              Flagged at checkout. The product has since changed, so check with
-              the customer what they expect.
+    <div className="space-y-1.5 border-t border-border bg-muted/20 p-1.5">
+      {/* ================= 1. ACT ================= */}
+      <div className="space-y-1.5 rounded-lg border border-border bg-card p-1.5">
+        {/* Made-to-order first: it is the one thing that must be settled
+            before anything below it is pressed. */}
+        {flagged && (
+          <div className="rounded-lg border border-accent/40 bg-accent/10 px-2.5 py-1.5">
+            <p className="flex flex-wrap items-center gap-1 text-xs font-medium text-accent">
+              <Sparkles className="h-3.5 w-3.5" aria-hidden /> Needs customisation
+              <InfoTip term="Needs customisation">
+                At least one piece in this order is made to order. Collect the
+                details from the customer before you book the shipment —
+                customised pieces are also non-returnable by default.
+              </InfoTip>
             </p>
-          )}
-        </div>
-      )}
-
-      {/* ---- Customer & delivery ---- */}
-      <Block
-        title="Customer & delivery address"
-        icon={<User />}
-        aside={rw ? <Badge tone={rw.tone} title={rw.title}>{rw.label}</Badge> : null}
-      >
-        <div className="space-y-1 text-xs">
-          <p className="font-medium">{o.customerName}</p>
-          <p>
-            <a
-              href={`mailto:${o.email}`}
-              className="break-all text-muted-foreground underline-offset-2 hover:text-accent hover:underline"
-            >
-              {o.email}
-            </a>
-          </p>
-          <p>
-            <a
-              href={`tel:${o.phone}`}
-              className="text-muted-foreground underline-offset-2 hover:text-accent hover:underline"
-            >
-              {o.phone}
-            </a>
-          </p>
-          <p className="flex gap-1.5 pt-1 text-muted-foreground">
-            <MapPin className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
-            <span>
-              {o.address}, {o.city}, {o.state} - {o.pincode}
-            </span>
-          </p>
-        </div>
-        <div className="mt-2.5">
-          <BtnLink
-            href={whatsappLink(o.phone, orderWhatsAppMessage(o, brandName))}
-            target="_blank"
-            rel="noreferrer"
-            className="border border-[#25D366]/45 text-[#128C7E] hover:bg-[#25D366]/10 dark:text-[#25D366]"
-            title="Send the order summary to the customer on WhatsApp"
-          >
-            <MessageCircle className="h-3.5 w-3.5" aria-hidden /> WhatsApp
-          </BtnLink>
-        </div>
-      </Block>
-
-      {/* ---- Items ---- */}
-      <Block
-        title="Items"
-        icon={<Package />}
-        aside={<Badge>{o.items.length}</Badge>}
-        bodyClassName="p-0"
-      >
-        <ul className="divide-y divide-border">
-          {o.items.map((it, i) => (
-            <ItemRow key={i} item={it} />
-          ))}
-        </ul>
-      </Block>
-
-      {/* ---- Payment ---- */}
-      <Block
-        title="Payment"
-        icon={<CreditCard />}
-        aside={
-          <Badge tone={pay.tone} title={pay.title}>
-            {pay.text}
-          </Badge>
-        }
-      >
-        <div className="space-y-1">
-          <Line label="Subtotal" value={formatINR(o.subtotal)} />
-          <Line
-            label="Shipping"
-            value={o.shipping === 0 ? "Free" : formatINR(o.shipping)}
-          />
-          {o.discountTotal ? (
-            <Line
-              label={`Discount${o.couponCode ? ` (${o.couponCode})` : ""}`}
-              value={`-${formatINR(o.discountTotal)}`}
-              tone="success"
-            />
-          ) : null}
-          <div className="mt-1 border-t border-border pt-1">
-            <Line label="Total" value={formatINR(o.total)} tone="foreground" strong />
+            {custom.length > 0 ? (
+              <ul className="mt-1 space-y-0.5">
+                {custom.map((it, i) => (
+                  <li key={i} className="text-xs">
+                    <span className="font-medium">{it.name}</span>
+                    <span className="text-muted-foreground">
+                      {" "}
+                      —{" "}
+                      {it.customisationNote
+                        ? `collect: ${it.customisationNote}`
+                        : "no collection note on this product yet"}
+                    </span>
+                    {it.note ? (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · customer wrote: {it.note}
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Flagged at checkout. The product has since changed, so check with
+                the customer what they expect.
+              </p>
+            )}
           </div>
-          {o.amountPaid > 0 && (
-            <Line label="Paid online" value={formatINR(o.amountPaid)} tone="success" />
-          )}
-          {o.balanceDue > 0 && (
-            <Line
-              label={
-                <span className="inline-flex items-center gap-0.5">
-                  Courier collects
-                  <InfoTip term="Courier collects">
-                    Exactly what the courier is told to take at the door. On a
-                    part-paid order this is the balance only — the advance you
-                    already took online is never collected twice. Marking the
-                    order paid drops it to nothing.
-                  </InfoTip>
-                </span>
-              }
-              value={formatINR(o.balanceDue)}
-              tone="accent"
-              strong
-            />
-          )}
-          <div className="pt-1">
-            <Line label="Method" value={o.paymentMethod} />
-          </div>
-        </div>
+        )}
 
-        <div className="mt-2.5">
-          <PaymentStatusPicker order={o} />
-        </div>
-      </Block>
-
-      {/* ---- Notes ---- */}
-      <NotesBlock order={o} />
-
-      {/* ---- Fulfilment & tracking ---- */}
-      <Block title="Fulfilment & tracking" icon={<Truck />} className="md:col-span-2">
         <StatusControls order={o} returnWindowDays={returnWindowDays} />
-        <div className="mt-2.5 border-t border-border pt-2.5">
-          <OrderTracking order={o} />
-        </div>
-      </Block>
+        <OrderTracking order={o} />
+      </div>
 
-      {/* ---- History ---- */}
-      <Block title="History" icon={<History />} className="md:col-span-2">
-        <HistoryList entries={o.statusHistory} />
-      </Block>
+      {/* ================= 2. CHECK ================= */}
+      <div className="grid gap-1.5 lg:grid-cols-2">
+        <Block
+          title="Items"
+          icon={<Package />}
+          aside={
+            <Badge>
+              {itemCount} unit{itemCount === 1 ? "" : "s"}
+            </Badge>
+          }
+          bodyClassName="p-0"
+        >
+          <ul className="divide-y divide-border">
+            {o.items.map((it, i) => (
+              <ItemRow key={i} item={it} />
+            ))}
+          </ul>
+        </Block>
+
+        <Block
+          title="Money"
+          icon={<CreditCard />}
+          aside={
+            <Badge tone={pay.tone} title={pay.title}>
+              {pay.text}
+            </Badge>
+          }
+          bodyClassName="p-2"
+        >
+          <div className="space-y-0.5">
+            <Line label="Subtotal" value={formatINR(o.subtotal)} />
+            <Line
+              label="Shipping"
+              value={o.shipping === 0 ? "Free" : formatINR(o.shipping)}
+            />
+            {o.discountTotal ? (
+              <Line
+                label={`Discount${o.couponCode ? ` (${o.couponCode})` : ""}`}
+                value={`-${formatINR(o.discountTotal)}`}
+                tone="success"
+              />
+            ) : null}
+            <div className="mt-0.5 border-t border-border pt-0.5">
+              <Line label="Total" value={formatINR(o.total)} tone="foreground" strong />
+            </div>
+            {o.amountPaid > 0 && (
+              <Line label="Paid online" value={formatINR(o.amountPaid)} tone="success" />
+            )}
+            {o.balanceDue > 0 && (
+              <Line
+                label={
+                  <span className="inline-flex items-center gap-0.5">
+                    Courier collects
+                    <InfoTip term="Courier collects">
+                      Exactly what the courier is told to take at the door. On a
+                      part-paid order this is the balance only — the advance you
+                      already took online is never collected twice. Marking the
+                      order paid drops it to nothing.
+                    </InfoTip>
+                  </span>
+                }
+                value={formatINR(o.balanceDue)}
+                tone="accent"
+                strong
+              />
+            )}
+          </div>
+
+          <div className="mt-1.5 flex flex-wrap items-end gap-1.5">
+            <PaymentStatusPicker order={o} />
+            <span className="pb-1.5 text-[11px] text-muted-foreground">
+              via {o.paymentMethod}
+            </span>
+          </div>
+        </Block>
+      </div>
+
+      {/* ================= 3. READ-ONLY ================= */}
+      <div className="divide-y divide-border rounded-lg border border-border bg-card px-2.5">
+        <Disclosure
+          label="Customer & address"
+          icon={<User className="h-3.5 w-3.5" />}
+          summary={`${o.customerName} · ${o.city}, ${o.state} ${o.pincode}`}
+        >
+          <div className="space-y-1 text-xs">
+            <p className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <a
+                href={`mailto:${o.email}`}
+                className="break-all text-muted-foreground underline-offset-2 hover:text-accent hover:underline"
+              >
+                {o.email}
+              </a>
+              <a
+                href={`tel:${o.phone}`}
+                className="text-muted-foreground underline-offset-2 hover:text-accent hover:underline"
+              >
+                {o.phone}
+              </a>
+              {rw && (
+                <Badge tone={rw.tone} title={rw.title}>
+                  {rw.label}
+                </Badge>
+              )}
+            </p>
+            <p className="flex gap-1.5 text-muted-foreground">
+              <MapPin className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+              <span>
+                {o.address}, {o.city}, {o.state} - {o.pincode}
+              </span>
+            </p>
+            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+              <BtnLink
+                href={whatsappLink(o.phone, orderWhatsAppMessage(o, brandName))}
+                target="_blank"
+                rel="noreferrer"
+                className="border border-[#25D366]/45 text-[#128C7E] hover:bg-[#25D366]/10 dark:text-[#25D366]"
+                title="Send the order summary to the customer on WhatsApp"
+              >
+                <MessageCircle className="h-3.5 w-3.5" aria-hidden /> WhatsApp
+              </BtnLink>
+              <CopyableId id={o.orderNumber} label="Order number" />
+              {o.nimbusShipmentId && (
+                <CopyableId id={o.nimbusShipmentId} label="NimbusPost draft" />
+              )}
+            </div>
+          </div>
+        </Disclosure>
+
+        <Disclosure
+          label="Notes"
+          icon={<MessageSquare className="h-3.5 w-3.5" />}
+          summary={
+            o.customerNote
+              ? "customer message live"
+              : o.note
+                ? "internal note"
+                : "none"
+          }
+        >
+          <NotesBlock order={o} />
+        </Disclosure>
+
+        <Disclosure
+          label="History"
+          icon={<History className="h-3.5 w-3.5" />}
+          summary={
+            o.statusHistory.length
+              ? `${o.statusHistory.length} entries · last ${statusMeta(
+                  o.statusHistory[o.statusHistory.length - 1].status
+                ).label.toLowerCase()}`
+              : "nothing recorded"
+          }
+        >
+          <HistoryList entries={o.statusHistory} />
+        </Disclosure>
+      </div>
     </div>
   );
 }
@@ -789,7 +846,7 @@ function ItemRow({ item: it }: { item: AdminOrderItem }) {
   const live = Boolean(it.slug);
 
   return (
-    <li className="flex gap-2.5 px-3 py-2">
+    <li className="flex gap-2.5 px-2.5 py-1.5">
       <div className="min-w-0 flex-1">
         <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
           {live ? (
@@ -820,7 +877,7 @@ function ItemRow({ item: it }: { item: AdminOrderItem }) {
         )}
 
         {/* 44px tall on phones so these are thumb-sized, tight on desktop. */}
-        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
           {live ? (
             <>
               <a
@@ -874,6 +931,7 @@ function PaymentStatusPicker({ order }: { order: AdminOrder }) {
 
   return (
     <LabelledField
+      className="w-44"
       label="Payment status"
       hint={
         <InfoTip term="Payment status">
@@ -974,18 +1032,18 @@ function StatusControls({
   }
 
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-1.5">
       {o.status === "pending" && (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 p-2.5">
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-2.5 py-1.5">
           <p className="flex items-center gap-1 text-xs text-foreground">
             {o.paymentStatus === "paid"
               ? "Paid online — confirm to start fulfilment."
               : "Waiting for your acceptance."}
             <InfoTip term="Confirming an order">
-              Confirming emails the customer and stages an unbooked draft in
-              NimbusPost. Nothing is charged to your wallet until you book it —
-              unless you have switched on automatic booking in Order
-              automation, above the list.
+              Confirming emails the customer. What it then does with the courier
+              — nothing, a free unbooked draft, or a booked AWB charged to your
+              wallet — is the <b>On confirm</b> setting shown above the list.
+              Either way you can still dispatch by hand from here.
             </InfoTip>
           </p>
           <Btn tone="accent" onClick={accept} disabled={pending} className="ml-auto">
@@ -999,8 +1057,12 @@ function StatusControls({
         </div>
       )}
 
-      <div className="grid gap-2 sm:grid-cols-[minmax(0,180px)_minmax(0,1fr)_auto] sm:items-end">
+      {/* One row: the status change, the optional message that rides with it,
+          and the two buttons. `items-end` so the labels sit above a single
+          baseline instead of each control finding its own. */}
+      <div className="flex flex-wrap items-end gap-1.5">
         <LabelledField
+          className="w-40"
           label="Order status"
           hint={
             returnWindowDays != null ? (
@@ -1026,6 +1088,7 @@ function StatusControls({
         </LabelledField>
 
         <LabelledField
+          className="flex-1 basis-56"
           label="Message with this update"
           hint={
             <InfoTip term="Status message">
@@ -1056,18 +1119,18 @@ function StatusControls({
           {pending && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />}
           Update status
         </Btn>
-      </div>
 
-      {o.status !== "cancelled" && o.paymentStatus !== "paid" && (
-        <Btn
-          tone="danger"
-          onClick={cancel}
-          disabled={pending}
-          title="Cancel this order and immediately return reserved stock"
-        >
-          <XCircle className="h-3.5 w-3.5" aria-hidden /> Cancel & restore stock
-        </Btn>
-      )}
+        {o.status !== "cancelled" && o.paymentStatus !== "paid" && (
+          <Btn
+            tone="danger"
+            onClick={cancel}
+            disabled={pending}
+            title="Cancel this order and immediately return reserved stock"
+          >
+            <XCircle className="h-3.5 w-3.5" aria-hidden /> Cancel
+          </Btn>
+        )}
+      </div>
     </div>
   );
 }
@@ -1111,74 +1174,75 @@ function NotesBlock({ order: o }: { order: AdminOrder }) {
   }
 
   return (
-    <Block
-      title="Notes"
-      icon={<MessageSquare />}
-      aside={
-        o.customerNote ? <Badge tone="accent">customer message live</Badge> : null
-      }
-    >
-      <div className="space-y-3">
-        <div>
-          <LabelledField
-            label="Message to the customer"
-            hint={
-              <InfoTip term="Message to the customer">
-                Shown in a highlighted callout on the customer&apos;s order page
-                and signed with your store name. Use it for anything they need
-                to act on — customisation details, a delay, a payment problem.
-              </InfoTip>
-            }
-          >
-            <textarea
-              value={customer}
-              onChange={(e) => setCustomer(e.target.value)}
-              rows={2}
-              placeholder="e.g. Send us the name to print by Friday and we'll dispatch Monday."
-              className="input text-xs"
-            />
-          </LabelledField>
-          <div className="mt-1.5 flex justify-end">
-            <Btn tone="accent" onClick={saveCustomer} disabled={savingCustomer}>
-              {savingCustomer && (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+    <div className="grid gap-2 md:grid-cols-2">
+      <div>
+        <LabelledField
+          label={
+            <>
+              Message to the customer
+              {o.customerNote && (
+                <Badge tone="accent" className="ml-1">
+                  live
+                </Badge>
               )}
-              Save message
-            </Btn>
-          </div>
-        </div>
-
-        <div className="border-t border-border pt-3">
-          <LabelledField
-            label="Internal note"
-            hint={
-              <InfoTip term="Internal note">
-                Staff only — it is not shown on the customer&apos;s order page.
-                It starts out holding whatever the customer typed in
-                &ldquo;order notes&rdquo; at checkout, and saving replaces that
-                with your own remark.
-              </InfoTip>
-            }
-          >
-            <textarea
-              value={internal}
-              onChange={(e) => setInternal(e.target.value)}
-              rows={2}
-              placeholder="e.g. Called twice, no answer. Retry Monday."
-              className="input text-xs"
-            />
-          </LabelledField>
-          <div className="mt-1.5 flex justify-end">
-            <Btn tone="outline" onClick={saveInternal} disabled={savingInternal}>
-              {savingInternal && (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-              )}
-              Save note
-            </Btn>
-          </div>
+            </>
+          }
+          hint={
+            <InfoTip term="Message to the customer">
+              Shown in a highlighted callout on the customer&apos;s order page
+              and signed with your store name. Use it for anything they need to
+              act on — customisation details, a delay, a payment problem.
+            </InfoTip>
+          }
+        >
+          <textarea
+            value={customer}
+            onChange={(e) => setCustomer(e.target.value)}
+            rows={2}
+            placeholder="e.g. Send us the name to print by Friday and we'll dispatch Monday."
+            className="input text-xs"
+          />
+        </LabelledField>
+        <div className="mt-1 flex justify-end">
+          <Btn tone="accent" onClick={saveCustomer} disabled={savingCustomer}>
+            {savingCustomer && (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+            )}
+            Save message
+          </Btn>
         </div>
       </div>
-    </Block>
+
+      <div>
+        <LabelledField
+          label="Internal note"
+          hint={
+            <InfoTip term="Internal note">
+              Staff only — it is not shown on the customer&apos;s order page. It
+              starts out holding whatever the customer typed in &ldquo;order
+              notes&rdquo; at checkout, and saving replaces that with your own
+              remark.
+            </InfoTip>
+          }
+        >
+          <textarea
+            value={internal}
+            onChange={(e) => setInternal(e.target.value)}
+            rows={2}
+            placeholder="e.g. Called twice, no answer. Retry Monday."
+            className="input text-xs"
+          />
+        </LabelledField>
+        <div className="mt-1 flex justify-end">
+          <Btn tone="outline" onClick={saveInternal} disabled={savingInternal}>
+            {savingInternal && (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+            )}
+            Save note
+          </Btn>
+        </div>
+      </div>
+    </div>
   );
 }
 

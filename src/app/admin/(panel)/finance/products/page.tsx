@@ -1,4 +1,3 @@
-import Link from "next/link";
 import {
   getFinanceReport,
   highDemandLowStock,
@@ -14,6 +13,7 @@ import {
   PAGE_SIZE,
   Pager,
   Panel,
+  PanelLink,
   StatTile,
   TileGrid,
   formatCount,
@@ -103,7 +103,7 @@ export default async function ProductsSection({
           label="Pieces sold"
           value={formatCount(sold.length)}
           tip="Distinct products with at least one unit on a counted order in this period. Cancelled orders are excluded, so a piece that only appears on a cancelled order counts as unsold."
-          sub={`of ${catalogue.active} active · ${win.label.toLowerCase()}`}
+          sub={`of ${catalogue.active} active`}
         />
         <StatTile
           label="Units sold"
@@ -121,7 +121,7 @@ export default async function ProductsSection({
           value={formatCount(catalogue.outOfStock)}
           tip="Active products whose stock is zero or less. Still listed on the storefront, so every one of these is a live product page that cannot be bought."
           good="down"
-          sub={catalogue.outOfStock > 0 ? "live pages that cannot be bought" : "nothing to fix"}
+          sub={catalogue.outOfStock > 0 ? "live pages, unbuyable" : undefined}
         />
       </TileGrid>
 
@@ -130,7 +130,8 @@ export default async function ProductsSection({
       <Panel
         title="High demand, low stock"
         tip={METRIC.daysOfCover}
-        subtitle="Ranked by days of cover — the shortest first. A stockout on a piece that is selling is revenue that simply never happens, which is why this list sits above the rankings."
+        note="Ranked by days of cover — the shortest first. A stockout on a piece that is selling is revenue that simply never happens, which is why this list sits above the rankings."
+        aside={<PanelLink href="/admin/products">Products</PanelLink>}
       >
         {win.days === null ? (
           <Empty>
@@ -169,7 +170,7 @@ export default async function ProductsSection({
                 </tr>
               ))}
             </DataTable>
-            <Caveat>
+            <Caveat label="What days of cover assumes">
               Days of cover assumes the last {win.days} days repeat. It does not
               know about a drop you are planning, a festival week, or the fact
               that a piece only started selling three days ago — a product with
@@ -190,7 +191,7 @@ export default async function ProductsSection({
           <Empty>
             No counted order line in this period recorded a chosen option.
           </Empty>
-          <Caveat>
+          <Caveat label="Why this can be empty">
             Sizes are read from each order line&apos;s own options snapshot. If
             this is empty while the catalogue offers sizes, the orders in this
             period predate the option being added to those products.
@@ -203,7 +204,7 @@ export default async function ProductsSection({
               key={dim.key}
               title={`${dim.label} mix`}
               tip={METRIC.optionMix}
-              subtitle={`${formatCount(dim.units)} of ${formatCount(dim.units + dim.unitsWithout)} units sold in ${win.phrase} recorded a ${dim.label.toLowerCase()}.`}
+              note={`${formatCount(dim.units)} of ${formatCount(dim.units + dim.unitsWithout)} units sold in ${win.phrase} recorded a ${dim.label.toLowerCase()}.`}
             >
               <RankBars
                 rows={dim.values.map((v) => ({
@@ -224,7 +225,9 @@ export default async function ProductsSection({
                 }))}
               />
               {dim.unitsWithout > 0 && (
-                <Caveat>
+                <Caveat
+                  label={`${formatCount(dim.unitsWithout)} unit${dim.unitsWithout === 1 ? "" : "s"} outside these percentages`}
+                >
                   {formatCount(dim.unitsWithout)} unit
                   {dim.unitsWithout === 1 ? "" : "s"} sold in this period carried
                   no {dim.label.toLowerCase()} at all — a product that does not
@@ -251,7 +254,7 @@ export default async function ProductsSection({
               <Empty>
                 There is no colour split, and there cannot be one.
               </Empty>
-              <Caveat>
+              <Caveat label="Why there cannot be one">
                 Colour is part of the piece itself here, not a choice made at
                 checkout — &ldquo;Bottle Green&rdquo; and &ldquo;Wine&rdquo; are
                 different products rather than different options of one. A
@@ -272,7 +275,7 @@ export default async function ProductsSection({
         <Panel
           title="Top sellers by units"
           tip={METRIC.units}
-          subtitle="What moves. Bars share one zero-based scale."
+          note="What moves. Bars share one zero-based scale."
         >
           <RankBars
             emptyText="Nothing sold in this period."
@@ -297,7 +300,7 @@ export default async function ProductsSection({
         <Panel
           title="Top sellers by revenue"
           tip={METRIC.productRevenue}
-          subtitle="What pays. A different order from units whenever price varies across the catalogue."
+          note="What pays. A different order from units whenever price varies across the catalogue."
         >
           <RankBars
             emptyText="Nothing sold in this period."
@@ -322,7 +325,7 @@ export default async function ProductsSection({
       <Panel
         title="Everything that sold"
         tip={METRIC.productRevenue}
-        subtitle={`Every product with at least one unit on a counted order in ${win.phrase}, highest revenue first.`}
+        note={`Every product with at least one unit on a counted order in ${win.phrase}, highest revenue first.`}
       >
         {sold.length === 0 ? (
           <Empty>Nothing sold in this period.</Empty>
@@ -377,7 +380,7 @@ export default async function ProductsSection({
       <Panel
         title="Coming back"
         tip={METRIC.unitReturnRate}
-        subtitle="Products with at least one return raised against an order placed in this period, worst rate first. On a clothing store a high return rate on one piece is usually a sizing problem, not a quality one — check it against the size mix above."
+        note="Products with at least one return raised against an order placed in this period, worst rate first. On a clothing store a high return rate on one piece is usually a sizing problem, not a quality one — check it against the size mix above."
       >
         {returned.length === 0 ? (
           <Empty>
@@ -403,7 +406,7 @@ export default async function ProductsSection({
             ))}
           </DataTable>
         )}
-        <Caveat>
+        <Caveat label="Why a short range reads low">
           Both numbers come from the same set of orders — those placed in this
           period — so the rate is a real fraction rather than two counts on two
           clocks. It is right-censored: a piece sold yesterday has had one day
@@ -416,7 +419,7 @@ export default async function ProductsSection({
       <Panel
         title="Slow movers"
         tip="Active catalogue pieces that sold nothing at all in this period. Ordered by the value of the stock tied up in them (stock × current price), because that is what the decision is actually about."
-        subtitle="Deleted and unlinked rows are left out — there is nothing left to act on."
+        note="Deleted and unlinked rows are left out — there is nothing left to act on."
       >
         {slow.length === 0 ? (
           <Empty>
@@ -459,7 +462,7 @@ export default async function ProductsSection({
               total={slow.length}
               noun="products"
             />
-            <Caveat>
+            <Caveat label="What stock value is, and is not">
               Stock value is stock × the current selling price, which is what
               the shelf might fetch — not what it cost, because there is no cost
               price on a product. It ranks the list correctly and should not be
@@ -474,7 +477,7 @@ export default async function ProductsSection({
       <Panel
         title="Interest against orders"
         tip="Three counts that all exist in the database, on one zero-based scale. They count different things — cart-add events, wishlist saves, and units on orders — so the gap between them is a difference in volume, not a measured drop-off."
-        subtitle={`Over ${win.phrase}.`}
+        note={`Over ${win.phrase}.`}
       >
         {funnel.cartAdds === 0 && funnel.units === 0 ? (
           <Empty>No cart activity and no orders in this period.</Empty>
@@ -505,10 +508,9 @@ export default async function ProductsSection({
             ]}
           />
         )}
-        <Caveat>
+        <Caveat label="This is not a funnel">
           <strong className="font-medium text-foreground">
-            This is not a funnel, and the ratio between these bars is not a
-            conversion rate.
+            The ratio between these bars is not a conversion rate.
           </strong>{" "}
           A cart-add row is written when something goes into a cart and is never
           deleted when it comes back out or when it is bought, and an order
@@ -523,7 +525,8 @@ export default async function ProductsSection({
       <Panel
         title="Interest by product"
         tip={METRIC.cartAdds}
-        subtitle="Where interest and sales disagree. A piece with many cart adds and no sales was wanted and something stopped it; a piece with neither was never picked up at all."
+        note="Where interest and sales disagree. A piece with many cart adds and no sales was wanted and something stopped it; a piece with neither was never picked up at all."
+        aside={<PanelLink href="/admin/leads">Interested customers</PanelLink>}
       >
         {interest.length === 0 ? (
           <Empty>No cart activity, wishlist saves or sales in this period.</Empty>
@@ -577,15 +580,12 @@ export default async function ProductsSection({
               total={interest.length}
               noun="products"
             />
-            <Caveat>
+            <Caveat label="How adds and saves are matched">
               Cart adds are matched to a product by its id, and wishlist saves by
               its slug — so a piece deleted since shows its sales but no wishlist
               figure, and both columns read &ldquo;—&rdquo; rather than zero when
-              there is nothing to report.{" "}
-              <Link href="/admin/leads" className="underline hover:text-accent">
-                Interested customers
-              </Link>{" "}
-              has the individual leads behind these counts.
+              there is nothing to report. Interested customers has the
+              individual leads behind these counts.
             </Caveat>
           </>
         )}

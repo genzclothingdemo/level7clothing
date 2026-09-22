@@ -30,7 +30,7 @@ export default async function AdminMessages() {
   return (
     <div className="flex min-h-0 flex-col">
       <div>
-        <h1 className="font-serif text-3xl">Messages</h1>
+        <h1 className="font-serif text-2xl">Messages</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Chat directly with shoppers. Replies appear in their chat panel on the
           storefront.

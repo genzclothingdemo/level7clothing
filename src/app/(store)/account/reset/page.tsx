@@ -39,7 +39,7 @@ function ResetForm() {
   return (
     <form
       onSubmit={onSubmit}
-      className="w-full max-w-sm rounded-3xl border border-border bg-card p-8"
+      className="w-full max-w-sm rounded-2xl border border-border bg-card p-5 sm:p-8"
     >
       <div className="mb-6 text-center">
         <span className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-muted gold-text">
@@ -116,7 +116,7 @@ function ResetForm() {
 
 export default function ResetPasswordPage() {
   return (
-    <div className="container-px mx-auto flex min-h-[70dvh] items-center justify-center py-16">
+    <div className="container-px mx-auto flex min-h-[70dvh] items-center justify-center py-10 sm:py-16">
       <Suspense>
         <ResetForm />
       </Suspense>

@@ -40,8 +40,9 @@ import {
 } from "lucide-react";
 import { InfoTip } from "@/components/store/info-tip";
 import { ExpandableText } from "@/components/store/expandable-text";
-import { Card, Check, Segmented, SwitchRow } from "@/components/admin/form-kit";
+import { Card, Check, SwitchRow } from "@/components/admin/form-kit";
 import { Badge, Btn } from "@/components/admin/order-ui";
+import { DispatchSettings } from "@/components/admin/dispatch-settings";
 import {
   ReturnPolicyCard,
   type ReturnPolicyFacts,
@@ -60,9 +61,8 @@ import {
 import { formatINR } from "@/lib/utils";
 import {
   CONFIRM_MODE_LABEL,
-  COURIER_PREFERENCE_LABEL,
+  DISPATCH_MODE_LABEL,
   isFullyUnattended,
-  type AutoShipCourier,
   type OrderConfirmMode,
   type PipelineSettings,
 } from "@/lib/orders-pipeline";
@@ -170,6 +170,7 @@ export function StoreSection({ f, set, isDirty }: SectionProps) {
       <SetOnce
         label="Brand identity"
         summary={f.brandName}
+        tip="The name, the line under it and the mark. Nothing here is hardcoded anywhere in the store — the header, the browser tab, order emails, the sitemap and the home-screen app icon all read these three values."
         dirty={anyDirty(isDirty, ["brandName", "tagline", "logoUrl"])}
       >
         <TextField
@@ -259,6 +260,7 @@ export function StoreSection({ f, set, isDirty }: SectionProps) {
       <SetOnce
         label="Contact details"
         summary={f.contactEmail}
+        tip="Published on the store — the contact page, the footer and order emails. This is what a customer uses to reach you, so it is not the address the courier collects from, and not where your own alerts are sent (that is the Email tab)."
         dirty={anyDirty(isDirty, [
           "contactEmail",
           "contactPhone",
@@ -266,15 +268,6 @@ export function StoreSection({ f, set, isDirty }: SectionProps) {
           "address",
         ])}
       >
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Published on the store — the contact page, the footer and order
-          emails.
-          <InfoTip term="Contact details">
-            This is what a customer uses to reach you, so it is not the same
-            thing as the address the courier collects from, and not the same
-            thing as where your own alerts are sent (see the Email tab).
-          </InfoTip>
-        </p>
         <div className="grid gap-4 sm:grid-cols-2">
           <TextField
             label="Contact email"
@@ -324,12 +317,9 @@ export function StoreSection({ f, set, isDirty }: SectionProps) {
             ? "None — icons hidden"
             : `${socials.length} link${socials.length === 1 ? "" : "s"}`
         }
+        tip="Each link is rendered in the footer only when it is filled in, so an empty box removes the icon rather than leaving a dead link."
         dirty={anyDirty(isDirty, ["instagram", "facebook"])}
       >
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Each link is rendered in the footer only when it is filled in, so an
-          empty box removes the icon rather than leaving a dead link.
-        </p>
         <div className="grid gap-4 sm:grid-cols-2">
           <TextField
             label="Instagram URL"
@@ -390,7 +380,11 @@ export function OrdersSection({ f, set, isDirty, facts }: SectionProps) {
     autoConfirmPrepaid: f.autoConfirmPrepaid,
     autoConfirmPartial: f.autoConfirmPartial,
     autoConfirmCod: f.autoConfirmCod,
-    autoShipOnConfirm: f.autoShipOnConfirm,
+    dispatchOnConfirm: f.dispatchOnConfirm,
+    // Derived, never edited: the draft holds Q1 once, as the enum, and the
+    // action writes both columns from it. Carried here only because
+    // `PipelineSettings` still declares it for callers that have not migrated.
+    autoShipOnConfirm: f.dispatchOnConfirm === "book",
     autoShipCourier: f.autoShipCourier,
   };
   const unattended = isFullyUnattended(pipeline);
@@ -461,86 +455,70 @@ export function OrdersSection({ f, set, isDirty, facts }: SectionProps) {
         )}
       </Card>
 
-      {/* ---- Weekly-ish: what confirming then does ---- */}
+      {/*
+       * ════════════════════════════════════════════════════════════════════
+       *  MOUNTED — the dispatch-on-confirmation control
+       * ════════════════════════════════════════════════════════════════════
+       *
+       * `DispatchSettings` is owned by the dispatch work
+       * (`src/components/admin/dispatch-settings.tsx`) and replaced the
+       * "Book the shipment automatically" switch that used to sit here. That
+       * boolean could only say draft (false) or book (true); the enum it
+       * carries adds the third answer the owner actually wanted — leave the
+       * courier alone entirely — and lets a carrier be pinned by name.
+       *
+       * It is **fully controlled**: no state, no save, no server action. This
+       * form still owns the draft, the dirty tracking and the one write, so
+       * `SiteSettings` keeps one writer per column. It renders a `<div>` whose
+       * controls are all `type="button"`, so nesting it in this form cannot
+       * submit anything.
+       *
+       * `title={null}` because the `Card` already draws the heading, the (i)
+       * and the state badge — its own header would be a second one.
+       */}
       <Card
         title="What happens on confirmation"
-        tip="A draft is an unbooked order sitting in NimbusPost: no courier, no AWB and no charge. Booking allocates the courier, generates the AWB and takes the money out of your NimbusPost wallet."
+        tip="Confirming is the point an order stops being a request and becomes work. This is how far that goes on its own: nothing at all, a free unbooked draft in NimbusPost, or a booked AWB paid for out of your NimbusPost wallet. Whatever you choose, every order can still be dispatched by hand from the orders screen."
         aside={
-          <Badge tone={f.autoShipOnConfirm ? "warn" : "neutral"}>
-            {f.autoShipOnConfirm ? "Books automatically" : "Draft only"}
+          <Badge tone={f.dispatchOnConfirm === "book" ? "warn" : "neutral"}>
+            {DISPATCH_MODE_LABEL[f.dispatchOnConfirm]}
           </Badge>
         }
       >
-        <SwitchRow
-          label="Book the shipment automatically"
-          icon={<Truck className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />}
-          detail={
-            f.autoShipOnConfirm
-              ? "Confirming books an AWB and charges your wallet."
-              : "Confirming stages a draft and stops. You book it."
-          }
-          checked={f.autoShipOnConfirm}
-          onChange={(v) => set("autoShipOnConfirm", v)}
-          className={isDirty("autoShipOnConfirm") ? "border-accent" : undefined}
-          tip="Off is the default and the recommended setting: every order is staged as a draft so you can check the address and the price before any money moves. On removes that check — the courier is allocated and your wallet charged with nobody looking."
+        <DispatchSettings
+          title={null}
+          dispatchOnConfirm={f.dispatchOnConfirm}
+          autoShipCourier={f.autoShipCourier}
+          onChangeDispatch={(v) => set("dispatchOnConfirm", v)}
+          onChangeCourier={(v) => set("autoShipCourier", v)}
+          courierLive={courierLive}
+          dirtyDispatch={isDirty("dispatchOnConfirm")}
+          dirtyCourier={isDirty("autoShipCourier")}
         />
-
-        {f.autoShipOnConfirm && (
-          <div className="rounded-lg border border-border bg-muted/30 p-2.5">
-            <p className="mb-1.5 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-              Which courier to book
-              <InfoTip term="Courier preference">
-                Cheapest picks the lowest total charge to your wallet. Fastest
-                picks the shortest quoted transit time, which usually costs
-                more. A courier that quotes no delivery estimate is never
-                treated as the fast one.
-              </InfoTip>
-            </p>
-            <Segmented<AutoShipCourier>
-              ariaLabel="Courier preference"
-              value={f.autoShipCourier}
-              onChange={(v) => set("autoShipCourier", v)}
-              className={isDirty("autoShipCourier") ? "border-accent" : undefined}
-              options={[
-                { value: "cheapest", label: COURIER_PREFERENCE_LABEL.cheapest },
-                { value: "fastest", label: COURIER_PREFERENCE_LABEL.fastest },
-              ]}
-            />
-          </div>
-        )}
-
-        {!courierLive && (
-          <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-            NimbusPost is{" "}
-            {facts.nimbusConfigured
-              ? "switched off in Shipping"
-              : "not configured in this deployment"}
-            , so nothing is staged or booked whatever this says. Confirming
-            still emails the customer.
-          </p>
-        )}
       </Card>
 
-      {/* ---- The combination that needs saying out loud ---- */}
+      {/* ---- The combination that needs saying out loud ----
+          This one stays printed. It is not standing explanation: it appears
+          only in the single configuration that spends real money with nobody
+          looking, and a warning behind an (i) is a warning nobody reads. */}
       {unattended && (
         <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5">
           <p className="flex items-start gap-1.5 text-xs font-medium text-danger">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-            <span>Automatic + book automatically = no human in the loop.</span>
+            <span>Automatic + book the AWB = no human in the loop.</span>
           </p>
           <p className="mt-1 pl-5 text-xs leading-relaxed text-foreground">
-            Every order placed on the store will confirm itself and book a real
-            courier, charging your NimbusPost wallet, before you have seen it. A
-            wrong address, a joke order or a cash-on-delivery order nobody
-            intends to accept all go out the same way, and the only way to stop
-            one is to cancel the shipment in NimbusPost before the courier
-            collects.
-          </p>
-          <p className="mt-1 pl-5 text-xs leading-relaxed text-muted-foreground">
-            If you want the speed without the exposure, keep{" "}
-            <b className="text-foreground">Book the shipment automatically</b>{" "}
-            off: orders still confirm themselves instantly, and each one waits
-            as a free draft for one press of Ship now.
+            Every order confirms itself and books a real courier, charging your
+            NimbusPost wallet, before you have seen it.
+            <InfoTip term="No human in the loop">
+              A wrong address, a joke order or a cash-on-delivery order nobody
+              intends to accept all go out the same way, and the only way to
+              stop one is to cancel the shipment in NimbusPost before the
+              courier collects. If you want the speed without the exposure, set
+              confirmation to <b>Stage a draft</b>: orders still confirm
+              themselves instantly, and each one waits as a free draft for one
+              press of Ship now.
+            </InfoTip>
           </p>
         </div>
       )}
@@ -795,6 +773,7 @@ export function PaymentsSection({ f, set, isDirty, facts }: SectionProps) {
       <SetOnce
         label="Razorpay gateway"
         summary={gatewayReady ? "Live" : facts.razorpayConfigured ? "Off" : "No keys"}
+        tip="The master switch for both online methods. With it off, Prepaid and Advance + COD disappear from checkout no matter what their own switches say."
         dirty={isDirty("razorpayEnabled")}
       >
         <SwitchRow
@@ -868,7 +847,15 @@ export function ShippingSection({ f, set, isDirty, facts }: SectionProps) {
       {/* ---- Weekly: the one number that changes for a promotion ---- */}
       <Card
         title="Shipping charges"
-        tip="Each product carries its own shipping rule — Free, a fixed fee, or live NimbusPost rates — set in the product editor. This threshold sits on top of all of them: once the basket subtotal reaches it, shipping is zero whatever the products say."
+        tip="Each product carries its own shipping rule — Free, a fixed fee, or live NimbusPost rates — set in the product editor under Shipping settings & parcel size. This threshold sits on top of all of them: once the basket subtotal reaches it, shipping is zero whatever the products say."
+        aside={
+          <Link
+            href="/admin/products"
+            className="inline-flex min-h-8 items-center text-[11px] font-medium uppercase tracking-wider text-accent transition-colors hover:text-foreground"
+          >
+            Per-product rules
+          </Link>
+        }
       >
         <TextField
           label="Free shipping above"
@@ -884,16 +871,6 @@ export function ShippingSection({ f, set, isDirty, facts }: SectionProps) {
               : "No threshold — every basket pays whatever its products charge."
           }
         />
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Per-product shipping and parcel size live on each product, under{" "}
-          <Link
-            href="/admin/products"
-            className="text-accent underline underline-offset-2"
-          >
-            Products
-          </Link>
-          {" → "}Shipping settings &amp; parcel size.
-        </p>
       </Card>
 
       {/* ---- Set once: the courier integration ---- */}
@@ -902,6 +879,7 @@ export function ShippingSection({ f, set, isDirty, facts }: SectionProps) {
         summary={
           f.nimbusEnabled && facts.nimbusConfigured ? "Connected" : "Off"
         }
+        tip="The connection itself: with it off, no order can reach the courier at all. Whether a confirmed order is booked automatically or waits as a free draft is a separate decision, and it is on the Orders tab."
         dirty={isDirty("nimbusEnabled")}
       >
         <SwitchRow
@@ -926,10 +904,6 @@ export function ShippingSection({ f, set, isDirty, facts }: SectionProps) {
             is set, so every dispatch call is skipped regardless of this switch.
           </p>
         )}
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Whether a confirmed order is booked automatically or waits as a free
-          draft is decided on the <b>Orders</b> tab.
-        </p>
       </SetOnce>
     </div>
   );
@@ -1001,6 +975,7 @@ export function StorefrontSection({ f, set, isDirty }: SectionProps) {
       <SetOnce
         label="About text"
         summary={`${f.aboutText.length} characters`}
+        tip="Used on the About page and as the fallback description for link previews and search results when a page has none of its own."
         dirty={isDirty("aboutText")}
       >
         <AreaField
@@ -1010,7 +985,6 @@ export function StorefrontSection({ f, set, isDirty }: SectionProps) {
           value={f.aboutText}
           dirty={isDirty("aboutText")}
           onChange={(v) => set("aboutText", v)}
-          tip="Used on the About page and as the fallback description for link previews and search results when a page has none of its own."
           hint={`${f.aboutText.length}/2000 characters`}
         />
       </SetOnce>
@@ -1018,20 +992,19 @@ export function StorefrontSection({ f, set, isDirty }: SectionProps) {
       <SetOnce
         label="Product page info"
         summary="Materials & Care · Shipping & Delivery"
+        tip={
+          <>
+            The accordion under every product, written once here and inherited
+            by the whole catalogue — a product only needs its own version when
+            it genuinely differs. One line per bullet, and an empty box hides
+            that section across the store. The accordion has five blocks: two
+            are set here, <b>Product details</b> is each product&apos;s own
+            description, <b>Customer reviews</b> is driven by approved reviews,
+            and <b>Returns &amp; refunds</b> belongs to the Returns tab.
+          </>
+        }
         dirty={anyDirty(isDirty, ["defaultMaterialsCare", "defaultShippingInfo"])}
       >
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          The accordion under every product. Written once here and inherited by
-          the whole catalogue; a product only needs its own version when it
-          genuinely differs.
-          <InfoTip term="Product page info">
-            One line per bullet, and an empty box hides that section across the
-            store. The accordion has five blocks — two are set here,{" "}
-            <b>Product details</b> is each product&apos;s own description,{" "}
-            <b>Customer reviews</b> is driven by approved reviews, and{" "}
-            <b>Returns &amp; refunds</b> belongs to the Returns tab.
-          </InfoTip>
-        </p>
         <LinesField
           label="Materials & Care"
           value={f.defaultMaterialsCare}
@@ -1046,15 +1019,6 @@ export function StorefrontSection({ f, set, isDirty }: SectionProps) {
           onChange={(v) => set("defaultShippingInfo", v)}
           tip="Dispatch time, tracking and COD availability as the customer reads them. This is copy, not a rule — it does not change what checkout actually charges."
         />
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          <Link
-            href="/admin/reviews"
-            className="text-accent underline underline-offset-2"
-          >
-            Approved reviews
-          </Link>{" "}
-          drive the reviews block.
-        </p>
       </SetOnce>
     </div>
   );
@@ -1072,7 +1036,7 @@ export function EmailSection({ f, set, isDirty }: SectionProps) {
     <div className="space-y-4">
       <Card
         title="Your alerts"
-        tip="Where the store writes to you — a new order, a new enquiry, a new interested customer. This address is never shown to a customer, which is why it is separate from the public contact email."
+        tip="Where the store writes to you — a new order, a new enquiry, a new interested customer. This address is never shown to a customer, which is why it is separate from the public contact email. Customer-facing email (the order confirmation, the status update, the return decision) goes out through Resend and replies come back to your contact email on the Store tab, not to this one."
       >
         <TextField
           label="Send order & lead emails to"
@@ -1088,19 +1052,13 @@ export function EmailSection({ f, set, isDirty }: SectionProps) {
               : undefined
           }
         />
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Customer-facing email — the order confirmation, the status update, the
-          return decision — is sent through Resend and replies come back to your{" "}
-          <b>contact email</b>, not this one.
-        </p>
       </Card>
 
-      <SetOnce label="Other channels" summary="Push · Newsletter">
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          Two more ways the store reaches people. Neither has a setting to
-          configure — each one is a message you compose and send, so each has
-          its own screen.
-        </p>
+      <SetOnce
+        label="Other channels"
+        summary="Push · Newsletter"
+        tip="Two more ways the store reaches people. Neither has a setting to configure — each one is a message you compose and send, so each has its own screen."
+      >
         <div className="flex flex-wrap gap-2">
           <ChannelLink
             href="/admin/notifications"

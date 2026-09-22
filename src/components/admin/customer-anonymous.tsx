@@ -4,6 +4,7 @@ import { formatINR } from "@/lib/utils";
 import { LEAD_STATUS_LABEL, isLeadStatus } from "@/lib/leads";
 import { adminLink, type CustomerDirectory } from "@/lib/customers";
 import { AdminRef, formatAgo } from "@/components/admin/customer-ui";
+import { InfoTip } from "@/components/store/info-tip";
 
 /**
  * "6 records left out."
@@ -38,15 +39,21 @@ export function AnonymousLeads({
 
   return (
     <section className="mt-4 rounded-lg border border-dashed border-border p-3">
-      <p className="text-xs text-muted-foreground">
-        <span className="font-medium text-foreground">
-          {total} record{total === 1 ? "" : "s"} left out
-        </span>{" "}
-        — no email and no phone number, so there is nothing to match them on.
-        They are counted rather than invented into people.
-      </p>
-
-      <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+      {/* One line, not a paragraph plus a second line of links. The sentence
+          explaining *why* they are left out is true forever and read once, so
+          it sits behind the (i) like every other explanation in this admin. */}
+      <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        <span className="inline-flex items-center gap-1">
+          <span className="font-medium text-foreground">
+            {total} record{total === 1 ? "" : "s"} left out
+          </span>
+          <InfoTip term="Records left out">
+            These have no email and no phone number, so there is nothing to
+            match them on. They are counted here rather than invented into
+            people — guessing would merge two strangers or split one shopper in
+            half, and both are worse than an honest gap.
+          </InfoTip>
+        </span>
         {anonymous.leads > 0 && (
           <AdminRef href="/admin/leads">
             {anonymous.leads} cart lead{anonymous.leads === 1 ? "" : "s"}

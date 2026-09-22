@@ -3,7 +3,8 @@ import { DEFAULT_SETTINGS } from "@/lib/settings";
 import { isRazorpayConfigured } from "@/lib/razorpay";
 import { isNimbusPostConfigured } from "@/lib/nimbuspost";
 import { DEFAULT_REFUND_SETTINGS, normaliseReturnReasons } from "@/lib/returns";
-import { normalisePipelineSettings } from "@/lib/orders-pipeline";
+import { dispatchModeOf, normalisePipelineSettings } from "@/lib/orders-pipeline";
+import { InfoTip } from "@/components/store/info-tip";
 import { SettingsForm } from "@/components/admin/settings-form";
 // Runtime values come from lib/, NOT from settings-ui — that file is
 // "use client", so importing `isTabKey` from it makes this server component
@@ -130,7 +131,17 @@ export default async function AdminSettings({
     nimbusEnabled: row?.nimbusEnabled ?? d.nimbusEnabled,
     defaultMaterialsCare: row?.defaultMaterialsCare ?? d.defaultMaterialsCare,
     defaultShippingInfo: row?.defaultShippingInfo ?? d.defaultShippingInfo,
-    ...pipeline,
+
+    // Listed rather than spread. `PipelineSettings` still carries the legacy
+    // `autoShipOnConfirm` boolean, which this draft deliberately does not —
+    // the enum is the one editable copy of that decision, and `dispatchModeOf`
+    // is what resolves it for a row written before the column existed.
+    orderConfirmMode: pipeline.orderConfirmMode,
+    autoConfirmPrepaid: pipeline.autoConfirmPrepaid,
+    autoConfirmPartial: pipeline.autoConfirmPartial,
+    autoConfirmCod: pipeline.autoConfirmCod,
+    dispatchOnConfirm: dispatchModeOf(pipeline),
+    autoShipCourier: pipeline.autoShipCourier,
   };
 
   const facts: SettingsFacts = {
@@ -170,14 +181,22 @@ export default async function AdminSettings({
 
   return (
     <div>
-      <h1 className="font-serif text-2xl sm:text-3xl">Branding &amp; settings</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        Everything the store is configured by, in one place — your brand, how
-        checkout behaves, what happens to an order automatically, and your
-        return policy. Saved changes appear on the storefront immediately.
-      </p>
+      {/* The paragraph that used to sit here said the same thing the seven tab
+          blurbs below now say one at a time, which made it the second-longest
+          string on a screen whose whole problem was length. It is behind the
+          (i), where the rest of this screen's explanation lives. */}
+      <h1 className="flex flex-wrap items-center gap-1.5 font-serif text-2xl sm:text-3xl">
+        Branding &amp; settings
+        <InfoTip term="Branding & settings">
+          Everything the store is configured by, in one place — your brand, how
+          checkout behaves, what happens to an order automatically, and your
+          return policy. Each tab names what it is for. Nothing is written until
+          you press Save, and the bar that appears lists every field that will
+          change. Saved changes reach the storefront immediately.
+        </InfoTip>
+      </h1>
 
-      <div className="mt-5">
+      <div className="mt-4">
         <SettingsForm initial={initial} facts={facts} initialTab={tab} />
       </div>
     </div>

@@ -31,8 +31,42 @@
  */
 export type OrderConfirmMode = "manual" | "byPayment" | "auto";
 
+/**
+ * **Q1 — how far a *confirmed* order goes on its own.**
+ *
+ * The owner described four ways an order reaches the courier. They are not
+ * four modes, they are two questions, and this is the first:
+ *
+ * - `off`   — nothing happens. The order is confirmed and that is all; the
+ *             admin dispatches it by hand from the orders screen.
+ * - `draft` — a free, unbooked draft is staged in NimbusPost. No courier, no
+ *             AWB, no wallet charge, and it can be deleted there. **The
+ *             default**, and the review gate CLAUDE.md records as deliberate.
+ * - `book`  — the draft is staged *and* booked: courier allocated, AWB
+ *             generated, **wallet charged**, with nobody looking.
+ *
+ * This replaces the boolean `autoShipOnConfirm`, which could only say
+ * draft (false) or book (true) and had no way to express "do nothing" — so an
+ * owner who wanted the courier left alone until they pressed a button had to
+ * switch NimbusPost off store-wide to get it.
+ */
+export type DispatchOnConfirm = "off" | "draft" | "book";
+
 /** How the courier is chosen when the shipment is booked without a human. */
 export type AutoShipCourier = "cheapest" | "fastest";
+
+/**
+ * **Q2 — which courier an unattended booking uses**, and only meaningful when
+ * Q1 is `book`.
+ *
+ * Either of the two strategies, or a **pinned courier** — the name (or id) of
+ * one courier, stored verbatim in the same column. A store that has negotiated
+ * a rate with one carrier does not want "cheapest"; it wants that carrier.
+ *
+ * `(string & {})` rather than a bare `string` so editors still offer the two
+ * strategy literals while any courier name remains assignable.
+ */
+export type CourierChoice = AutoShipCourier | (string & {});
 
 /**
  * The pipeline half of `SiteSettings`. Only these columns — the shape is kept
@@ -44,8 +78,25 @@ export type PipelineSettings = {
   autoConfirmPrepaid: boolean;
   autoConfirmPartial: boolean;
   autoConfirmCod: boolean;
+  /**
+   * Q1. **Optional only for the migration**, never absent in practice:
+   * everything {@link normalisePipelineSettings} returns carries it, and every
+   * reader goes through {@link dispatchModeOf} rather than touching it, so a
+   * row written before the column existed still resolves.
+   *
+   * It is optional because the settings screens still construct a
+   * `PipelineSettings` literal from their own legacy draft shape. Make it
+   * required once they carry the enum.
+   */
+  dispatchOnConfirm?: DispatchOnConfirm;
+  /**
+   * @deprecated The legacy boolean this enum replaced. Still written, in step,
+   * by the one writer (`updateOrderPipelineSettings`), so a screen that has not
+   * migrated yet keeps reading a truthful value. **Never branch on it** — call
+   * {@link dispatchModeOf}, which prefers the enum and falls back to this.
+   */
   autoShipOnConfirm: boolean;
-  autoShipCourier: AutoShipCourier;
+  autoShipCourier: CourierChoice;
 };
 
 /**
@@ -59,11 +110,13 @@ export const PIPELINE_DEFAULTS: PipelineSettings = {
   autoConfirmPrepaid: true,
   autoConfirmPartial: true,
   autoConfirmCod: false,
+  dispatchOnConfirm: "draft",
   autoShipOnConfirm: false,
   autoShipCourier: "cheapest",
 };
 
 const CONFIRM_MODES: readonly OrderConfirmMode[] = ["manual", "byPayment", "auto"];
+const DISPATCH_MODES: readonly DispatchOnConfirm[] = ["off", "draft", "book"];
 const COURIER_PREFERENCES: readonly AutoShipCourier[] = ["cheapest", "fastest"];
 
 /** Both columns are plain `String`, so every read has to be narrowed. */
@@ -73,24 +126,73 @@ export function parseConfirmMode(raw: unknown): OrderConfirmMode {
     : PIPELINE_DEFAULTS.orderConfirmMode;
 }
 
-export function parseCourierPreference(raw: unknown): AutoShipCourier {
-  return COURIER_PREFERENCES.includes(raw as AutoShipCourier)
-    ? (raw as AutoShipCourier)
-    : PIPELINE_DEFAULTS.autoShipCourier;
+/** `null` ⇒ the column predates the enum; the caller falls back to the boolean. */
+export function parseDispatchMode(raw: unknown): DispatchOnConfirm | null {
+  return DISPATCH_MODES.includes(raw as DispatchOnConfirm)
+    ? (raw as DispatchOnConfirm)
+    : null;
+}
+
+/**
+ * Q2 as stored: one of the two strategies, or a pinned courier's name.
+ * Anything empty falls back to `cheapest`.
+ */
+export function parseCourierPreference(raw: unknown): CourierChoice {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  return value || PIPELINE_DEFAULTS.autoShipCourier;
+}
+
+/** True for the two strategies, false for a pinned courier name. */
+export function isCourierStrategy(v: CourierChoice): v is AutoShipCourier {
+  return COURIER_PREFERENCES.includes(v as AutoShipCourier);
+}
+
+/**
+ * **The one reading of Q1**, and the only place the old boolean is allowed to
+ * matter.
+ *
+ * The enum column wins when it holds a value it recognises. Otherwise the row
+ * predates the migration and the boolean decides — `true` meant "book it",
+ * `false` meant "stage a draft and stop" — so an untouched row goes on
+ * behaving exactly as it did, and a row someone set to auto-book does not
+ * quietly stop booking.
+ *
+ * Deliberately structural (not `PipelineSettings`), so a raw Prisma row can be
+ * handed straight to it.
+ */
+export function dispatchModeOf(settings: {
+  dispatchOnConfirm?: unknown;
+  autoShipOnConfirm?: unknown;
+}): DispatchOnConfirm {
+  const explicit = parseDispatchMode(settings.dispatchOnConfirm);
+  if (explicit) return explicit;
+  return settings.autoShipOnConfirm === true ? "book" : "draft";
 }
 
 /** Narrow a raw settings row (or a partial one) into a usable shape. */
 export function normalisePipelineSettings(
-  row: Partial<Record<keyof PipelineSettings, unknown>> | null | undefined
+  row:
+    | (Partial<Record<keyof PipelineSettings, unknown>> & {
+        dispatchOnConfirm?: unknown;
+      })
+    | null
+    | undefined
 ): PipelineSettings {
   const bool = (v: unknown, fallback: boolean) =>
     typeof v === "boolean" ? v : fallback;
+  const dispatchOnConfirm = dispatchModeOf({
+    dispatchOnConfirm: row?.dispatchOnConfirm,
+    autoShipOnConfirm: row?.autoShipOnConfirm,
+  });
   return {
     orderConfirmMode: parseConfirmMode(row?.orderConfirmMode),
     autoConfirmPrepaid: bool(row?.autoConfirmPrepaid, PIPELINE_DEFAULTS.autoConfirmPrepaid),
     autoConfirmPartial: bool(row?.autoConfirmPartial, PIPELINE_DEFAULTS.autoConfirmPartial),
     autoConfirmCod: bool(row?.autoConfirmCod, PIPELINE_DEFAULTS.autoConfirmCod),
-    autoShipOnConfirm: bool(row?.autoShipOnConfirm, PIPELINE_DEFAULTS.autoShipOnConfirm),
+    dispatchOnConfirm,
+    // Derived, never independent: whatever the enum says is what the legacy
+    // flag reports. One writer, two columns, no chance of them disagreeing.
+    autoShipOnConfirm: dispatchOnConfirm === "book",
     autoShipCourier: parseCourierPreference(row?.autoShipCourier),
   };
 }
@@ -348,74 +450,288 @@ export type ShippableOrder = {
   status: string | null | undefined;
   /** The AWB. Present ⇒ this parcel is already booked, by us or by hand. */
   trackingNumber?: string | null;
+  /** The NimbusPost order id ⇒ an unbooked draft is waiting there. */
+  nimbusShipmentId?: string | null;
 };
 
-export type ShipmentGate =
-  | { allowed: true }
-  | {
-      allowed: false;
-      /** Which rule stopped it — the UI branches on this, not on the prose. */
-      code: "pending" | "closed" | "booked";
-      /** Shown verbatim to the admin and returned verbatim by the actions. */
-      reason: string;
-    };
+/** Where this order has got to with NimbusPost. */
+export type ShipmentStage = "none" | "draft" | "booked";
 
 /**
- * The one answer to "can this order reach NimbusPost right now?".
+ * Exactly which shipment controls this order may show — and, because the
+ * server actions read the same object, exactly which ones will be honoured.
+ */
+export type ShipmentControls = {
+  /** Pick a courier off live rates and book it (stages the draft if needed). */
+  shipNow: boolean;
+  /** Stage the free, unbooked draft and stop. */
+  draft: boolean;
+  /** Book the draft that is already staged. Charges the wallet. */
+  book: boolean;
+  /** Ask NimbusPost what it knows — did someone book it in the dashboard? */
+  sync: boolean;
+  /** Withdraw a staged draft so it stops sitting in NimbusPost. */
+  cancelDraft: boolean;
+  /** Show courier / AWB / link / last scan, read-only. */
+  tracking: boolean;
+};
+
+const NO_CONTROLS: ShipmentControls = {
+  shipNow: false,
+  draft: false,
+  book: false,
+  sync: false,
+  cancelDraft: false,
+  tracking: false,
+};
+
+export type ShipmentGate = {
+  /** May something NEW be sent to the courier? What the actions enforce. */
+  allowed: boolean;
+  /** Which rule decided — the UI branches on this, never on the prose. */
+  code: "ready" | "staged" | "pending" | "closed" | "booked" | "done";
+  stage: ShipmentStage;
+  /** The one list of controls the panel may draw. */
+  can: ShipmentControls;
+  /**
+   * One line, in plain English. Shown verbatim wherever there is nothing to
+   * press, and returned verbatim by the server actions when they refuse.
+   */
+  reason: string;
+};
+
+/** Statuses at which a parcel's journey is over and nothing new can ship. */
+const CLOSED_STATUSES = new Set(["cancelled", "payment_failed"]);
+const FINISHED_STATUSES = new Set(["delivered", "returned", "rto"]);
+
+/**
+ * The one answer to "what may this order do with the courier right now?".
  *
  * Pure, so the server action that enforces it and the panel that decides what
  * to render cannot disagree — the whole class of bug where a button is shown
  * and then refused (or worse, shown and *not* refused) comes from those two
- * being written twice.
+ * being written twice. The panel reads `can`; the actions read `allowed`.
  *
- * Three refusals. **`booked` is tested first**, and deliberately: the panel
- * branches on `code` to decide what to draw, and a parcel that has already gone
- * out must show its tracking whatever the order's status has since become — an
- * order cancelled after dispatch still has a real parcel in a real van.
+ * The table it implements, which is the owner's, in order of precedence:
  *
- * 1. **`booked`.** An AWB already exists. This is the one the admin screen got
- *    wrong: offering "book" on a booked parcel invites a second shipment and a
- *    second wallet charge for one order. `trackingNumber` is the test rather
- *    than `nimbusShipmentId`, because a parcel handed to a courier by hand is
- *    just as booked as one this app booked — only the AWB proves a shipment
- *    exists.
- * 2. **`pending`.** An unconfirmed order is a request, not work. Staging a
- *    draft for one puts an order into NimbusPost that nobody has accepted, and
- *    booking it spends the wallet on a parcel that may be cancelled in the next
- *    minute. Confirm first — that is what `runConfirmationPipeline` is for.
- * 3. **`closed`.** Cancelled, or the payment failed. Stock has been returned
- *    and nothing is being packed.
+ * | status                | shipment      | controls                          |
+ * |-----------------------|---------------|-----------------------------------|
+ * | any                   | **AWB**       | tracking + Sync. Nothing bookable. |
+ * | pending               | any           | none — confirm the order first     |
+ * | cancelled / failed    | any           | none (a staged draft may be withdrawn) |
+ * | delivered / returned  | none          | none — nothing left to ship        |
+ * | delivered / returned  | draft         | none (the stale draft may be withdrawn) |
+ * | confirmed / shipped   | none          | **Ship now** · **Send draft**      |
+ * | confirmed / shipped   | draft         | **Book AWB** · Sync · cancel draft |
+ *
+ * **`booked` is tested first**, and deliberately: a parcel that has already
+ * gone out must show its tracking whatever the order's status has since become
+ * — an order cancelled after dispatch still has a real parcel in a real van.
+ * `trackingNumber` is the test rather than `nimbusShipmentId`, because a parcel
+ * handed to a courier by hand is just as booked as one this app booked; only
+ * the AWB proves a shipment exists.
+ *
+ * **`pending` blocks everything.** An unconfirmed order is a request, not work.
+ * Staging a draft for one puts an order into NimbusPost that nobody has
+ * accepted, and booking it spends the wallet on a parcel that may be cancelled
+ * in the next minute.
+ *
+ * **A finished or cancelled order offers no shipping** — but a draft left
+ * behind on one is still a live liability sitting in NimbusPost that a human
+ * could book by mistake, so withdrawing it stays available. That is a cleanup,
+ * not a dispatch: it cannot put anything on a courier.
  */
 export function shipmentGateFor(order: ShippableOrder): ShipmentGate {
   const status = String(order.status ?? "").trim().toLowerCase();
   const awb = order.trackingNumber?.trim();
+  const draftId = order.nimbusShipmentId?.trim();
+  const stage: ShipmentStage = awb ? "booked" : draftId ? "draft" : "none";
 
   if (awb) {
     return {
       allowed: false,
       code: "booked",
+      stage,
+      can: {
+        ...NO_CONTROLS,
+        tracking: true,
+        // Only a parcel this app staged can be looked up in NimbusPost; a
+        // hand-typed AWB from another courier has nothing there to ask.
+        sync: Boolean(draftId),
+      },
       reason: `This order already has an AWB (${awb}). Booking it again would create a second shipment and charge your wallet twice.`,
     };
   }
+
   if (status === "pending") {
     return {
       allowed: false,
       code: "pending",
+      stage,
+      can: { ...NO_CONTROLS, cancelDraft: stage === "draft" },
       reason:
         "This order is still pending. Confirm it first — nothing is sent to the courier until an order has been accepted.",
     };
   }
-  if (status === "cancelled" || status === "payment_failed") {
+
+  if (CLOSED_STATUSES.has(status)) {
     return {
       allowed: false,
       code: "closed",
+      stage,
+      can: { ...NO_CONTROLS, cancelDraft: stage === "draft" },
       reason:
         status === "cancelled"
           ? "This order was cancelled and its stock returned, so there is nothing to ship."
           : "The payment on this order failed, so it is not being packed.",
     };
   }
-  return { allowed: true };
+
+  if (FINISHED_STATUSES.has(status)) {
+    return {
+      allowed: false,
+      code: "done",
+      stage,
+      can: { ...NO_CONTROLS, cancelDraft: stage === "draft" },
+      reason:
+        stage === "draft"
+          ? `This order is already ${status} — there is nothing left to ship, but an unbooked draft is still sitting in NimbusPost.`
+          : `This order is already ${status}, so there is nothing left to ship.`,
+    };
+  }
+
+  if (stage === "draft") {
+    return {
+      allowed: true,
+      code: "staged",
+      stage,
+      can: {
+        ...NO_CONTROLS,
+        book: true,
+        sync: true,
+        cancelDraft: true,
+      },
+      reason:
+        "An unbooked draft is waiting in NimbusPost. Nothing has been charged yet.",
+    };
+  }
+
+  return {
+    allowed: true,
+    code: "ready",
+    stage,
+    can: { ...NO_CONTROLS, shipNow: true, draft: true },
+    reason: "Nothing has been sent to NimbusPost for this order yet.",
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Bulk eligibility                                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The bulk verbs. Declared here, in the pure module, so the bar that offers
+ * them and the action that runs them agree on both the list and the rules —
+ * `components/admin/order-types.ts` re-exports the list for the UI.
+ */
+export type BulkVerb = "confirm" | "cancel" | "draft" | "book" | "sync";
+
+export type BulkCandidate = ShippableOrder & {
+  paymentStatus?: string | null;
+};
+
+export type BulkEligibility = {
+  ok: boolean;
+  /** Why not, in the shape "3 are already confirmed" reads from. */
+  reason: string;
+};
+
+/**
+ * May this verb run on this row?
+ *
+ * A bulk bar that offers an action the rows cannot take is a bulk bar that
+ * reports failures the operator could have been shown beforehand — so the bar
+ * counts eligible rows with this, names what it will skip, and the action
+ * refuses the same rows for the same reasons.
+ *
+ * `confirm` and `cancel` mirror `confirmOneOrder` / `cancelOneOrder` in
+ * `app/actions/admin.ts`; the three shipment verbs come straight off
+ * {@link shipmentGateFor}, so the bulk path can never be a way around the gate.
+ */
+export function bulkEligibilityFor(
+  verb: BulkVerb,
+  order: BulkCandidate
+): BulkEligibility {
+  const status = String(order.status ?? "").trim().toLowerCase();
+  const paymentStatus = String(order.paymentStatus ?? "").trim().toLowerCase();
+  const gate = shipmentGateFor(order);
+
+  switch (verb) {
+    case "confirm":
+      return status === "pending"
+        ? { ok: true, reason: "" }
+        : { ok: false, reason: `already ${status.replace(/_/g, " ")}` };
+
+    case "cancel":
+      if (status === "cancelled") return { ok: false, reason: "already cancelled" };
+      if (paymentStatus === "paid") {
+        return { ok: false, reason: "paid in full — change the status by hand" };
+      }
+      return { ok: true, reason: "" };
+
+    case "draft":
+      if (gate.can.draft) return { ok: true, reason: "" };
+      return {
+        ok: false,
+        reason:
+          gate.stage === "draft"
+            ? "already staged"
+            : gate.stage === "booked"
+              ? "already booked"
+              : gate.code === "pending"
+                ? "not confirmed yet"
+                : "nothing left to ship",
+      };
+
+    case "book":
+      if (gate.can.book) return { ok: true, reason: "" };
+      return {
+        ok: false,
+        reason:
+          gate.stage === "booked"
+            ? "already booked"
+            : gate.stage === "none" && gate.allowed
+              ? "no draft staged"
+              : gate.code === "pending"
+                ? "not confirmed yet"
+                : "nothing left to ship",
+      };
+
+    case "sync":
+      if (gate.can.sync) return { ok: true, reason: "" };
+      return {
+        ok: false,
+        reason:
+          gate.stage === "none"
+            ? "nothing staged in NimbusPost"
+            : "no NimbusPost record to sync against",
+      };
+  }
+}
+
+/** `{ eligible, skipped }` for a whole selection, for the bulk bar's readout. */
+export function summariseBulk<T extends BulkCandidate>(
+  verb: BulkVerb,
+  orders: readonly T[]
+): { eligible: T[]; skipped: { order: T; reason: string }[] } {
+  const eligible: T[] = [];
+  const skipped: { order: T; reason: string }[] = [];
+  for (const order of orders) {
+    const check = bulkEligibilityFor(verb, order);
+    if (check.ok) eligible.push(order);
+    else skipped.push({ order, reason: check.reason });
+  }
+  return { eligible, skipped };
 }
 
 /* ------------------------------------------------------------------ */
@@ -430,6 +746,9 @@ export function shipmentGateFor(order: ShippableOrder): ShipmentGate {
 export type CourierQuote = {
   total: number;
   tatDays: number | null;
+  /** Present on the real option types; absent in a bare test fixture. */
+  courierId?: string;
+  name?: string;
 };
 
 /**
@@ -440,12 +759,30 @@ export type CourierQuote = {
  * a missing number is not a fast one. Both sort defensively instead of
  * trusting the order `listCourierOptions` happens to return, because "it is
  * already sorted" is a fact that stops being true silently.
+ *
+ * Anything else is a **pinned courier**: matched on id first, then on name,
+ * case-insensitively. A pin that is not quoting for this parcel and pincode
+ * falls back to cheapest rather than leaving the parcel unshipped — the
+ * caller compares what came back with what was pinned and says so (see
+ * `runConfirmationPipeline`), because silently shipping with someone else is
+ * the kind of thing that shows up on an invoice a month later.
  */
 export function pickCourier<T extends CourierQuote>(
   options: readonly T[],
-  preference: AutoShipCourier
+  preference: CourierChoice
 ): T | null {
   if (!options.length) return null;
+
+  if (!isCourierStrategy(preference)) {
+    const wanted = preference.trim().toLowerCase();
+    const pinned = options.find(
+      (o) =>
+        String(o.courierId ?? "").toLowerCase() === wanted ||
+        String(o.name ?? "").trim().toLowerCase() === wanted
+    );
+    if (pinned) return pinned;
+    return pickCourier(options, "cheapest");
+  }
 
   const eta = (o: T) =>
     typeof o.tatDays === "number" && Number.isFinite(o.tatDays)
@@ -476,10 +813,31 @@ export const COURIER_PREFERENCE_LABEL: Record<AutoShipCourier, string> = {
   fastest: "Fastest",
 };
 
+/** Q1, in the words the admin screens use. */
+export const DISPATCH_MODE_LABEL: Record<DispatchOnConfirm, string> = {
+  off: "Do nothing",
+  draft: "Stage a draft",
+  book: "Book the AWB",
+};
+
+/** Q1 as a state readout — what will actually happen, not what it is called. */
+export const DISPATCH_MODE_DETAIL: Record<DispatchOnConfirm, string> = {
+  off: "Confirming changes nothing with the courier. You dispatch by hand.",
+  draft: "Confirming stages a free, unbooked draft. You book it.",
+  book: "Confirming books the AWB and charges your NimbusPost wallet.",
+};
+
+/** A strategy reads as a word; anything else is a courier's own name. */
+export function courierChoiceLabel(choice: CourierChoice): string {
+  return isCourierStrategy(choice) ? COURIER_PREFERENCE_LABEL[choice] : choice;
+}
+
 /**
  * True for the one combination that books real shipments, spends real money
  * and shows a human nothing until it is done. The UI has to say so out loud.
  */
 export function isFullyUnattended(settings: PipelineSettings): boolean {
-  return settings.orderConfirmMode === "auto" && settings.autoShipOnConfirm;
+  return (
+    settings.orderConfirmMode === "auto" && dispatchModeOf(settings) === "book"
+  );
 }

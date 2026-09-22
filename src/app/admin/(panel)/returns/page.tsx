@@ -1,6 +1,6 @@
 import Link from "next/link";
 import Image from "next/image";
-import { PackageX, ExternalLink, AlertTriangle, Clock } from "lucide-react";
+import { PackageX, ExternalLink, AlertTriangle, Clock, Truck } from "lucide-react";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { DEFAULT_SETTINGS } from "@/lib/settings";
@@ -12,12 +12,15 @@ import { ReturnableBulk } from "@/components/admin/returnable-bulk";
 import { listReturnableProducts } from "@/app/actions/returns";
 import { ReturnFilters } from "@/components/admin/return-filters";
 import { ReturnActions } from "@/components/admin/return-actions";
+import { ReturnRto } from "@/components/admin/return-rto";
+import { listRtoOrders } from "@/lib/nimbus-returns";
 import {
   DEFAULT_REFUND_SETTINGS,
   OPEN_RETURN_STATUSES,
   OUR_FAULT_PATTERNS,
   OUR_FAULT_REASONS,
   REFUND_METHOD_LABEL,
+  REVERSE_LEG_LABEL,
   RETURN_STATUSES,
   RETURN_STATUS_COLOR,
   RETURN_STATUS_LABEL,
@@ -28,6 +31,7 @@ import {
   isReturnStatus,
   normaliseReturnReasons,
   returnReasonLabel,
+  reverseLegOf,
   type ReturnStatus,
 } from "@/lib/returns";
 
@@ -173,6 +177,17 @@ export default async function AdminReturns({
     and.push({ status: "approved", nimbusError: { not: null } });
   }
 
+  // "Awaiting collection" — the queue the draft-first flow creates. A staged
+  // draft with no AWB is a pickup nobody has booked, which looks identical to a
+  // booked one on a status badge alone and can sit there for weeks.
+  if (sp.issue === "unbooked") {
+    and.push({
+      status: { in: ["approved", "picked_up"] },
+      nimbusAwb: null,
+      nimbusError: null,
+    });
+  }
+
   if (sp.age === "today") and.push({ createdAt: { gte: new Date(now - DAY) } });
   else if (sp.age === "7") and.push({ createdAt: { gte: new Date(now - 7 * DAY) } });
   else if (sp.age === "30") and.push({ createdAt: { gte: new Date(now - 30 * DAY) } });
@@ -185,7 +200,7 @@ export default async function AdminReturns({
 
   // The policy tab needs the queue count for its tab badge, nothing more —
   // skip the list query entirely rather than paying for 100 rows nobody sees.
-  const [requests, grouped, openCount] = await Promise.all([
+  const [requests, grouped, openCount, rto] = await Promise.all([
     tab === "requests"
       ? prisma.returnRequest
           .findMany({
@@ -231,6 +246,9 @@ export default async function AdminReturns({
     prisma.returnRequest
       .count({ where: { status: { in: OPEN_RETURN_STATUSES } } })
       .catch(() => 0),
+    // Goods coming back with no return behind them. Only the queue shows these;
+    // the policy tab is about rules, not today's parcels.
+    tab === "requests" ? listRtoOrders() : [],
   ]);
 
   const counts: Record<string, number> = { all: 0, open: openCount };
@@ -325,6 +343,8 @@ export default async function AdminReturns({
         <div className="mt-4">
           <ReturnFilters counts={counts} reasons={policy.returnReasons} />
 
+          <ReturnRto orders={rto} />
+
           {requests.length === 0 ? (
             <div className="mt-4 rounded-xl border border-dashed border-border p-10 text-center">
               <PackageX className="mx-auto h-8 w-8 text-muted-foreground" />
@@ -348,6 +368,16 @@ export default async function AdminReturns({
                 const waitingDays = Math.floor((now - r.createdAt.getTime()) / DAY);
                 const stale = s === "pending" && waitingDays >= 3;
                 const lineTotal = r.unitPrice * r.quantity;
+
+                // Where the parcel is, as opposed to what the status word says.
+                // A "drafted" leg is the one that hides: the return reads
+                // Approved, the pickup is staged, and nobody has booked it.
+                const leg = reverseLegOf({
+                  status: s,
+                  nimbusOrderId: r.nimbusOrderId,
+                  nimbusAwb: r.nimbusAwb,
+                  nimbusError: r.nimbusError,
+                });
 
                 // The same `computeRefund` the approval action re-runs, and
                 // the same one the customer's form previews with. Earlier
@@ -412,6 +442,23 @@ export default async function AdminReturns({
                           {r.nimbusError && s === "approved" && (
                             <span className="inline-flex items-center gap-1 rounded-full bg-danger/15 px-2 py-0.5 text-[10px] font-medium text-danger">
                               <AlertTriangle className="h-3 w-3" /> pickup failed
+                            </span>
+                          )}
+                          {/* Only the states that need a human. "Back with you"
+                              and "no pickup" are already said elsewhere on the
+                              card, and "failed" has its own badge above. */}
+                          {(leg === "drafted" ||
+                            leg === "booked" ||
+                            leg === "in_transit") && (
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                                leg === "drafted"
+                                  ? "bg-accent/15 text-accent"
+                                  : "bg-muted text-muted-foreground"
+                              }`}
+                            >
+                              <Truck className="h-3 w-3" />
+                              {REVERSE_LEG_LABEL[leg].toLowerCase()}
                             </span>
                           )}
                         </div>
@@ -541,6 +588,8 @@ export default async function AdminReturns({
                         }}
                         nimbusError={r.nimbusError}
                         nimbusOrderId={r.nimbusOrderId}
+                        nimbusAwb={r.nimbusAwb}
+                        nimbusCourier={r.nimbusCourier}
                         nimbusEnabled={policy.nimbusEnabled}
                       />
                     </div>

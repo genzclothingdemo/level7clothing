@@ -199,7 +199,7 @@ export function SubcategoryManager({
         >
           <ArrowLeft className="h-4 w-4" /> All categories
         </Link>
-        <h1 className="mt-2 font-serif text-3xl">{category.name}</h1>
+        <h1 className="mt-2 font-serif text-2xl">{category.name}</h1>
         <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
           Subcategories are the groups shoppers see on this category page. A
           group with <b>2 or more</b> products shows as one tile (name, photo,
@@ -318,7 +318,7 @@ export function SubcategoryManager({
                             images: d.images.filter((u) => u !== img),
                           }))
                         }
-                        className="absolute right-1 top-1 grid h-6 w-6 cursor-pointer place-items-center rounded-full bg-black/65 text-white backdrop-blur"
+                        className="absolute right-1 top-1 grid h-6 w-6 cursor-pointer place-items-center rounded-lg bg-black/65 text-white backdrop-blur"
                         title="Remove (the file itself is never deleted)"
                       >
                         <X className="h-3.5 w-3.5" />
@@ -449,7 +449,7 @@ export function SubcategoryManager({
                     <button
                       type="button"
                       onClick={() => beginEdit(sub)}
-                      className="grid h-9 w-9 cursor-pointer place-items-center rounded-full border border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+                      className="grid h-9 w-9 cursor-pointer place-items-center rounded-lg border border-border text-muted-foreground hover:bg-muted hover:text-foreground"
                       title="Edit"
                     >
                       <Edit2 className="h-3.5 w-3.5" />
@@ -457,7 +457,7 @@ export function SubcategoryManager({
                     <button
                       type="button"
                       onClick={() => remove(sub)}
-                      className="grid h-9 w-9 cursor-pointer place-items-center rounded-full border border-border text-muted-foreground hover:border-danger/20 hover:bg-danger/10 hover:text-danger"
+                      className="grid h-9 w-9 cursor-pointer place-items-center rounded-lg border border-border text-muted-foreground hover:border-danger/20 hover:bg-danger/10 hover:text-danger"
                       title="Delete"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
@@ -691,7 +691,7 @@ function FilterBox({
           <button
             type="button"
             onClick={() => onChange("")}
-            className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 cursor-pointer place-items-center rounded-full text-muted-foreground hover:bg-muted"
+            className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 cursor-pointer place-items-center rounded-lg text-muted-foreground hover:bg-muted"
             aria-label="Clear filter"
           >
             <X className="h-4 w-4" />

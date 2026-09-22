@@ -121,7 +121,7 @@ export function UpdateWatcher({ current }: { current: string }) {
     <div
       role="status"
       aria-live="polite"
-      className="fixed inset-x-0 bottom-0 z-[90] flex justify-center px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:bottom-4"
+      className="fixed inset-x-0 bottom-0 z-[90] flex justify-center px-4 pb-[calc(1rem+var(--sa-bottom))] sm:bottom-4"
     >
       <div className="flex w-full max-w-sm items-center gap-3 rounded-lg border border-foreground/12 bg-foreground px-4 py-3 text-background shadow-lg">
         <p className="flex-1 text-xs leading-relaxed tracking-wide">

@@ -38,17 +38,19 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { updateOrderPipelineSettings, updateSettings } from "@/app/actions/admin";
+import { dispatchModeOf } from "@/lib/orders-pipeline";
+import { InfoTip } from "@/components/store/info-tip";
 import {
   DEFAULT_TAB,
   FIELD_META,
   SETTINGS_PANEL_ID,
   SaveBar,
   SettingsTabs,
-  TABS,
   changedKeys,
   countByTab,
   isPipelineKey,
   isTabKey,
+  tabMeta,
   type DraftKey,
   type SettingsDraft,
   type TabKey,
@@ -166,16 +168,35 @@ export function SettingsForm({
     const failures: string[] = [];
 
     if (pipelineDirty) {
+      // Q1 goes as the enum. The action derives the legacy `autoShipOnConfirm`
+      // boolean from it and writes both columns in step, so this form never
+      // sends that boolean — one decision, one value, one writer.
       const res = await updateOrderPipelineSettings({
         orderConfirmMode: draft.orderConfirmMode,
         autoConfirmPrepaid: draft.autoConfirmPrepaid,
         autoConfirmPartial: draft.autoConfirmPartial,
         autoConfirmCod: draft.autoConfirmCod,
-        autoShipOnConfirm: draft.autoShipOnConfirm,
+        dispatchOnConfirm: draft.dispatchOnConfirm,
         autoShipCourier: draft.autoShipCourier,
       });
-      if (res.ok) next = { ...next, ...res.settings };
-      else failures.push(res.error || "Order automation could not be saved");
+      if (res.ok) {
+        // Rebased field by field rather than spread: `PipelineSettings` carries
+        // `autoShipOnConfirm`, which is not part of this draft, and its
+        // `dispatchOnConfirm` is optional for the migration — `dispatchModeOf`
+        // is the one reader that resolves it, exactly as every other caller
+        // does.
+        next = {
+          ...next,
+          orderConfirmMode: res.settings.orderConfirmMode,
+          autoConfirmPrepaid: res.settings.autoConfirmPrepaid,
+          autoConfirmPartial: res.settings.autoConfirmPartial,
+          autoConfirmCod: res.settings.autoConfirmCod,
+          dispatchOnConfirm: dispatchModeOf(res.settings),
+          autoShipCourier: res.settings.autoShipCourier,
+        };
+      } else {
+        failures.push(res.error || "Order automation could not be saved");
+      }
     }
 
     if (!settingsDirty) {
@@ -287,7 +308,7 @@ export function SettingsForm({
   }
 
   const Section = SECTIONS[tab];
-  const heading = TABS.find((t) => t.key === tab)?.heading ?? "";
+  const meta = tabMeta(tab);
 
   return (
     <div className="max-w-3xl">
@@ -299,7 +320,19 @@ export function SettingsForm({
         aria-labelledby={`settings-tab-${tab}`}
         className="mt-4 min-w-0"
       >
-        <h2 className="sr-only">{heading}</h2>
+        {/*
+          The heading used to be `sr-only`, which left a sighted owner looking
+          at seven nouns in a tab bar with nothing to choose between them. It is
+          printed now: the heading names the group, the blurb says in a few
+          words what the tab is FOR, and the long version is behind the (i) —
+          the same three levels the sections below already use.
+        */}
+        <div className="mb-3 flex min-h-8 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <h2 className="eyebrow">{meta.heading}</h2>
+          <p className="min-w-0 text-xs text-muted-foreground">{meta.blurb}</p>
+          <InfoTip term={meta.heading}>{meta.guide}</InfoTip>
+        </div>
+
         <Section f={draft} set={set} isDirty={isDirty} facts={facts} />
       </div>
 

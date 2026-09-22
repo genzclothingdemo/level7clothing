@@ -526,6 +526,65 @@ the same shape as the `defaultReturnsInfo` trap above.
   now resolves the warehouse via `GET /v2/warehouses` (matching name / display name /
   code, falling back to the primary), so a mismatch warns rather than hard-failing.
 
+## The reverse leg — returns are a second shipment, not a status
+
+A return is a parcel travelling the other way, and until 2026-09-22 only half
+of that existed. What was wired: approving a return created a reverse **draft**
+(`decideReturn` → `draftReturnPickup` → `createReverseDraftOrder`). What was
+not:
+
+- **Nothing could book it.** No return path ever called `shipDraft`. The card
+  said "book the courier in NimbusPost", which was a dead end, because…
+- **`ReturnRequest.nimbusAwb` / `nimbusCourier` existed and nothing ever wrote
+  them.** Two columns, zero writers.
+- **The webhook only ever looked up `Order.trackingNumber`**, so every reverse
+  scan hit "No order found — ignoring" and was dropped with a 200. A pickup
+  could be collected, travel and arrive with nothing in this database moving.
+- **Refunds were not gated on the goods.** `markRefundPaid` accepted `approved`,
+  so money could leave with the item still in the customer's hallway, and
+  nothing on screen said so.
+- **RTO** (delivery failed, parcel returns to origin) set the order to
+  `cancelled`, which emails the customer the word "cancelled" and leaves no
+  record that goods are coming back.
+
+Now: `src/lib/nimbus-returns.ts` holds the reverse helpers, and the reverse
+status vocabulary in `lib/returns.ts` is built **on `mapNimbusStatus`, not
+beside it** — see "one shared status map". The reverse leg inverts the ends:
+courier `shipped` → `picked_up`, courier `delivered` → `received`.
+
+Three rules worth keeping:
+
+1. **Draft-first applies here too.** `bookReturnPickup` refuses to *create* —
+   it only books a draft that already exists, and the button names the wallet
+   charge before it runs.
+2. **An AWB that matches both an order and a return is not guessed.** The
+   webhook refuses, changes nothing, names both records and returns 409. The
+   tempting "fix" — writing a reverse AWB onto `Order.trackingNumber` — would
+   clobber the forward AWB and let a failed pickup cancel a delivered order.
+3. **Refunding before the goods are back is a confirmation, not a block.** A
+   hard refusal just pushes someone into marking a return "received"
+   dishonestly, which destroys the only record of where the parcel actually is.
+   The panel states the parcel's location and the button reads "Refund early —
+   goods not back".
+
+`/api/cron/nimbus-sync` polls **both legs** in one `Promise.allSettled`, so one
+failing does not abandon the other.
+
+### Known gaps, deliberately left
+
+`ReturnRequest` has no `deliveryStatus` / `deliveryStatusAt` / `lastSyncedAt`
+(raw reverse scans go into `statusHistory` JSON instead, so there is no indexed
+way to find a stale reverse shipment), no `refundedEarly` flag (early payouts
+are in the history note — auditable, not queryable), and no stored
+`trackingUrl` (it is synthesised from the AWB). RTO is detected by a
+`contains "rto"` scan of `Order.deliveryStatus` rather than an `rtoHandledAt`
+column, so the RTO band cannot be dismissed and a later scan overwriting the
+text loses the order. All four are columns, not logic — add them together.
+
+Reverse events also send **no customer email**: `sendOrderStatusEmail` talks
+about an order's progress, which is the wrong voice for a parcel going the
+other way. A return template belongs in `lib/email.ts`.
+
 ## Errors must not become 404s
 
 `getProductBySlug` intentionally **does not** catch DB errors. Callers turn `null`

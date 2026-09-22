@@ -56,7 +56,7 @@ export function WhatsAppProductButton({
         aria-label={`Ask about ${product.name} on WhatsApp`}
         title="Ask on WhatsApp"
         className={cn(
-          "grid h-11 w-11 shrink-0 place-items-center rounded-full border border-[#25D366]/40 text-[#1da851] transition-all duration-300 hover:-translate-y-0.5 hover:bg-[#25D366] hover:text-white hover:shadow-lg hover:shadow-[#25D366]/30 cursor-pointer",
+          "grid h-11 w-11 shrink-0 place-items-center rounded-full border border-[#25D366]/40 text-[#1da851] transition-all duration-300 hover:bg-[#25D366] hover:text-white hover:shadow-lg hover:shadow-[#25D366]/30 cursor-pointer",
           className
         )}
       >
@@ -73,8 +73,8 @@ export function WhatsAppProductButton({
         onClick={open}
         aria-label={`Ask about ${product.name} on WhatsApp`}
         className={cn(
-          "inline-flex h-12 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-full border border-[#25D366]/50 px-5 text-sm font-medium text-[#1da851] transition-all duration-200",
-          "hover:border-[#25D366] hover:bg-[#25D366]/8 hover:shadow-sm hover:-translate-y-0.5",
+          "inline-flex h-12 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg border border-[#25D366]/50 px-5 text-sm font-medium text-[#1da851] transition-all duration-200",
+          "hover:border-[#25D366] hover:bg-[#25D366]/8 hover:shadow-sm",
           "active:scale-[0.97]",
           className
         )}
@@ -90,7 +90,7 @@ export function WhatsAppProductButton({
       type="button"
       onClick={open}
       className={cn(
-        "btn-shine inline-flex h-13 w-full cursor-pointer items-center justify-center gap-2 rounded-full bg-[#25D366] px-7 text-base font-medium text-white transition-all duration-200 hover:-translate-y-0.5 hover:opacity-95",
+        "btn-shine inline-flex h-13 w-full cursor-pointer items-center justify-center gap-2 rounded-lg bg-[#25D366] px-7 text-base font-medium text-white transition-all duration-200 hover:opacity-95",
         className
       )}
     >

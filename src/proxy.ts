@@ -12,8 +12,19 @@ export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (pathname.startsWith("/admin") && pathname !== "/admin/login") {
+    // Local-only dev bypass — must match `devBypassSession()` in lib/auth.ts
+    // exactly, or this gate and the layout's gate disagree and admin loops
+    // forever (which is the failure the cookie-name note above describes).
+    //
+    // All three conditions must hold: not a production build, not on Vercel
+    // (set on every deployment including previews), and explicitly opted in.
+    const devBypass =
+      process.env.NODE_ENV !== "production" &&
+      !process.env.VERCEL &&
+      process.env.ADMIN_DEV_BYPASS === "1";
+
     const hasCookie = req.cookies.has(ADMIN_COOKIE);
-    if (!hasCookie) {
+    if (!hasCookie && !devBypass) {
       const url = req.nextUrl.clone();
       url.pathname = "/admin/login";
       url.searchParams.set("next", pathname);

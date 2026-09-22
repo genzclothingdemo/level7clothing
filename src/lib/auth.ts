@@ -72,7 +72,41 @@ export async function authenticateAdmin(
 }
 
 /** Read the current admin session from the request cookies (server side). */
+/**
+ * Local-only development bypass for the admin gate.
+ *
+ * Why this exists: admin pages are the one part of this app that nothing in
+ * CI can see. `tsc` and `next build` both pass on React Server Component
+ * boundary violations — passing an icon component across the server/client
+ * line, or calling a `"use client"` function from a server page — because
+ * those only throw when a page actually *renders*. Two of them reached
+ * production on 2026-09-22 for exactly that reason.
+ *
+ * Three independent conditions, ALL of which must hold. Any one of them is
+ * enough to keep it off; together they mean it cannot be switched on in
+ * production by a stray environment variable:
+ *
+ *   1. `NODE_ENV !== "production"` — a production build never bypasses.
+ *   2. `!process.env.VERCEL` — Vercel sets this on every deployment,
+ *      including preview builds, so this can never be on in a deployed app.
+ *   3. `ADMIN_DEV_BYPASS === "1"` — explicit opt-in. Absent by default, and
+ *      it is NOT in `.env.example`, so it cannot be copied into a real
+ *      environment by accident.
+ *
+ * It is deliberately not a password shortcut: no credential is read, typed or
+ * stored anywhere. It simply returns a clearly-labelled local session.
+ */
+function devBypassSession(): AdminSession | null {
+  if (process.env.NODE_ENV === "production") return null;
+  if (process.env.VERCEL) return null;
+  if (process.env.ADMIN_DEV_BYPASS !== "1") return null;
+  return { email: "dev-bypass@localhost", name: "Local dev" } as AdminSession;
+}
+
 export async function getAdminSession(): Promise<AdminSession | null> {
+  const bypass = devBypassSession();
+  if (bypass) return bypass;
+
   const store = await cookies();
   const token = store.get(ADMIN_COOKIE)?.value;
   if (!token) return null;

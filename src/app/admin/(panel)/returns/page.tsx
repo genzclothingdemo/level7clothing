@@ -15,7 +15,6 @@ import { ReturnActions } from "@/components/admin/return-actions";
 import { ReturnRto } from "@/components/admin/return-rto";
 import { listRtoOrders } from "@/lib/nimbus-returns";
 import {
-  DEFAULT_REFUND_SETTINGS,
   OPEN_RETURN_STATUSES,
   OUR_FAULT_PATTERNS,
   OUR_FAULT_REASONS,
@@ -30,8 +29,10 @@ import {
   isRefundMethod,
   isReturnStatus,
   normaliseReturnReasons,
+  outcomeOfRefundMethod,
   returnReasonLabel,
   reverseLegOf,
+  type RefundMethod,
   type ReturnStatus,
 } from "@/lib/returns";
 
@@ -81,10 +82,6 @@ async function readPolicy() {
         returnWindowDays: true,
         returnReasons: true,
         nimbusEnabled: true,
-        refundFeePercent: true,
-        refundFeeFlat: true,
-        partialAdvanceRefundable: true,
-        waiveRefundFeeOnOurFault: true,
         // Owned by Settings → Payments. Read-only here: it decides whether the
         // part-paid advance rule can apply at all.
         partialEnabled: true,
@@ -99,19 +96,9 @@ async function readPolicy() {
     returnReasons: normaliseReturnReasons(row?.returnReasons),
     nimbusEnabled: row?.nimbusEnabled ?? DEFAULT_SETTINGS.nimbusEnabled,
     partialEnabled: row?.partialEnabled ?? DEFAULT_SETTINGS.partialEnabled,
-    // The money rules. A failed read falls back to "no fee" rather than to a
-    // guess — inventing a deduction is the one wrong answer here.
-    refund: {
-      refundFeePercent:
-        row?.refundFeePercent ?? DEFAULT_REFUND_SETTINGS.refundFeePercent,
-      refundFeeFlat: row?.refundFeeFlat ?? DEFAULT_REFUND_SETTINGS.refundFeeFlat,
-      partialAdvanceRefundable:
-        row?.partialAdvanceRefundable ??
-        DEFAULT_REFUND_SETTINGS.partialAdvanceRefundable,
-      waiveRefundFeeOnOurFault:
-        row?.waiveRefundFeeOnOurFault ??
-        DEFAULT_REFUND_SETTINGS.waiveRefundFeeOnOurFault,
-    },
+    // No refund columns are read here any more. A return is a full refund of
+    // the goods — `computeRefund` cannot be handed a fee — so a stale or
+    // unreadable settings row can no longer change what a refund comes to.
   };
 }
 
@@ -226,6 +213,10 @@ export default async function AdminReturns({
                   amountPaid: true,
                   balanceDue: true,
                   subtotal: true,
+                  // Never refunded, and named in the breakdown so the owner can
+                  // explain the gap between the order total and the refund.
+                  shipping: true,
+                  paymentFee: true,
                   discountTotal: true,
                   status: true,
                   paymentStatus: true,
@@ -320,10 +311,6 @@ export default async function AdminReturns({
               defaultReturnable: policy.defaultReturnable,
               returnWindowDays: policy.returnWindowDays,
               returnReasons: policy.returnReasons,
-              refundFeePercent: policy.refund.refundFeePercent,
-              refundFeeFlat: policy.refund.refundFeeFlat,
-              partialAdvanceRefundable: policy.refund.partialAdvanceRefundable,
-              waiveRefundFeeOnOurFault: policy.refund.waiveRefundFeeOnOurFault,
               partialEnabled: policy.partialEnabled,
             }}
           />
@@ -383,12 +370,22 @@ export default async function AdminReturns({
                 // the same one the customer's form previews with. Earlier
                 // refunds on this order are subtracted; this request's own
                 // figure is excluded so it isn't counted against itself.
+                // What the customer asked for, read off the stored method. The
+                // panel opens on their choice rather than defaulting every
+                // request to "send the money back".
+                const storedMethod = isRefundMethod(r.refundMethod ?? "")
+                  ? (r.refundMethod as RefundMethod)
+                  : null;
+                const outcome = outcomeOfRefundMethod(storedMethod);
+
                 const refund = computeRefund({
                   order: {
                     total: r.order.total,
                     amountPaid: r.order.amountPaid,
                     balanceDue: r.order.balanceDue,
                     subtotal: r.order.subtotal,
+                    shipping: r.order.shipping,
+                    paymentFee: r.order.paymentFee,
                     discountTotal: r.order.discountTotal,
                     status: r.order.status,
                     paymentStatus: r.order.paymentStatus,
@@ -403,8 +400,9 @@ export default async function AdminReturns({
                     ),
                   },
                   lines: [{ unitPrice: r.unitPrice, quantity: r.quantity }],
-                  settings: policy.refund,
                   reason: r.reason,
+                  outcome,
+                  destination: storedMethod === "upi" ? "upi" : undefined,
                 });
 
                 return (
@@ -532,6 +530,19 @@ export default async function AdminReturns({
                         {/* The figures fixed at the decision — deliberately
                             the stored ones, not a fresh calculation, so a
                             later fee change can't rewrite what went out. */}
+                        {/* What the customer asked for, before any decision.
+                            Shown on every request, because "they want a
+                            different size" is the first thing the reviewer
+                            needs and it used to be buried in the note. */}
+                        {outcome !== "refund" && (
+                          <p className="mt-1.5 inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                            {outcome === "replace"
+                              ? "Wants a replacement"
+                              : "Wants a different size"}
+                            {" · no refund"}
+                          </p>
+                        )}
+
                         {r.refundAmount != null && (
                           <div className="mt-1.5 rounded-lg border border-border bg-muted/40 px-2.5 py-1.5 text-xs">
                             <p className="flex flex-wrap items-baseline gap-x-1.5">
@@ -541,6 +552,9 @@ export default async function AdminReturns({
                               <b className="tabular-nums">
                                 {formatINR(r.refundAmount)}
                               </b>
+                              {/* Only ever non-zero on a row decided under the
+                                  old fee policy. History reads as it was
+                                  agreed; nothing new can produce one. */}
                               {r.refundGross != null && r.refundFee ? (
                                 <span className="text-muted-foreground tabular-nums">
                                   ({formatINR(r.refundGross)} − {formatINR(r.refundFee)}{" "}

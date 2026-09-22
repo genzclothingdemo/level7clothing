@@ -114,23 +114,57 @@ export function imagesForSelection(
 }
 
 /**
+ * The value the admin's Image Controller select carries for the explicit
+ * "None" choice. It exists only in the editor's local form state — what is
+ * *persisted* for None is an empty `propertyModules.images`, never this string.
+ * Lives here rather than in a `"use client"` module so both halves can import
+ * it (see the RSC note in CLAUDE.md).
+ */
+export const IMAGE_CONTROLLER_NONE = "__none__";
+
+/**
  * The name of the "visual" attribute — the one whose value swaps the gallery.
  * Authored in admin as the image-driving option and persisted as
- * `propertyModules.images = [name]`; falls back to the first attribute for
- * products saved before that contract existed. Returns null when the product
- * has no options at all. Nothing about the storefront hardcodes "Design" — the
- * label the customer sees is whatever this returns.
+ * `propertyModules.images`. Nothing about the storefront hardcodes "Design" —
+ * the label the customer sees is whatever this returns.
+ *
+ * Three states, and the difference between the last two is the whole point:
+ *
+ * | `propertyModules.images` | means                     | result                  |
+ * |--------------------------|---------------------------|-------------------------|
+ * | absent / not an array    | never declared (legacy)   | first attribute         |
+ * | `[]`                     | **explicitly None**       | `null` — common only    |
+ * | `["Colour"]`             | Colour drives the gallery | `"Colour"`              |
+ *
+ * `[]` reads literally under the `PropertyDependencies` model — "images depend
+ * on no option" — so no magic string reaches the database, and it is already
+ * what the editor writes for a product with no options at all. Unset stays
+ * distinguishable because the key is simply absent on rows saved before this
+ * contract existed (`propertyModules` was `{}`), which is why the fallback to
+ * `attributes[0]` is reachable only from that branch.
+ *
+ * With None the storefront shows the common photos and nothing else: the
+ * gallery stops filtering by value (`galleryForSelection`), listing cards fall
+ * through to the product's own stills (`variantPreviewImages`) and the option
+ * renders as pills rather than image cards, because there are no per-value
+ * previews to put on them.
  */
 export function visualAttributeName(product: {
   attributes?: Attribute[];
   propertyModules?: PropertyDependencies;
 }): string | null {
   const pmImages = product.propertyModules?.images;
-  const declared = Array.isArray(pmImages) ? pmImages[0] : undefined;
   const attributes = product.attributes ?? [];
-  // Only honour a declared name that is still a real attribute (the admin may
-  // have renamed or deleted the option since).
-  if (declared && attributes.some((a) => a.name === declared)) return declared;
+
+  if (Array.isArray(pmImages)) {
+    const declared = pmImages[0];
+    // Declared, and empty — the admin's explicit "photos don't vary" answer.
+    if (!declared) return null;
+    if (attributes.some((a) => a.name === declared)) return declared;
+    // Declared a name that is no longer an attribute (the option was renamed
+    // or deleted since). Fall through rather than silently becoming None.
+  }
+
   return attributes[0]?.name ?? null;
 }
 
@@ -267,12 +301,15 @@ export function variantPreviewImages(
  * Resolves the storefront gallery for a selection from the relational
  * ProductImage rows (`product.media`) — the intended source of truth.
  *
- * The "visual variant" attribute is dynamic: it's the first attribute driving
- * images (`propertyModules.images[0]`), falling back to the first attribute
- * (`attributes[0]`) when no image dependencies are declared. Its selected value
- * scopes the gallery. Result = media tagged with that value (ordered by
- * sortOrder) followed by the common media (`variantValue == null`, ordered by
- * sortOrder), de-duplicated by url. Falls back to `imagesForSelection` (the
+ * The "visual variant" attribute is dynamic — see `visualAttributeName`, which
+ * also decides when there is deliberately none. Its selected value scopes the
+ * gallery, and the order is the contract the admin edits against: that value's
+ * media (in its own sortOrder) and THEN the common media (in theirs), never
+ * interleaved. A value's photos are only ever its own — common photos belong
+ * to the product, not to the value, which is why the two lists are sorted
+ * separately and concatenated rather than merged. With no visual attribute
+ * (None, or a product with no options) the result is the common media alone.
+ * De-duplicated by url. Falls back to `imagesForSelection` (the
  * legacy sellableVariants JSON → `product.images`) when there are no media rows
  * or the computed list is empty. Videos are returned like images (the gallery
  * detects them by extension). Pure — no DB/server deps.

@@ -20,41 +20,52 @@
  *
  * ## The decision tree, which the UI mirrors exactly
  *
- *   returnsEnabled OFF  → nothing else applies. Window, reasons, refund mode,
- *                         fees, waiver and customer copy are all ABSENT, not
- *                         disabled: a greyed-out fee box still reads as a rule
- *                         that is in force.
- *   returnsEnabled ON   → window + catalogue default + accepted reasons.
- *     refund mode FULL  → no fee fields, and no our-fault waiver — there is no
- *                         fee for it to waive.
- *     refund mode FEE   → percent + flat (summed), and the waiver, which is the
- *                         one control that turns a fee-charging store into a
- *                         full refund for damaged / wrong-item returns.
- *   partial payments OFF at checkout → the part-paid advance switch is absent.
- *                         No order can ever be part-paid, so the rule is dead.
+ *   returnsEnabled OFF  → nothing else applies. Window, reasons, the refund
+ *                         rules and the customer copy are all ABSENT, not
+ *                         disabled: a greyed-out rule still reads as one that
+ *                         is in force.
+ *   returnsEnabled ON   → window + catalogue default + accepted reasons, and a
+ *                         statement of how refunds work.
+ *   partial payments OFF at checkout → the part-paid advance rule is absent.
+ *                         No order can ever be part-paid, so it cannot apply.
  *
  * Every hidden control is hidden because it *cannot apply*, and each branch
  * says so in one line where a reader might otherwise wonder where it went.
+ *
+ * ## There is nothing left to configure about the money
+ *
+ * The four refund settings — a percentage kept, a flat amount kept, whether a
+ * part-paid advance came back, and a waiver for our own mistakes — are gone.
+ * The rule is fixed in `computeRefund` and stated here instead: **a return is a
+ * full refund of the goods.** The store keeps only what it genuinely spent
+ * (shipping, the cash-handling fee, and the advance that committed the piece),
+ * and it *pays* the return leg itself when the fault was its own.
+ *
+ * That is a deliberate loss of flexibility. A settings screen that can quietly
+ * make a refund smaller is a screen somebody has to check before they can
+ * answer "what does this customer get?" — and the answer was being worked out
+ * in three places. Now it is one sentence, and the card's job is to say it and
+ * show it in rupees.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, ShieldCheck, ShieldOff } from "lucide-react";
+import { Loader2, ShieldCheck, ShieldOff, Truck } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, Field, Segmented, SwitchRow } from "@/components/admin/form-kit";
+import { Card, Field, SwitchRow } from "@/components/admin/form-kit";
 import { InfoTip } from "@/components/store/info-tip";
 import { Disclosure } from "@/components/store/disclosure";
 import { formatINR } from "@/lib/utils";
 import { updateReturnDefaults } from "@/app/actions/returns";
 import {
-  applyRefundMode,
+  RETURN_OUTCOMES,
+  RETURN_OUTCOME_BLURB,
+  RETURN_OUTCOME_LABEL,
   computeRefund,
   formatReturnDate,
   isOurFaultReason,
   normaliseReturnReasons,
-  refundModeOf,
-  type RefundMode,
 } from "@/lib/returns";
 import {
   ReasonListEditor,
@@ -75,10 +86,6 @@ export type ReturnPolicyValues = {
   returnWindowDays: number;
   returnReasons: string[];
   returnPolicyNote: string;
-  refundFeePercent: number;
-  refundFeeFlat: number;
-  partialAdvanceRefundable: boolean;
-  waiveRefundFeeOnOurFault: boolean;
   refundPolicyNote: string;
   defaultReturnsInfo: string;
 };
@@ -100,8 +107,6 @@ export type ReturnPolicyFacts = {
 
 const WINDOW_MIN = 1;
 const WINDOW_MAX = 90;
-const FEE_PERCENT_MAX = 50;
-const FEE_FLAT_MAX = 10_000;
 
 const clampInt = (raw: unknown, min: number, max: number, fallback: number) => {
   const n = Math.trunc(Number(raw));
@@ -181,29 +186,36 @@ export function ReturnPolicyFields({
   const closesOn = formatReturnDate(
     new Date(new Date(todayISO).getTime() + days * 86_400_000)
   );
-  const mode: RefundMode = refundModeOf(value);
-
-  // A worked example in rupees, so the owner never has to do the percentage in
-  // their head to know what a setting costs them.
-  const refundRules = {
-    refundFeePercent: value.refundFeePercent,
-    refundFeeFlat: value.refundFeeFlat,
-    partialAdvanceRefundable: value.partialAdvanceRefundable,
-    waiveRefundFeeOnOurFault: value.waiveRefundFeeOnOurFault,
-  };
-  const example = (reason: string, amountPaid: number, balanceDue: number) =>
+  /**
+   * A worked example in rupees.
+   *
+   * The rule is fixed, so these are not a preview of a setting — they are the
+   * proof that "full refund" survives contact with a ₹1,000 order, and the one
+   * place the owner can see what *is* held back (shipping, the cash-handling
+   * fee, a part-paid advance) as money rather than as prose.
+   *
+   * The same `computeRefund` the approval action and the customer's form run,
+   * so an example on this screen can never disagree with a real payout.
+   */
+  const example = (
+    reason: string,
+    amountPaid: number,
+    balanceDue: number,
+    extra?: { shipping?: number; paymentFee?: number }
+  ) =>
     computeRefund({
       order: {
-        total: 1000,
+        total: 1000 + (extra?.shipping ?? 0) + (extra?.paymentFee ?? 0),
         amountPaid,
         balanceDue,
         subtotal: 1000,
+        shipping: extra?.shipping ?? 0,
+        paymentFee: extra?.paymentFee ?? 0,
         discountTotal: 0,
         status: "delivered",
         paymentStatus: balanceDue > 0 ? "partial" : "paid",
       },
       lines: [{ unitPrice: 1000, quantity: 1 }],
-      settings: refundRules,
       reason,
     });
   // Not memoised: `computeRefund` is pure integer arithmetic over one line, and
@@ -214,13 +226,14 @@ export function ReturnPolicyFields({
   const partPaid = example("Wrong size", 200, 800);
 
   // The owner's own reason list, split by the rule that actually decides it.
-  // This is the whole point of requirement 2: the waiver stops being a toggle
-  // whose effect you have to imagine and becomes a visible partition.
+  // The waiver used to be a toggle whose effect you had to imagine against a
+  // list on another screen; the rule it became — we carry the return leg when
+  // the fault is ours — is worth showing the same way.
   const split = useMemo(() => {
     const live = normaliseReturnReasons(value.returnReasons);
     return {
-      waived: live.filter(isOurFaultReason),
-      charged: live.filter((r) => !isOurFaultReason(r)),
+      ours: live.filter(isOurFaultReason),
+      theirs: live.filter((r) => !isOurFaultReason(r)),
     };
   }, [value.returnReasons]);
 
@@ -316,150 +329,74 @@ export function ReturnPolicyFields({
           {/* ── 2. Money back ─────────────────────────────────────────────── */}
           <Card
             title="Money back"
-            tip="What a customer gets when a return is approved. The figure is recorded on the request at the moment you approve it — changing this later never rewrites a refund that has already gone out."
+            tip="What a customer gets when a return is approved. There is nothing to set: a return is a full refund of the goods. The figure is still recorded on the request at the moment you approve it, so a request decided today reads the same next month."
           >
-            <Field
-              label="On an approved return"
-              tip="Full refund pays back the value of the returned goods. Keep a fee holds a slice of it back to cover handling and the return courier."
-            >
-              <Segmented<RefundMode>
-                ariaLabel="Refund mode"
-                value={mode}
-                // `Segmented`'s own options are `min-h-9`, which is 36px inside a
-                // 44px track — under the touch floor on the phone this is worked
-                // from. Raised here rather than in form-kit, which is shared.
-                className="[&_[role=radio]]:min-h-11 sm:[&_[role=radio]]:min-h-9"
-                onChange={(next) =>
-                  onChange({ ...value, ...applyRefundMode(next, value) })
-                }
-                options={[
-                  { value: "full", label: "Full refund" },
-                  { value: "fee", label: "Keep a fee" },
-                ]}
-              />
-            </Field>
-
-            {mode === "full" ? (
-              <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-                Every approved return pays back the full value of the goods, so
-                there is no fee to set and nothing to waive. Shipping is never
-                refunded — the parcel was still carried.
+            <div className="space-y-1 rounded-lg border border-success/40 bg-success/5 p-3">
+              <p className="flex items-start gap-1.5 text-sm font-medium text-success">
+                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+                <span>Full refund of the goods, every time.</span>
               </p>
-            ) : (
-              <>
-                <div className="flex flex-wrap gap-3">
-                  <Field
-                    label="We keep"
-                    className="flex-1 basis-32"
-                    tip="A slice of the refund the store holds back. Added to the flat amount beside it — both apply."
-                  >
-                    {(id) => (
-                      <div className="flex items-center gap-2">
-                        <input
-                          id={id}
-                          type="number"
-                          inputMode="numeric"
-                          min={0}
-                          max={FEE_PERCENT_MAX}
-                          value={text("refundFeePercent", value.refundFeePercent)}
-                          onChange={(e) => {
-                            typed("refundFeePercent", e.target.value);
-                            set(
-                              "refundFeePercent",
-                              clampInt(e.target.value, 0, FEE_PERCENT_MAX, 0)
-                            );
-                          }}
-                          onBlur={() => settled("refundFeePercent")}
-                          className="input h-11 min-w-0 flex-1"
-                        />
-                        <span className="text-sm text-muted-foreground">%</span>
-                      </div>
-                    )}
-                  </Field>
-
-                  <Field
-                    label="…plus a flat"
-                    className="flex-1 basis-32"
-                    tip="A fixed amount kept on top of the percentage. If the two together come to more than the refund, the customer is simply paid nothing — they are never billed."
-                  >
-                    {(id) => (
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm text-muted-foreground">₹</span>
-                        <input
-                          id={id}
-                          type="number"
-                          inputMode="numeric"
-                          min={0}
-                          max={FEE_FLAT_MAX}
-                          value={text("refundFeeFlat", value.refundFeeFlat)}
-                          onChange={(e) => {
-                            typed("refundFeeFlat", e.target.value);
-                            set(
-                              "refundFeeFlat",
-                              clampInt(e.target.value, 0, FEE_FLAT_MAX, 0)
-                            );
-                          }}
-                          onBlur={() => settled("refundFeeFlat")}
-                          className="input h-11 min-w-0 flex-1"
-                        />
-                      </div>
-                    )}
-                  </Field>
-                </div>
-
-                {/* The waiver only exists because a fee does. */}
-                <SwitchRow
-                  label="Full refund anyway when it's our fault"
-                  checked={value.waiveRefundFeeOnOurFault}
-                  onChange={(v) => set("waiveRefundFeeOnOurFault", v)}
-                  tip="Damaged, defective, wrong item or not as described. On those the fee is dropped entirely and the customer gets the whole amount back, whatever the two numbers above say."
-                  detail={
-                    value.waiveRefundFeeOnOurFault
-                      ? `${split.waived.length} of your ${split.waived.length + split.charged.length} reasons refund in full`
-                      : "The fee applies to every reason, including damage"
-                  }
-                />
-
-                <ReasonSplit
-                  waived={split.waived}
-                  charged={split.charged}
-                  active={value.waiveRefundFeeOnOurFault}
-                />
-              </>
-            )}
-
-            {/* Unreachable unless checkout actually offers partial payment. */}
-            {facts.partialEnabled ? (
-              <SwitchRow
-                label="Refund the online advance on part-paid orders"
-                checked={value.partialAdvanceRefundable}
-                onChange={(v) => set("partialAdvanceRefundable", v)}
-                tip="Off (the usual setting): the advance is kept and only the cash the courier collected comes back. The advance is spread across the lines pro rata, so returning one of three items forfeits a third of it."
-                detail={
-                  value.partialAdvanceRefundable
-                    ? "The advance comes back too"
-                    : "The advance is kept; only the cash collected is returned"
-                }
-              />
-            ) : (
-              <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-                Partial payment is switched off at checkout, so no order can
-                carry an online advance and the rule for refunding one is hidden.
+              <p className="pl-6 text-xs leading-relaxed text-muted-foreground">
+                No handling fee, no restocking cut, nothing deducted for the
+                reason. What you keep is only what you actually spent.
               </p>
-            )}
+            </div>
 
-            {/* Rupees, not percentages. */}
+            {/* What is kept, and why — stated as three facts rather than three
+                switches, because none of them is a choice any more. */}
+            <dl className="space-y-1.5 rounded-lg border border-border bg-muted/40 p-3 text-xs">
+              <p className="font-medium">What stays with you</p>
+              <Kept
+                label="Shipping"
+                value="Never refunded"
+                tip="The parcel was carried whatever happens to the goods afterwards, so the delivery charge is a cost that was genuinely incurred."
+              />
+              <Kept
+                label="Cash-handling fee"
+                value="Never refunded"
+                tip="The COD or part-payment fee charged at checkout, frozen onto the order. The courier's collection charge was paid, so it is not given back — it is shown to the customer as its own line at checkout for exactly this reason."
+              />
+              {facts.partialEnabled ? (
+                <Kept
+                  label="Part-paid advance"
+                  value="Never refunded"
+                  tip="The advance is what commits a made-to-order piece to production, and the checkout copy tells the customer it is non-refundable before they agree to it. It is spread across the lines pro rata, so returning one of three items forfeits a third of it."
+                />
+              ) : (
+                <p className="text-muted-foreground">
+                  Part payment is switched off at checkout, so no order can carry
+                  an advance and that rule cannot apply.
+                </p>
+              )}
+            </dl>
+
+            {/* The one thing that runs the other way. It is a cost to the
+                owner, so it is stated as one rather than buried as the absence
+                of a deduction. */}
+            <div className="space-y-1 rounded-lg border border-accent/40 bg-accent/5 p-3 text-xs">
+              <p className="flex items-start gap-1.5 font-medium">
+                <Truck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" aria-hidden />
+                <span>When it&apos;s our fault, we pay the return leg.</span>
+              </p>
+              <p className="pl-5 leading-relaxed text-muted-foreground">
+                Damaged, defective, wrong item, missing or not as described: the
+                reverse courier charge is yours, not the customer&apos;s. It is
+                never deducted from their refund — it shows up on your NimbusPost
+                wallet when the pickup is booked, and the returns queue names it
+                as a cost on those requests.
+              </p>
+            </div>
+
+            <ReasonSplit ours={split.ours} theirs={split.theirs} />
+
+            {/* Rupees, not prose. */}
             <div className="space-y-1 rounded-lg border border-border bg-muted/40 p-3 text-xs">
               <p className="font-medium">On a ₹1,000 return</p>
               <ExampleRow label="Paid in full online" value={prepaid.net} />
               <ExampleRow
                 label="Arrived damaged"
                 value={ourFault.net}
-                note={
-                  ourFault.waivedFee > 0
-                    ? `${formatINR(ourFault.waivedFee)} fee waived`
-                    : undefined
-                }
+                note="return leg on you"
               />
               {facts.partialEnabled && (
                 <ExampleRow
@@ -475,10 +412,37 @@ export function ReturnPolicyFields({
             </div>
           </Card>
 
-          {/* ── 3. Set once, so folded away ───────────────────────────────── */}
+          {/* ── 3. What the customer may ask for ──────────────────────────── */}
+          <Card
+            title="What a customer can ask for"
+            tip="Three outcomes, chosen by the customer on the return form. Only the first moves money — a replacement and a size exchange send a parcel instead, and the refund columns on those requests are written as zero so nothing downstream can pay one out by mistake. This is fixed in code, not a setting."
+          >
+            <ul className="space-y-1.5">
+              {RETURN_OUTCOMES.map((o) => (
+                <li
+                  key={o}
+                  className="rounded-lg border border-border bg-muted/30 p-2.5 text-xs"
+                >
+                  <p className="font-medium">{RETURN_OUTCOME_LABEL[o]}</p>
+                  <p className="mt-0.5 leading-relaxed text-muted-foreground">
+                    {RETURN_OUTCOME_BLURB[o]}
+                  </p>
+                </li>
+              ))}
+            </ul>
+            <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+              A refund goes back the way it came where it can — to the card or
+              UPI the customer paid with — and by UPI where it cannot, which is
+              every cash-on-delivery order. The customer is only ever offered the
+              destinations their own order can support, so nobody picks
+              &ldquo;back to my card&rdquo; on an order they paid for in cash.
+            </p>
+          </Card>
+
+          {/* ── 4. Set once, so folded away ───────────────────────────────── */}
           <Fold
             label="Accepted reasons"
-            summary={`${split.waived.length + split.charged.length} offered`}
+            summary={`${split.ours.length + split.theirs.length} offered`}
           >
             <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
               What a customer may pick on the return form. Add, rename, reorder
@@ -646,44 +610,52 @@ function ExampleRow({
 
 /**
  * The owner's own reason list, partitioned by `isOurFaultReason` — the same
- * function `computeRefund` uses, so this can never disagree with the money.
+ * function `computeRefund` uses, so this can never disagree with what the
+ * returns queue flags.
  *
- * Without it the waiver is a switch whose effect you have to imagine against a
- * list on another screen. With it, "this one is full refund because it's our
- * fault" is readable at a glance, per reason.
+ * The customer's refund is identical on both sides, so this is not about their
+ * money: it is about **yours**. It answers "which of the reasons I offer will
+ * cost me a reverse courier leg?", which is a question the owner otherwise has
+ * to ask one request at a time.
  */
-function ReasonSplit({
-  waived,
-  charged,
-  active,
-}: {
-  waived: string[];
-  charged: string[];
-  active: boolean;
-}) {
-  if (!active) {
-    return (
-      <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-        The fee is charged on every reason, including damaged and wrong-item
-        returns. Turn the switch on to refund those in full.
-      </p>
-    );
-  }
+function ReasonSplit({ ours, theirs }: { ours: string[]; theirs: string[] }) {
   return (
     <div className="grid gap-2 sm:grid-cols-2">
       <ReasonGroup
-        title="Full refund — our fault"
+        title="We pay the return leg"
         tone="success"
-        reasons={waived}
+        reasons={ours}
         empty="None of your reasons currently count as our fault."
         tip="Matched on the words in the reason itself — damaged, defective, broken, faulty, wrong item, missing, not as described. “Wrong size” is deliberately not one: that is the shopper guessing, not us mis-picking."
       />
       <ReasonGroup
-        title="Fee applies"
+        title="Ordinary return"
         tone="muted"
-        reasons={charged}
-        empty="Every reason you offer refunds in full."
+        reasons={theirs}
+        empty="Every reason you offer counts as our fault."
+        tip="The refund is exactly the same — full value of the goods. The difference is only who carries the cost of collecting the parcel."
       />
+    </div>
+  );
+}
+
+/** One `term — value` line in "what stays with you". Never an input. */
+function Kept({
+  label,
+  value,
+  tip,
+}: {
+  label: string;
+  value: string;
+  tip: string;
+}) {
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 border-b border-border/60 pb-1 last:border-0 last:pb-0">
+      <dt className="flex items-center gap-1 text-muted-foreground">
+        {label}
+        <InfoTip term={label}>{tip}</InfoTip>
+      </dt>
+      <dd className="font-medium">{value}</dd>
     </div>
   );
 }

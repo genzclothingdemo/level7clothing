@@ -666,8 +666,101 @@ export function generateReturnNumber(): string {
  * lets the browser recompute the preview live as the reason changes.
  */
 
-/** How the money is sent back. Matches `ReturnRequest.refundMethod`. */
-export const REFUND_METHODS = ["original", "upi", "replacement", "none"] as const;
+/* ---------------------------------------------------------------- outcomes */
+
+/**
+ * **What the customer actually wants**, chosen by them when they raise the
+ * request. Three answers, and only one of them touches money:
+ *
+ *   `refund`   — send the money back.
+ *   `replace`  — send the same piece again.
+ *   `exchange` — send a different size.
+ *
+ * The last two are *fulfilment* outcomes: a parcel goes out, nothing is paid.
+ * That distinction is the point. Before this existed the only question asked
+ * was "how do we send the money back", so a customer who wanted a different
+ * size was quietly booked in for a refund and found out at the payout.
+ *
+ * There is **no new column**. The outcome rides on `ReturnRequest.refundMethod`
+ * through {@link refundMethodFor}, because the two questions collapse into one
+ * value: a refund needs a destination, and a replacement or an exchange needs
+ * nothing at all.
+ */
+export const RETURN_OUTCOMES = ["refund", "replace", "exchange"] as const;
+
+export type ReturnOutcome = (typeof RETURN_OUTCOMES)[number];
+
+export const RETURN_OUTCOME_LABEL: Record<ReturnOutcome, string> = {
+  refund: "Refund my money",
+  replace: "Send the same piece again",
+  exchange: "Send a different size",
+};
+
+/** One line the customer reads under each outcome, before they pick. */
+export const RETURN_OUTCOME_BLURB: Record<ReturnOutcome, string> = {
+  refund: "The money goes back to you once we have the item.",
+  replace: "We send the same piece again. No money changes hands.",
+  exchange: "Tell us the size you need and we send that instead. No money changes hands.",
+};
+
+export function isReturnOutcome(v: string): v is ReturnOutcome {
+  return (RETURN_OUTCOMES as readonly string[]).includes(v);
+}
+
+/**
+ * Where a refund goes. **Two destinations, and no third.**
+ *
+ *   `original` — back down the rail it arrived on (card / UPI via Razorpay).
+ *                Only possible when something was actually paid online.
+ *   `upi`      — a UPI transfer, which is how cash-on-delivery money comes back.
+ *
+ * A bank account number is deliberately not an option: that is a different
+ * class of data and would need encryption and a retention policy before it
+ * could be stored at all.
+ */
+export const REFUND_DESTINATIONS = ["original", "upi"] as const;
+
+export type RefundDestination = (typeof REFUND_DESTINATIONS)[number];
+
+export const REFUND_DESTINATION_LABEL: Record<RefundDestination, string> = {
+  original: "Back to the way I paid",
+  upi: "To my UPI ID",
+};
+
+export function isRefundDestination(v: string): v is RefundDestination {
+  return (REFUND_DESTINATIONS as readonly string[]).includes(v);
+}
+
+/**
+ * Which destinations are actually offerable for an order.
+ *
+ * "Back to the way I paid" needs money to have come down a rail in the first
+ * place, so a cash-on-delivery order gets UPI alone — and gets it as the only
+ * option, not as the enabled one of two. Controls that cannot apply are absent
+ * here, the same rule the rest of this feature follows.
+ */
+export function refundDestinationsFor(order: RefundOrder): RefundDestination[] {
+  return refundPaymentCase(order) === "cod" || rupees(order.amountPaid) <= 0
+    ? ["upi"]
+    : ["original", "upi"];
+}
+
+/**
+ * How the money is sent back — or that it isn't. Matches
+ * `ReturnRequest.refundMethod`, which is a plain `String` column, so adding
+ * `exchange` needed no migration.
+ *
+ * `replacement` and `exchange` are outcomes rather than payment rails, and they
+ * live in the same column on purpose: one value answers "what happens", and a
+ * row can therefore never claim a refund and a replacement at once.
+ */
+export const REFUND_METHODS = [
+  "original",
+  "upi",
+  "replacement",
+  "exchange",
+  "none",
+] as const;
 
 export type RefundMethod = (typeof REFUND_METHODS)[number];
 
@@ -676,11 +769,40 @@ export function isRefundMethod(v: string): v is RefundMethod {
 }
 
 export const REFUND_METHOD_LABEL: Record<RefundMethod, string> = {
-  original: "Back to the original payment",
-  upi: "UPI transfer",
-  replacement: "Replacement instead of money",
+  original: "Refund to the original payment",
+  upi: "Refund by UPI",
+  replacement: "Replacement — no money moves",
+  exchange: "Different size — no money moves",
   none: "No money to send",
 };
+
+/**
+ * **The single rule for "does this move money?"** Read by the customer's form,
+ * the admin panel, `decideReturn` and `markRefundPaid`, so a replacement can
+ * never silently become a payout.
+ */
+export function refundMovesMoney(method: RefundMethod): boolean {
+  return method === "original" || method === "upi";
+}
+
+/** Outcome (+ destination, when it is a refund) → the stored `refundMethod`. */
+export function refundMethodFor(
+  outcome: ReturnOutcome,
+  destination: RefundDestination
+): RefundMethod {
+  if (outcome === "replace") return "replacement";
+  if (outcome === "exchange") return "exchange";
+  return destination;
+}
+
+/** The stored `refundMethod` read back as the outcome the customer chose. */
+export function outcomeOfRefundMethod(
+  method: string | null | undefined
+): ReturnOutcome {
+  if (method === "replacement") return "replace";
+  if (method === "exchange") return "exchange";
+  return "refund";
+}
 
 /**
  * Which of the three payment shapes an order took. Derived from the money on
@@ -702,91 +824,60 @@ export const REFUND_PAYMENT_LABEL: Record<RefundPaymentCase, string> = {
   unpaid: "Nothing collected",
 };
 
-/** The store's refund rules. Mirrors the SiteSettings columns of the same names. */
-export type RefundSettings = {
-  /** Percent of the gross the store keeps. Summed with the flat fee. */
-  refundFeePercent: number;
-  /** Flat amount the store keeps, in whole rupees. Summed with the percent. */
-  refundFeeFlat: number;
-  /** Partial orders: is the online advance handed back, or kept? */
-  partialAdvanceRefundable: boolean;
-  /** Damaged / wrong item → charge no fee at all. */
-  waiveRefundFeeOnOurFault: boolean;
-};
-
 /**
- * How much of the money comes back, as one decision rather than two numbers.
+ * The store's refund rules — **there are none left to configure.**
  *
- * There is **no `refundMode` column** and there must not be one: the mode is
- * entirely determined by the two fee fields, so storing it as well would create
- * a second source of truth that can disagree with the arithmetic
- * `computeRefund` actually performs.
+ * This used to be four columns: a percentage the store kept, a flat amount on
+ * top, a switch for whether a part-paid advance came back, and a switch that
+ * waived the fee when the damage was ours. Every approved return therefore
+ * needed three settings read before anyone could say what a customer got, and
+ * the answer changed if the owner edited the policy between approval and
+ * payout.
  *
- *   `full` — both fees are zero. Every approved return pays the goods value back.
- *   `fee`  — at least one fee is set, so the store keeps a slice.
+ * The rule now is one sentence: **a return pays back the full value of the
+ * goods.** What the store keeps is not a fee it charges, it is the money that
+ * did not buy the goods in the first place —
  *
- * The admin UI is the only thing that needs the distinction, and it needs it
- * badly: "0 and 0" is not a policy an owner recognises as "full refund", which
- * is most of why the refund block read as confusing.
+ *   - **shipping**, because the parcel was still carried;
+ *   - **the cash-handling fee** (`Order.paymentFee`), because the courier's
+ *     collection charge was still incurred;
+ *   - **the online advance on a part-paid order**, which is what committed the
+ *     piece in the first place and is never refunded.
+ *
+ * and, running the other way, when the reason is our mistake the **store pays
+ * the return leg** rather than the customer — a cost to the owner, which the
+ * admin panel names as one.
+ *
+ * `refundFeePercent`, `refundFeeFlat`, `partialAdvanceRefundable` and
+ * `waiveRefundFeeOnOurFault` are still columns on `SiteSettings`, because the
+ * schema is not this change's to edit. They are **dead**: nothing reads them,
+ * `updateReturnDefaults` pins them to their neutral values, and
+ * `computeRefund` no longer takes a settings argument at all — which is the
+ * part that matters, because a function that cannot be handed a fee cannot
+ * quietly start charging one.
  */
-export type RefundMode = "full" | "fee";
-
-export function refundModeOf(
-  settings: Pick<RefundSettings, "refundFeePercent" | "refundFeeFlat">
-): RefundMode {
-  return settings.refundFeePercent > 0 || settings.refundFeeFlat > 0
-    ? "fee"
-    : "full";
-}
-
-/**
- * What picking a mode does to the two columns.
- *
- * Switching to `full` must **zero** the fees rather than merely hide them: a
- * hidden non-zero fee would keep being deducted while the screen claimed full
- * refunds, which is precisely the class of bug the conditional UI exists to
- * remove.
- *
- * Switching to `fee` must **seed** one, which is less obvious but just as
- * necessary. The mode is derived from the fees and deliberately not stored, so
- * returning the settings untouched would leave `refundModeOf` still answering
- * `full` and the control would refuse to move — the fields that let you enter a
- * fee only exist in fee mode, so nothing could ever reach it. The seed is a
- * starting point the owner immediately sees and edits, not a decision made for
- * them, and an existing fee is never overwritten.
- */
-export const REFUND_FEE_SEED_PERCENT = 10;
-
-export function applyRefundMode<T extends Pick<RefundSettings, "refundFeePercent" | "refundFeeFlat">>(
-  mode: RefundMode,
-  settings: T
-): T {
-  if (mode === "full") {
-    return { ...settings, refundFeePercent: 0, refundFeeFlat: 0 };
-  }
-  return refundModeOf(settings) === "fee"
-    ? settings
-    : { ...settings, refundFeePercent: REFUND_FEE_SEED_PERCENT };
-}
-
-/**
- * Mirrors the `@default(...)` values on SiteSettings — keep the two in step.
- * Used when the settings row can't be read, so a DB blip charges no fee rather
- * than inventing one.
- */
-export const DEFAULT_REFUND_SETTINGS: RefundSettings = {
-  refundFeePercent: 0,
-  refundFeeFlat: 0,
-  partialAdvanceRefundable: false,
-  waiveRefundFeeOnOurFault: true,
-};
 
 /** Just the columns the arithmetic needs, so any caller can build one. */
 export type RefundOrder = {
-  /** Whole-order value actually charged (subtotal + shipping − discount). */
+  /**
+   * Whole-order value actually charged:
+   * subtotal + shipping + paymentFee − discount.
+   */
   total: number;
   /** Collected ONLINE: the full total for prepaid, the advance for partial. */
   amountPaid: number;
+  /**
+   * Shipping charged on the order. Never refunded — the parcel was carried —
+   * and carried here only so the breakdown can say so in rupees instead of
+   * leaving the customer to work out why the total and the refund differ.
+   */
+  shipping?: number | null;
+  /**
+   * The cash-handling fee frozen onto the order at checkout
+   * (`Order.paymentFee`). Kept for the same reason as shipping: the courier's
+   * collection charge was incurred whatever happens to the goods.
+   */
+  paymentFee?: number | null;
   /**
    * Cash the courier was told to collect at the door. Fixed when the order is
    * created and never decremented, so it is a *demand*, not a receipt — see
@@ -809,15 +900,22 @@ export type RefundOrder = {
 export type RefundLine = { unitPrice: number; quantity: number };
 
 export type RefundBreakdown = {
-  /** Refundable value of the returned goods, after every cap below. */
+  /**
+   * The full refundable value of the returned goods. Nothing is taken off it —
+   * "full refund" is the policy, so `net === gross` whenever money moves.
+   */
   gross: number;
-  /** What the store keeps out of the gross. Never more than the gross. */
-  fee: number;
-  /** What the customer is actually paid. `gross − fee`, never negative. */
+  /**
+   * What the customer is actually paid. Equal to `gross` for a refund, and
+   * **zero for a replacement or a size exchange**, which move goods rather than
+   * money. Read `outcome` to tell a zero payout apart from a zero refund.
+   */
   net: number;
-  /** Where the money should go. The admin can still override it. */
+  /** What happens: refund / replace / exchange. The customer's choice. */
+  outcome: ReturnOutcome;
+  /** Where the money goes, or that it does not. The admin can override it. */
   method: RefundMethod;
-  /** Short, customer-safe sentences explaining every deduction. */
+  /** Short, customer-safe sentences explaining every figure. */
   explanation: string[];
 
   /* ---- the working, kept so a UI can show its reasoning ---- */
@@ -828,7 +926,7 @@ export type RefundBreakdown = {
   discountShare: number;
   /** Money the customer actually parted with, across the whole order. */
   collected: number;
-  /** Of that, what policy does not give back (a partial order's advance). */
+  /** Of that, what policy does not give back — a partial order's advance. */
   nonRefundable: number;
   /** The slice of the advance these particular lines forfeit. */
   advanceForfeited: number;
@@ -836,21 +934,24 @@ export type RefundBreakdown = {
   payable: number;
   /** Earlier net refunds on this order, already committed. */
   alreadyRefunded: number;
-  /** The reason was our mistake and the fee was waived. */
-  feeWaived: boolean;
+
+  /* ---- what the store keeps, and what it pays ---- */
+  /** Shipping charged on the order and never refunded. */
+  keptShipping: number;
+  /** The cash-handling fee charged on the order and never refunded. */
+  keptPaymentFee: number;
+  /** The reason reads as our mistake rather than a change of mind. */
+  ourFault: boolean;
   /**
-   * What the fee *would* have been, had it not been waived. Zero whenever no
-   * fee was configured in the first place.
+   * True when the store — not the customer — carries the return leg.
    *
-   * `feeWaived` alone can't be shown to anyone: it is true for a damaged item
-   * even on a store that charges nothing, where "the fee is waived" names a fee
-   * that never existed. This is the number that makes the waiver worth saying —
-   * both to the owner ("this one is full refund because it's our fault") and to
-   * the shopper.
+   * It is a **rule, not a setting**: damaged, defective, wrong item, missing or
+   * not-as-described means the reverse courier charge is ours. There is
+   * deliberately nothing deducted from the customer for it either way, so this
+   * exists to be *shown to the owner as a cost*, which is the only place it has
+   * any consequence.
    */
-  waivedFee: number;
-  /** The fee came out bigger than the gross and was clamped to it. */
-  feeCapped: boolean;
+  storePaysReturnShipping: boolean;
 };
 
 /** Whole rupees, never negative, never NaN. Every input is funnelled through it. */
@@ -906,37 +1007,63 @@ export function refundPaymentCase(order: RefundOrder): RefundPaymentCase {
  *    the parcel is delivered). Capped at the order total, so a data glitch
  *    cannot mint money.
  *
- * 4. **What policy returns of that.** Only a partial order withholds anything:
- *    its online advance, unless `partialAdvanceRefundable` is on. Prepaid and
- *    COD give back everything that was collected.
+ * 4. **What policy returns of that.** Only a part-paid order withholds
+ *    anything, and it always does: **the online advance is never refunded.**
+ *    It is what commits the piece, the checkout copy says so before the shopper
+ *    agrees to it, and there is no longer a setting that can flip it. Prepaid
+ *    and COD give back everything that was collected.
  *
  * 5. **Scale.** `gross = goods value × (refundable ÷ order total)`.
  *
  *    One line covers all three cases. Prepaid and COD have
  *    `refundable === total`, so the fraction is 1 and the gross is simply the
- *    goods value. A partial order's fraction is the cash share, which spreads
+ *    goods value. A part-paid order's fraction is the cash share, which spreads
  *    the non-refundable advance across the lines **pro rata**: return one of
  *    three items and a third of the advance is forfeited; return all three and
  *    all of it is. Both routes total the same money, so a customer cannot
  *    recover the advance by returning in instalments, and is not punished for
  *    returning one item either.
  *
+ *    The same fraction is what keeps shipping and the cash-handling fee with
+ *    the store without a line of arithmetic of its own: both are inside `total`
+ *    and neither is inside `goodsValue`, so neither is ever part of what is
+ *    scaled.
+ *
  * 6. **Cap** at the goods value and at what is left of the order's refundable
  *    pool after earlier returns, so two requests can never pay out twice.
  *
- * 7. **Fee.** `percent × gross + flat`, waived entirely when the reason is our
- *    mistake and `waiveRefundFeeOnOurFault` is on. Clamped to the gross: the
- *    net is never negative, because a refund that *bills* the customer is a
- *    bug, not a policy.
+ * 7. **No fee.** There is no step 7 any more. A return pays back the full value
+ *    of the goods; the store keeps shipping and the cash-handling fee because
+ *    both were genuinely spent, and it *pays* the return leg itself whenever
+ *    the reason was its own mistake.
+ *
+ * ## The outcome decides whether money moves at all
+ *
+ * `outcome` defaults to `"refund"`. A **replacement** or a **size exchange**
+ * returns the identical breakdown with `net: 0` — the goods value is still
+ * computed, because the owner wants to see what the piece is worth, but nothing
+ * is payable and `method` says so. That is the guard behind "the other two must
+ * not silently become refunds": there is no path through this function where a
+ * replacement produces a positive `net`, so nothing downstream can pay one out
+ * by default.
  */
 export function computeRefund(input: {
   order: RefundOrder;
   lines: readonly RefundLine[];
-  settings: RefundSettings;
-  /** The customer's stated reason, as stored. Drives the our-fault waiver. */
+  /** The customer's stated reason, as stored. Decides who pays the return leg. */
   reason: string;
+  /** What the customer asked for. Only `"refund"` moves money. */
+  outcome?: ReturnOutcome;
+  /**
+   * Where a refund should go, when the caller already knows. Ignored for a
+   * replacement or an exchange. Defaults to the only destination the order can
+   * actually support: the original rail when something was paid online, UPI
+   * otherwise.
+   */
+  destination?: RefundDestination;
 }): RefundBreakdown {
-  const { order, lines, settings, reason } = input;
+  const { order, lines, reason } = input;
+  const outcome: ReturnOutcome = input.outcome ?? "refund";
   const why: string[] = [];
 
   const total = rupees(order.total);
@@ -961,12 +1088,9 @@ export function computeRefund(input: {
   const cash = cashInHand(order);
   const collected = total > 0 ? Math.min(online + cash, total) : 0;
 
-  /* 4 — of that, what the policy hands back. */
+  /* 4 — of that, what the policy hands back. The advance never is. */
   const payment = refundPaymentCase(order);
-  const nonRefundable =
-    payment === "partial" && !settings.partialAdvanceRefundable
-      ? Math.min(online, collected)
-      : 0;
+  const nonRefundable = payment === "partial" ? Math.min(online, collected) : 0;
   const refundable = Math.max(0, collected - nonRefundable);
 
   /* 5 — scale the goods value by the refundable fraction of the order. */
@@ -979,21 +1103,36 @@ export function computeRefund(input: {
   const gross = Math.max(0, Math.min(scaled, goodsValue, payable));
   const cappedByPool = Math.min(scaled, goodsValue) > payable;
 
-  /* 7 — the fee the store keeps. */
+  /* 7 — what the store keeps, and who carries the return leg. */
+  const keptShipping = rupees(order.shipping);
+  const keptPaymentFee = rupees(order.paymentFee);
   const ourFault = isOurFaultReason(reason);
-  const feeWaived = ourFault && settings.waiveRefundFeeOnOurFault;
-  const percentFee = Math.round((gross * rupees(settings.refundFeePercent)) / 100);
-  const fullFee = percentFee + rupees(settings.refundFeeFlat);
-  const rawFee = feeWaived ? 0 : fullFee;
-  const fee = Math.min(Math.max(0, rawFee), gross);
-  const feeCapped = rawFee > gross;
-  const net = Math.max(0, gross - fee);
-  // Clamped the same way the real fee is, so "we waived ₹200" can never quote
-  // more than the refund it was going to come out of.
-  const waivedFee = feeWaived ? Math.min(fullFee, gross) : 0;
+
+  // Full refund: nothing is deducted from the goods value. A replacement or an
+  // exchange pays nothing at all, whatever the goods are worth.
+  const movesMoney = outcome === "refund";
+  const net = movesMoney ? gross : 0;
+
+  const destination: RefundDestination =
+    input.destination ??
+    (refundDestinationsFor(order).includes("original") ? "original" : "upi");
+  const method: RefundMethod = !movesMoney
+    ? refundMethodFor(outcome, destination)
+    : gross <= 0
+      ? "none"
+      : destination;
 
   /* ---- the same numbers, in sentences a customer can read ---- */
-  if (collected <= 0) {
+  if (!movesMoney) {
+    why.push(
+      outcome === "replace"
+        ? "A replacement is sent instead of a refund, so no money moves."
+        : "A different size is sent instead of a refund, so no money moves."
+    );
+    if (ourFault) {
+      why.push("This one is on us, so we cover the cost of collecting it.");
+    }
+  } else if (collected <= 0) {
     why.push(
       "No money has been collected for this order yet, so there is nothing to refund."
     );
@@ -1007,31 +1146,36 @@ export function computeRefund(input: {
       why.push(
         `Part-paid order: the ${formatINR(online)} online advance isn't refundable, so ${formatINR(advanceForfeited)} of this item's value is kept.`
       );
-    } else if (payment === "partial" && settings.partialAdvanceRefundable) {
-      why.push("Your online advance is refundable on this order.");
     }
     if (cappedByPool) {
       why.push(
         `Capped at ${formatINR(payable)} — the rest of this order's refundable amount has already been paid back.`
       );
     }
-    if (waivedFee > 0) {
+    // What is kept is named in rupees. It is the whole difference between "full
+    // refund" and the number on the screen, and a customer who cannot see it
+    // assumes a fee nobody ever told them about.
+    if (keptShipping > 0 || keptPaymentFee > 0) {
+      const kept = [
+        keptShipping > 0 ? `${formatINR(keptShipping)} shipping` : null,
+        keptPaymentFee > 0 ? `${formatINR(keptPaymentFee)} cash-handling fee` : null,
+      ]
+        .filter(Boolean)
+        .join(" and ");
       why.push(
-        `This one is on us, so the ${formatINR(waivedFee)} return fee is waived — you get the full amount back.`
+        `${kept} isn't refunded — the parcel was still carried and the charge still paid.`
       );
-    } else if (fee > 0) {
-      why.push(`Less a ${formatINR(fee)} return fee.`);
     }
-    if (feeCapped) {
+    if (ourFault) {
       why.push(
-        "The return fee comes to more than the refund, so the payout is nil — we never charge you more than the refund itself."
+        "This one is our fault, so you get the full amount and we cover the return shipping."
       );
     }
     // Only when money actually moves — "sent back to your card" under a ₹0
     // payout would read as a promise the store isn't making.
     if (net > 0) {
       why.push(
-        payment === "prepaid"
+        method === "original"
           ? "Sent back to the card or UPI you paid with, in 5–7 working days."
           : "Paid out by UPI — we'll ask for your UPI ID once the return is approved."
       );
@@ -1040,9 +1184,9 @@ export function computeRefund(input: {
 
   return {
     gross,
-    fee,
     net,
-    method: gross <= 0 ? "none" : payment === "prepaid" ? "original" : "upi",
+    outcome,
+    method,
     explanation: why,
     payment,
     lineValue,
@@ -1052,9 +1196,10 @@ export function computeRefund(input: {
     advanceForfeited,
     payable,
     alreadyRefunded,
-    feeWaived,
-    waivedFee,
-    feeCapped,
+    keptShipping,
+    keptPaymentFee,
+    ourFault,
+    storePaysReturnShipping: ourFault,
   };
 }
 
@@ -1063,21 +1208,26 @@ export function computeRefund(input: {
  * short — the detail sits behind an (i) and "View more".
  */
 export function refundPreviewLine(b: RefundBreakdown): string {
-  if (b.gross <= 0) {
-    return "No refund is payable on this item.";
+  if (b.outcome === "replace") {
+    return "We'll send the same piece again — no money changes hands.";
+  }
+  if (b.outcome === "exchange") {
+    return "We'll send the size you need instead — no money changes hands.";
   }
   if (b.net <= 0) {
-    return `You'll receive nothing back — the ${formatINR(b.fee)} return fee covers the whole amount.`;
+    return "No refund is payable on this item.";
   }
-  // The waiver is named, not just applied. A shopper who has read the policy
-  // knows a fee exists; seeing the full amount with no explanation reads as a
-  // mistake about to be corrected, which is exactly when they write in.
-  if (b.waivedFee > 0) {
-    return `You'll receive ${formatINR(b.net)} in full — this one's our fault, so the ${formatINR(b.waivedFee)} return fee is waived`;
-  }
-  return b.fee > 0
-    ? `You'll receive ${formatINR(b.net)} — ${formatINR(b.fee)} return fee applies`
-    : `You'll receive ${formatINR(b.net)}`;
+  // The full-refund promise is stated, not implied. A shopper who has read the
+  // policy is looking for the catch, so naming what is kept is what prevents the
+  // "why isn't it the whole amount?" message.
+  const kept = [
+    b.keptShipping > 0 ? "shipping" : null,
+    b.keptPaymentFee > 0 ? "the cash-handling fee" : null,
+  ].filter(Boolean);
+  const tail = kept.length ? ` — ${kept.join(" and ")} isn't refunded` : "";
+  return b.ourFault
+    ? `You'll receive ${formatINR(b.net)} in full — this one's our fault, so we cover the return shipping too`
+    : `You'll receive ${formatINR(b.net)} in full${tail}`;
 }
 
 /* ------------------------------------------------------------------- UPI */

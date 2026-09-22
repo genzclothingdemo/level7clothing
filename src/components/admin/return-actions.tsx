@@ -35,10 +35,13 @@ import {
   REVERSE_LEG_LABEL,
   RETURN_STATUS_LABEL,
   isRefundMethod,
+  outcomeOfRefundMethod,
   parcelHolder,
+  refundMovesMoney,
   reverseLegOf,
   type RefundBreakdown,
   type RefundMethod,
+  type ReturnOutcome,
   type ReturnStatus,
 } from "@/lib/returns";
 
@@ -132,12 +135,28 @@ export function ReturnActions({
   const holder = parcelHolder(leg);
   const goodsBack = holder === "store";
 
-  // Approval form
+  // Approval form.
+  //
+  // The method opens on **what the customer asked for** (it was written onto
+  // `refundMethod` when they raised the request), not on a default. Approving a
+  // size exchange as a refund now takes a deliberate change of this control.
   const [override, setOverride] = useState(false);
-  const [overrideNet, setOverrideNet] = useState(String(refund.net));
+  // Seeded from `gross`, not `net`. `net` is already zero when the customer
+  // asked for a replacement, and seeding the override box with 0 would offer a
+  // ₹0 goodwill payment the moment the admin switched the outcome to a refund.
+  const [overrideNet, setOverrideNet] = useState(String(refund.gross));
   const [overrideReason, setOverrideReason] = useState("");
-  const [method, setMethod] = useState<RefundMethod>(refund.method);
+  const [method, setMethod] = useState<RefundMethod>(
+    recorded.method && isRefundMethod(recorded.method)
+      ? recorded.method
+      : refund.method
+  );
   const [upi, setUpi] = useState("");
+
+  /** True while the chosen method actually pays money out. */
+  const paysOut = refundMovesMoney(method);
+  /** What the customer originally asked for, for the one-line reminder. */
+  const asked = outcomeOfRefundMethod(recorded.method);
 
   // Payout form
   // A row written before refunds existed can hold a method that is no longer
@@ -158,8 +177,12 @@ export function ReturnActions({
           id,
           approve,
           adminNote: note,
-          refundOverride: approve && override ? Number(overrideNet || 0) : null,
-          overrideReason: approve && override ? overrideReason : undefined,
+          // An override is only ever sent when money is actually moving — the
+          // server refuses one on a replacement, and sending it here would be
+          // asking for that refusal.
+          refundOverride:
+            approve && paysOut && override ? Number(overrideNet || 0) : null,
+          overrideReason: approve && paysOut && override ? overrideReason : undefined,
           refundMethod: approve ? method : null,
           refundUpi: approve && upi.trim() ? upi.trim() : undefined,
           bookPickup: approve && bookPickup,
@@ -171,7 +194,15 @@ export function ReturnActions({
         setMode("idle");
         setNote("");
         if (approve) {
-          const paid = res.refund ? ` · refund ${formatINR(res.refund.net)}` : "";
+          const paid = res.refund
+            ? res.refund.net > 0
+              ? ` · refund ${formatINR(res.refund.net)}`
+              : res.refund.outcome === "replace"
+                ? " · replacement, no refund"
+                : res.refund.outcome === "exchange"
+                  ? " · different size, no refund"
+                  : ""
+            : "";
           // The approval and the courier booking succeed independently — say so,
           // rather than letting a green toast imply a pickup that isn't booked.
           if (res.pickupBooked) toast.success(`Approved${paid} · reverse pickup drafted`);
@@ -308,7 +339,23 @@ export function ReturnActions({
   const btn =
     "inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border px-3 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50";
 
-  const netNow = override ? Math.max(0, Number(overrideNet || 0)) : refund.net;
+  /**
+   * What approving *right now* would pay.
+   *
+   * Derived from `gross`, not from `refund.net`. The breakdown arrives from the
+   * server already resolved against the **stored** outcome, so on a replacement
+   * its `net` is zero — and switching the method in this panel to a refund
+   * would then have shown "nothing is payable" while `decideReturn`, which
+   * recomputes against the method it is sent, went on to write the full amount.
+   * A panel that under-promises and then overpays is worse than one that never
+   * mentioned a figure. `gross` is the refundable goods value and is the same
+   * whichever outcome is chosen, which is exactly what this needs.
+   */
+  const netNow = !paysOut
+    ? 0
+    : override
+      ? Math.max(0, Number(overrideNet || 0))
+      : refund.gross;
 
   /* ------------------------------------------------------ pending: decide it */
   if (status === "pending") {
@@ -333,10 +380,20 @@ export function ReturnActions({
             </button>
           </div>
           <p className="mt-1.5 text-[11px] text-muted-foreground">
-            Refund if approved: <b>{formatINR(refund.net)}</b>
-            {refund.waivedFee > 0 && (
-              <span className="block text-success">
-                Full refund — our fault, {formatINR(refund.waivedFee)} fee waived
+            {asked === "refund" ? (
+              <>
+                Refund if approved: <b>{formatINR(refund.net)}</b>
+              </>
+            ) : (
+              <>
+                Customer wants{" "}
+                <b>{asked === "replace" ? "a replacement" : "a different size"}</b>{" "}
+                — no refund
+              </>
+            )}
+            {refund.storePaysReturnShipping && (
+              <span className="block text-accent">
+                Our fault — we pay the return leg
               </span>
             )}
           </p>
@@ -368,7 +425,9 @@ export function ReturnActions({
 
     return (
       <Panel title="Approve this return">
-        <Breakdown refund={refund} />
+        {/* `payNow` rather than `refund.net`: the sum has to follow the method
+            chosen below, which the server-computed breakdown cannot know. */}
+        <Breakdown refund={refund} payNow={netNow} outcome={outcomeOfRefundMethod(method)} />
 
         <textarea
           rows={2}
@@ -378,27 +437,90 @@ export function ReturnActions({
           className="input resize-none text-xs"
         />
 
-        {/* min-h-11: the whole row is the tap target, not the 14px box. */}
-        <label className="flex min-h-11 cursor-pointer items-center gap-1.5 text-xs">
-          <input
-            type="checkbox"
-            checked={override}
-            onChange={(e) => {
-              setOverride(e.target.checked);
-              if (e.target.checked) setOverrideNet(String(refund.net));
-            }}
-            className="h-3.5 w-3.5 accent-[var(--accent)]"
-          />
-          <span>Pay something different</span>
-          <InfoTip term="Override the refund">
-            Use this for goodwill or to cover return postage. It cannot go above{" "}
-            {formatINR(refund.payable)} — that is all this customer has actually
-            paid in, and refunding more would send out money the store never
-            received.
-          </InfoTip>
+        {/* ── How this return is settled ──────────────────────────────────
+            First, because it decides whether anything below is about money at
+            all. It opens on what the customer asked for; changing it is a
+            deliberate act, which is the point. */}
+        <label className="block">
+          <span className="label text-[11px]">
+            Settle this return by
+            <InfoTip term="Settling a return">
+              The customer chose this when they raised the request. A
+              replacement or a size exchange sends a parcel and records a ₹0
+              refund — change it here only if you have agreed something
+              different with them.
+            </InfoTip>
+          </span>
+          <select
+            value={method}
+            onChange={(e) => setMethod(e.target.value as RefundMethod)}
+            className="input h-11 text-xs"
+          >
+            {REFUND_METHODS.map((m) => (
+              <option key={m} value={m}>
+                {REFUND_METHOD_LABEL[m]}
+              </option>
+            ))}
+          </select>
+          {outcomeOfRefundMethod(method) !== asked && (
+            <span className="mt-1 block text-[11px] text-accent">
+              The customer asked for{" "}
+              {asked === "refund"
+                ? "a refund"
+                : asked === "replace"
+                  ? "a replacement"
+                  : "a different size"}
+              . Say why in the note above.
+            </span>
+          )}
         </label>
 
-        {override && (
+        {method === "upi" && (
+          <label className="block">
+            <span className="label text-[11px]">
+              Customer&apos;s UPI ID
+              <InfoTip term="UPI ID">
+                Leave it blank and the customer is asked for it on their own
+                order page once this is approved. Fill it in only if they have
+                already given it to you over the phone.
+              </InfoTip>
+            </span>
+            <input
+              value={upi}
+              onChange={(e) => setUpi(e.target.value)}
+              placeholder="name@bank — optional"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              className="input h-11 text-xs"
+            />
+          </label>
+        )}
+
+        {/* Absent, not dimmed: there is no amount to override on a return that
+            pays nothing, and a greyed-out money box reads as a rule in force. */}
+        {paysOut && (
+          <label className="flex min-h-11 cursor-pointer items-center gap-1.5 text-xs">
+            <input
+              type="checkbox"
+              checked={override}
+              onChange={(e) => {
+                setOverride(e.target.checked);
+                if (e.target.checked) setOverrideNet(String(refund.net));
+              }}
+              className="h-3.5 w-3.5 accent-[var(--accent)]"
+            />
+            <span>Pay something different</span>
+            <InfoTip term="Override the refund">
+              Use this for goodwill or to cover a courier charge the customer
+              paid. It cannot go above {formatINR(refund.payable)} — that is all
+              this customer has actually paid in, and refunding more would send
+              out money the store never received.
+            </InfoTip>
+          </label>
+        )}
+
+        {paysOut && override && (
           <div className="space-y-2 rounded-lg border border-accent/40 bg-accent/5 p-2.5">
             <label className="block">
               <span className="label text-[11px]">Pay the customer</span>
@@ -428,51 +550,20 @@ export function ReturnActions({
           </div>
         )}
 
-        <label className="block">
-          <span className="label text-[11px]">Send it back by</span>
-          <select
-            value={method}
-            onChange={(e) => setMethod(e.target.value as RefundMethod)}
-            className="input h-11 text-xs"
-          >
-            {REFUND_METHODS.map((m) => (
-              <option key={m} value={m}>
-                {REFUND_METHOD_LABEL[m]}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        {method === "upi" && (
-          <label className="block">
-            <span className="label text-[11px]">
-              Customer&apos;s UPI ID
-              <InfoTip term="UPI ID">
-                Leave it blank and the customer is asked for it on their own
-                order page once this is approved. Fill it in only if they have
-                already given it to you over the phone.
-              </InfoTip>
-            </span>
-            <input
-              value={upi}
-              onChange={(e) => setUpi(e.target.value)}
-              placeholder="name@bank — optional"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              className="input h-11 text-xs"
-            />
-          </label>
-        )}
-
         <p className="text-[11px] text-muted-foreground">
           {netNow > 0 ? (
             <>
               <b>{formatINR(netNow)}</b> is recorded now and paid out separately —
               money never moves from this screen.
             </>
-          ) : (
+          ) : paysOut ? (
             <>Nothing is payable on this return.</>
+          ) : (
+            <>
+              No money moves. Send the{" "}
+              {method === "exchange" ? "replacement size" : "replacement"} once
+              the item is back.
+            </>
           )}
         </p>
 
@@ -598,11 +689,26 @@ export function ReturnActions({
 
   /* ------------------------------------------------------------- pay it out */
   if (mode === "payout") {
-    const owed = recorded.net ?? refund.net;
+    // What was agreed, not what today's rules would produce. A replacement or
+    // an exchange settled at zero, so this panel closes the request instead of
+    // paying anything — the labels say which, rather than saying "refund" over
+    // a ₹0 payout.
+    const settledOutcome = outcomeOfRefundMethod(recorded.method);
+    const owed = settledOutcome === "refund" ? (recorded.net ?? refund.net) : 0;
     return (
-      <Panel title="Record the refund">
+      <Panel
+        title={
+          settledOutcome === "refund"
+            ? "Record the refund"
+            : settledOutcome === "replace"
+              ? "Close — replacement sent"
+              : "Close — different size sent"
+        }
+      >
         <p className="text-[11px] text-muted-foreground">
-          Send the money first, then record it here. This does not move money.
+          {settledOutcome === "refund"
+            ? "Send the money first, then record it here. This does not move money."
+            : "Recording this closes the request. No money is paid on a replacement or an exchange."}
         </p>
 
         {/*
@@ -659,18 +765,36 @@ export function ReturnActions({
           </label>
         )}
 
-        <div className="space-y-1 rounded-lg border border-border bg-muted/40 p-2.5 text-[11px]">
-          {recorded.gross != null && (
-            <Line label="Gross" value={formatINR(recorded.gross)} />
-          )}
-          {recorded.fee != null && recorded.fee > 0 && (
-            <Line label="Return fee" value={`− ${formatINR(recorded.fee)}`} />
-          )}
-          <Line label="Agreed at approval" value={formatINR(owed)} strong />
-        </div>
+        {/* The sum is only worth printing when there is one. On a replacement
+            the whole box would read "₹0 · ₹0", which is noise pretending to be
+            an audit trail. */}
+        {settledOutcome === "refund" ? (
+          <div className="space-y-1 rounded-lg border border-border bg-muted/40 p-2.5 text-[11px]">
+            {recorded.gross != null && (
+              <Line label="Refundable goods value" value={formatINR(recorded.gross)} />
+            )}
+            {/* Only ever present on a request decided under the old fee policy. */}
+            {recorded.fee != null && recorded.fee > 0 && (
+              <Line label="Return fee (legacy)" value={`− ${formatINR(recorded.fee)}`} />
+            )}
+            <Line label="Agreed at approval" value={formatINR(owed)} strong />
+          </div>
+        ) : (
+          <p className="rounded-lg border border-border bg-muted/40 p-2.5 text-[11px] text-muted-foreground">
+            Agreed at approval:{" "}
+            <b className="text-foreground">
+              {settledOutcome === "replace"
+                ? "a replacement, no refund"
+                : "a different size, no refund"}
+            </b>
+            . Send it once the item is back.
+          </p>
+        )}
 
         <label className="block">
-          <span className="label text-[11px]">Paid by</span>
+          <span className="label text-[11px]">
+            {settledOutcome === "refund" ? "Paid by" : "Settled as"}
+          </span>
           <select
             value={payMethod}
             onChange={(e) => setPayMethod(e.target.value as RefundMethod)}
@@ -704,22 +828,27 @@ export function ReturnActions({
           </label>
         )}
 
-        <label className="block">
-          <span className="label text-[11px]">
-            Reference / UTR
-            <InfoTip term="Reference">
-              The transaction number from your bank, UPI app or Razorpay. The
-              customer is shown it on their order page so they can match it to
-              their statement.
-            </InfoTip>
-          </span>
-          <input
-            value={reference}
-            onChange={(e) => setReference(e.target.value)}
-            placeholder="e.g. 431299887766"
-            className="input h-11 text-xs"
-          />
-        </label>
+        {/* Absent on a replacement: there is no payment to reference, and a
+            blank UTR box on a settlement that moves no money is a control that
+            cannot apply. */}
+        {refundMovesMoney(payMethod) && (
+          <label className="block">
+            <span className="label text-[11px]">
+              Reference / UTR
+              <InfoTip term="Reference">
+                The transaction number from your bank, UPI app or Razorpay. The
+                customer is shown it on their order page so they can match it to
+                their statement.
+              </InfoTip>
+            </span>
+            <input
+              value={reference}
+              onChange={(e) => setReference(e.target.value)}
+              placeholder="e.g. 431299887766"
+              className="input h-11 text-xs"
+            />
+          </label>
+        )}
 
         <textarea
           rows={2}
@@ -734,7 +863,11 @@ export function ReturnActions({
           // and the endpoint agree instead of the endpoint rejecting a press
           // the UI had just invited.
           confirmLabel={
-            !goodsBack && owed > 0 ? "Refund early — goods not back" : "Mark refunded"
+            !goodsBack && owed > 0
+              ? "Refund early — goods not back"
+              : settledOutcome === "refund"
+                ? "Mark refunded"
+                : "Close this return"
           }
           variant="primary"
           disabled={pending || (!goodsBack && owed > 0 && !payAnyway)}
@@ -767,16 +900,31 @@ export function ReturnActions({
             Mark {RETURN_STATUS_LABEL[s].toLowerCase()}
           </button>
         ))}
-        {PAYABLE.includes(status) && (
-          <button
-            type="button"
-            disabled={pending}
-            onClick={() => setMode("payout")}
-            className={`${btn} border-success/40 bg-success/10 text-success hover:bg-success/20`}
-          >
-            <BadgeIndianRupee className="h-3.5 w-3.5" /> Record refund
-          </button>
-        )}
+        {/* One button, two meanings named apart: a refund is money leaving,
+            a replacement is a request being closed. Same panel, honest label. */}
+        {PAYABLE.includes(status) &&
+          (outcomeOfRefundMethod(recorded.method) === "refund" ? (
+            <button
+              type="button"
+              disabled={pending}
+              onClick={() => setMode("payout")}
+              className={`${btn} border-success/40 bg-success/10 text-success hover:bg-success/20`}
+            >
+              <BadgeIndianRupee className="h-3.5 w-3.5" /> Record refund
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={pending}
+              onClick={() => setMode("payout")}
+              className={`${btn} border-border hover:bg-muted`}
+            >
+              <Check className="h-3.5 w-3.5" />{" "}
+              {outcomeOfRefundMethod(recorded.method) === "replace"
+                ? "Replacement sent"
+                : "New size sent"}
+            </button>
+          ))}
       </div>
 
       {/*
@@ -969,7 +1117,17 @@ function Actions({
  * Gross → fee → net, with every deduction named. Shown *before* the approve
  * button so the owner never confirms a number they haven't seen broken down.
  */
-function Breakdown({ refund }: { refund: RefundBreakdown }) {
+function Breakdown({
+  refund,
+  payNow,
+  outcome,
+}: {
+  refund: RefundBreakdown;
+  /** What approving right now would pay — follows the method control above. */
+  payNow: number;
+  /** The outcome currently selected, which may differ from the stored one. */
+  outcome: ReturnOutcome;
+}) {
   return (
     <div className="space-y-1 rounded-lg border border-border bg-muted/40 p-2.5 text-[11px]">
       <p className="flex items-center justify-between gap-2 font-medium">
@@ -999,41 +1157,53 @@ function Breakdown({ refund }: { refund: RefundBreakdown }) {
           value={formatINR(refund.alreadyRefunded)}
         />
       )}
-      <Line label="Gross" value={formatINR(refund.gross)} strong />
-      {/*
-        The waiver is stated as a *line of the sum*, not as a parenthesis on a
-        label, and only when a fee actually existed to waive — `feeWaived` is
-        true for any damaged item, including on a store that charges nothing,
-        where "waived" would name a fee that was never there.
-      */}
-      {refund.waivedFee > 0 ? (
+      <Line label="Refundable goods value" value={formatINR(refund.gross)} strong />
+
+      {/* What stays with the store, itemised. Not deductions from the refund —
+          neither was ever part of the goods value — but the owner is asked
+          "why isn't it the order total?" and this is the answer in rupees. */}
+      {refund.keptShipping > 0 && (
         <Line
-          label="Return fee — waived, our fault"
-          value={`${formatINR(refund.waivedFee)} not charged`}
-          tip="This reason reads as our mistake (damaged, defective, wrong item, missing, not as described) and the store's policy waives the fee on those, so this one is a full refund. Change that under Settings → Returns."
-        />
-      ) : (
-        <Line
-          label="Return fee"
-          value={refund.fee > 0 ? `− ${formatINR(refund.fee)}` : "—"}
+          label="Shipping kept"
+          value={formatINR(refund.keptShipping)}
+          tip="Never refunded: the parcel was carried whatever happened to the goods afterwards."
         />
       )}
+      {refund.keptPaymentFee > 0 && (
+        <Line
+          label="Cash-handling fee kept"
+          value={formatINR(refund.keptPaymentFee)}
+          tip="The COD or part-payment fee charged at checkout. The courier's collection charge was paid, so it is not returned."
+        />
+      )}
+
       <div className="border-t border-border pt-1">
-        <Line label="Pay the customer" value={formatINR(refund.net)} strong />
+        <Line
+          label={outcome === "refund" ? "Pay the customer" : "Money to pay"}
+          value={formatINR(payNow)}
+          strong
+        />
       </div>
-      {refund.waivedFee > 0 && (
-        <p className="text-success">
-          Full refund — this one is our fault, so the {formatINR(refund.waivedFee)}{" "}
-          fee is dropped.
+
+      {/* The one cost that runs the other way, named as a cost to the owner
+          rather than as the absence of a deduction. */}
+      {refund.storePaysReturnShipping && (
+        <p className="flex items-start gap-1.5 text-accent">
+          <Truck className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+          <span>
+            Our fault — full refund, and the return courier charge is yours. It
+            lands on your NimbusPost wallet when you book the pickup.
+          </span>
         </p>
       )}
-      {refund.feeCapped && (
-        <p className="text-danger">
-          The fee is larger than the refund — capped, so nothing is owed rather
-          than the customer being billed.
+      {outcome !== "refund" && (
+        <p className="text-muted-foreground">
+          {outcome === "replace"
+            ? "Settling with a replacement, so no money is paid."
+            : "Settling with a different size, so no money is paid."}
         </p>
       )}
-      {refund.collected <= 0 && (
+      {outcome === "refund" && refund.collected <= 0 && (
         <p className="text-danger">
           No money was ever collected for this order, so there is nothing to
           refund.

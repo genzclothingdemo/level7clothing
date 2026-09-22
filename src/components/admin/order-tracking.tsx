@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -22,9 +22,10 @@ import { InfoTip } from "@/components/store/info-tip";
 import { CopyableId } from "@/components/admin/copy-id";
 import { Badge, Btn, BtnLink, LabelledField } from "@/components/admin/order-ui";
 import type { AdminOrder, CourierOption } from "@/components/admin/order-types";
-import { shipmentGateFor } from "@/lib/orders-pipeline";
+import { adminOrderState, shipmentGateFor } from "@/lib/orders-pipeline";
 import type { Collection } from "@/lib/orders-pipeline";
 import {
+  autoSyncOrderAction,
   cancelOrderDraftAction,
   chooseCourierAction,
   draftOrderInNimbusAction,
@@ -51,8 +52,8 @@ import {
  * | `pending`| one line — confirm the order first                        |
  * | `closed` | one line — cancelled / payment failed                     |
  * | `done`   | one line — delivered, nothing left to ship                |
- * | `ready`  | **Ship now** · **Send draft**                             |
- * | `staged` | **Book AWB** · Sync · cancel draft                        |
+ * | `ready`  | **Choose courier** (draft or book) · **Send draft**       |
+ * | `staged` | **Choose courier** (book) · Sync · cancel draft           |
  *
  * The owner's complaint, verbatim: *"if order status pending/cancel, delivered
  * hai to nimbus ka option show hi kyu kare? if AWB order draft or book ho gaya
@@ -68,15 +69,58 @@ import {
 export function OrderTracking({ order }: { order: AdminOrder }) {
   const gate = shipmentGateFor(order);
 
-  if (gate.can.tracking) return <BookedShipment order={order} canSync={gate.can.sync} />;
-  if (gate.allowed) return <ShipmentActions order={order} gate={gate} />;
   return (
-    <ShipmentBlocked
-      order={order}
-      code={gate.code}
-      reason={gate.reason}
-      canCancelDraft={gate.can.cancelDraft}
-    />
+    <div className="space-y-1.5">
+      <AdminStateLine order={order} />
+      {gate.can.tracking ? (
+        <BookedShipment order={order} canSync={gate.can.sync} />
+      ) : gate.allowed ? (
+        <ShipmentActions order={order} gate={gate} />
+      ) : (
+        <ShipmentBlocked
+          order={order}
+          code={gate.code}
+          reason={gate.reason}
+          canCancelDraft={gate.can.cancelDraft}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  The operator's sentence                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * *"order confirmed: waiting for NimbusPost" / "draft done, waiting for
+ * confirm" / "AWB booked, waiting for pickup"* — the owner's words, and the
+ * reason this line exists.
+ *
+ * `Order.status` alone cannot say any of those: `confirmed` covers both
+ * "nothing has been staged" and "a draft is waiting for you", and `shipped`
+ * covers both "an AWB exists and the parcel is still on the shelf" and "it is
+ * out for delivery". `adminOrderState()` composes the stored status with the
+ * shipment stage (from `shipmentGateFor`) and the courier's last scan (from
+ * `courierPhase`) — **one stored status, two vocabularies**; the customer's
+ * coarser one is `customerOrderState` in `components/store/order-status.ts`.
+ *
+ * Both vocabularies read the same row of the same table in
+ * `lib/nimbus-status.ts`, which is the rule: never a second courier map.
+ */
+function AdminStateLine({ order }: { order: AdminOrder }) {
+  const state = adminOrderState(order);
+  return (
+    <p className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs">
+      <Badge tone={state.tone}>{state.headline}</Badge>
+      <span className="min-w-0 text-muted-foreground">{state.detail}</span>
+      <InfoTip term="What this line means">
+        Your order&apos;s status and where its parcel has got to, in one
+        sentence. The customer sees the same journey in plainer words — they are
+        never told about drafts, AWBs or your wallet, only whether the parcel is
+        being packed, waiting for pickup, on its way or delivered.
+      </InfoTip>
+    </p>
   );
 }
 
@@ -229,6 +273,42 @@ function BookedShipment({
 
   const awb = order.trackingNumber ?? "";
 
+  // ---- Auto-sync ----------------------------------------------------------
+  //
+  // *"auto sync enable kar sakte hai kya? if AWB order create ho jaae then auto
+  // sync ho jaae"*. Opening an order asks NimbusPost where the parcel is, so
+  // nobody has to press Sync to find out.
+  //
+  // Three things keep it cheap. It only mounts inside an **expanded** order
+  // row, so it is one call when a human looks at one order — not 25 per page
+  // load. It only runs when there is an AWB to ask about. And the server action
+  // is rate-limited against `lastSyncedAt`, so re-expanding the same row within
+  // the window costs one indexed read and no NimbusPost call.
+  //
+  // The ref guard is for React's development double-invoke, not correctness:
+  // a second call would be refused by the rate limit anyway.
+  const orderId = order.id;
+  const asked = useRef(false);
+  useEffect(() => {
+    if (!awb || asked.current) return;
+    asked.current = true;
+    let cancelled = false;
+    autoSyncOrderAction(orderId)
+      .then((res) => {
+        // Refresh only when something actually moved. A silent poll that
+        // re-rendered the table every time it found nothing would fight the
+        // operator for their scroll position.
+        if (!cancelled && res.ok && res.changed) router.refresh();
+      })
+      .catch(() => {
+        // A courier outage must not break the panel. Sync is still there, and
+        // it reports its own errors loudly.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [orderId, awb, router]);
+
   function sync() {
     startSync(async () => {
       const res = await syncOrderFromNimbusAction(order.id);
@@ -295,9 +375,11 @@ function BookedShipment({
           </span>
         )}
         <InfoTip term="Courier scans">
-          Scans arrive on their own every 2 hours and whenever NimbusPost sends
-          a status webhook, so this is usually already current. Sync asks the
-          courier right now.
+          This updates itself three ways, so you should rarely need the button:
+          NimbusPost pushes a webhook the moment a scan happens, a scheduled job
+          sweeps every open shipment, and <b>opening this order re-checks it</b>{" "}
+          if it has not been checked in the last 15 minutes. <b>Sync</b> asks the
+          courier right now, whatever the last check said.
           {order.lastSyncedAt
             ? ` Last checked ${new Date(order.lastSyncedAt).toLocaleString("en-IN")}.`
             : ""}
@@ -347,18 +429,39 @@ function BookedShipment({
 /* ------------------------------------------------------------------ */
 
 /**
- * The two depths of the manual path, triggered by a person — the same two the
- * automatic path offers, which is the point:
+ * The manual dispatch path — the one that matters when
+ * `dispatchOnConfirm: "off"`, because then it is the *only* path.
  *
- *   - **Ship now** / **Book AWB** — live rates → pick a courier → a confirm
- *     that names the courier, the wallet charge and what the courier collects
- *     → book.
- *   - **Send draft** — stage and stop. Free, reversible, no courier.
+ * The owner: *"curior chose karna ka option admin >> order me nahi show ho raha
+ * hai. if setting is DO nothing at What happens on confirmation then admin yaha
+ * se curior chose karke draft or book kar sakta hai"* — with nothing automatic,
+ * choosing the courier has to be possible here, and choosing it must lead to
+ * **either** verb.
  *
- * Which pair is on screen comes from the gate, never from a local re-reading
- * of `nimbusShipmentId`: `ready` shows Ship now + Send draft, `staged` shows
- * Book AWB + Sync + cancel draft. "Send draft" is never rendered next to a
- * staged draft, so the old disabled-button-that-says-Draft-staged is gone.
+ * What was wrong was not that the rates were missing; it was that the only door
+ * to them was a button called **Ship now**, and every row inside it said
+ * **Book**. Choosing a courier and *drafting* with it could not be expressed,
+ * so the courier choice looked like it did not exist for anyone who was not
+ * ready to spend money. The free verb, "Send draft", stood outside the picker
+ * and staged a carrier-less draft.
+ *
+ * Now: **Choose courier** opens the live rates, cheapest first, a row is
+ * selected (the saved choice, else the cheapest), and the two verbs sit under
+ * the table sharing that one choice —
+ *
+ *   - **Stage draft with X** — free, reversible, no AWB. Records the carrier.
+ *   - **Book with X — ₹n** — confirmed first, names the wallet charge *and*
+ *     what the courier collects at the door, then generates the AWB.
+ *
+ * **Send draft** survives beside it as the no-decision shortcut, for the
+ * common case of staging now and choosing the carrier later.
+ *
+ * Draft-first is untouched: booking still goes through `shipOrderNow`, which
+ * stages a draft before it books when none exists. `createShipment()` stays
+ * unused.
+ *
+ * Which verbs exist comes from the gate, never from a local re-reading of
+ * `nimbusShipmentId`.
  */
 function ShipmentActions({
   order,
@@ -431,11 +534,25 @@ function ShipmentActions({
           )}
           {staged ? "Draft staged" : "Not staged"}
         </Badge>
+        {/* The carrier already attached to this order — pre-picked by the
+            confirmation pipeline on `draft`/`book`, or chosen here. Shown
+            outside the picker so "which courier is this going with?" is
+            answerable without opening anything. */}
+        {order.nimbusCourierName && (
+          <Badge
+            tone="accent"
+            title={`This order is set to go with ${order.nimbusCourierName}. Open Choose courier to change it.`}
+          >
+            <Truck className="h-2.5 w-2.5" aria-hidden />
+            {order.nimbusCourierName}
+          </Badge>
+        )}
         <InfoTip term="Draft vs booked">
-          A <b>draft</b> is an unbooked order sitting in NimbusPost: no courier,
-          no AWB, no charge, and you can withdraw it. <b>Booking</b> allocates
-          the courier, generates the AWB and takes the money out of your
-          NimbusPost wallet. They are separate buttons on purpose.
+          A <b>draft</b> is an unbooked order sitting in NimbusPost: no AWB, no
+          charge, and you can withdraw it — it can carry the courier you intend
+          to use, but nothing is allocated. <b>Booking</b> allocates that
+          courier, generates the AWB and takes the money out of your NimbusPost
+          wallet. They are separate buttons on purpose.
         </InfoTip>
 
         <span className="ml-auto flex flex-wrap items-center gap-1.5">
@@ -445,20 +562,16 @@ function ShipmentActions({
               onClick={() => setPicking((v) => !v)}
               disabled={busy}
               aria-expanded={picking}
-              title={
-                staged
-                  ? "Pick a courier from the live rates and book this draft now"
-                  : "Pick a courier from the live rates and book the AWB now"
-              }
+              title="See the live rates for this parcel and pincode, then draft or book with the courier you pick"
             >
               {picking ? (
                 <>
-                  <X className="h-3.5 w-3.5" aria-hidden /> Cancel
+                  <X className="h-3.5 w-3.5" aria-hidden /> Close rates
                 </>
               ) : (
                 <>
                   <Truck className="h-3.5 w-3.5" aria-hidden />
-                  {staged ? "Book AWB" : "Ship now"}
+                  Choose courier
                 </>
               )}
             </Btn>
@@ -469,7 +582,7 @@ function ShipmentActions({
               tone="outline"
               onClick={draft}
               disabled={busy || picking}
-              title="Stage the unbooked draft only. Free, and you can withdraw it."
+              title="Stage the unbooked draft without choosing a courier. Free, and you can withdraw it."
             >
               {drafting ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
@@ -502,44 +615,72 @@ function ShipmentActions({
       {/* Conditionally rendered, never parked offscreen with a transform —
           see the modal note in CLAUDE.md. */}
       {picking && (
-        <CourierPicker order={order} onDone={() => setPicking(false)} />
+        <CourierPicker
+          order={order}
+          canDraft={gate.can.draft}
+          onDone={() => setPicking(false)}
+        />
       )}
     </div>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/*  Ship now: live rates → choose → book                               */
+/*  Choose courier: live rates → pick one → draft OR book              */
 /* ------------------------------------------------------------------ */
 
 /**
- * The "Ship now" / "Book AWB" flow, in one panel: fetch the live rates for this
- * parcel and pincode, show what the courier will be told to collect, and book
- * on one confirmed press.
+ * The courier choice, and both things you can do with it.
  *
- * The collection line is read straight off `resolveCollection()` via the
- * server — it is not recomputed here. That rule is what stops a prepaid
- * customer being charged a second time at their door, and the point of
- * printing it above the Book buttons is that it is checkable *before* the
- * money moves rather than after.
+ * Fetch the live rates for this parcel and pincode (cheapest first), select
+ * one, and then take **either** verb with that selection: stage a free draft
+ * for it, or book it and generate the AWB.
+ *
+ * ## Why the verbs are under the table, not in the rows
+ *
+ * A Book button on every row was the whole picker: the only thing choosing a
+ * courier could lead to was spending money, which is why an owner running
+ * `dispatchOnConfirm: "off"` could not find a way to choose a courier *and
+ * draft*. Selecting a row and acting on the selection separates the choice
+ * from the consequence — the same reason `dispatchOrder` cannot create-and-book
+ * in one call.
+ *
+ * It also removes a real hazard: six numeric columns with a violet **Book** at
+ * the end of each row means the button that charges the wallet is the widest
+ * target on the panel, repeated once per courier.
+ *
+ * The **collection line** is read straight off `resolveCollection()` via the
+ * server — never recomputed here. That rule is what stops a prepaid customer
+ * being charged a second time at their door, and it is printed above the verbs
+ * so it is checkable *before* the money moves rather than after.
  */
 function CourierPicker({
   order,
+  canDraft,
   onDone,
 }: {
   order: AdminOrder;
+  /** From the gate: is staging a draft still one of the things to do here? */
+  canDraft: boolean;
   onDone: () => void;
 }) {
   const router = useRouter();
   const [booking, startBook] = useTransition();
+  const [drafting, startDraft] = useTransition();
   const [loading, setLoading] = useState(true);
   const [options, setOptions] = useState<CourierOption[] | null>(null);
   const [collection, setCollection] = useState<Collection | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
+  /**
+   * The selected courier's id. `undefined` means "nothing chosen by hand yet",
+   * which resolves to the saved choice and then to the cheapest — never to
+   * nothing, so the two verbs below always have a subject.
+   */
+  const [chosenId, setChosenId] = useState<string | undefined>(undefined);
 
-  // Quoted on mount rather than behind another press: "Ship now" is one
-  // decision, and making the admin ask for rates and then ask to book is the
-  // two-step flow this panel replaced.
+  // Quoted on mount rather than behind another press: opening the panel *is*
+  // the request for rates, and making the admin ask twice is the two-step flow
+  // this panel replaced.
   //
   // `loading` starts true from `useState` rather than being set here: the panel
   // is conditionally rendered, so it mounts fresh for exactly one order and an
@@ -570,16 +711,62 @@ function CourierPicker({
     };
   }, [orderId]);
 
+  // Derived during render, not stored in an effect: the saved choice if it is
+  // still quoting for this parcel, else the cheapest — which is `options[0]`,
+  // because `listCourierOptions` sorts by total.
+  const saved = order.nimbusCourierId;
+  const selected =
+    options?.find((o) => o.courierId === chosenId) ??
+    options?.find((o) => o.courierId === saved) ??
+    options?.[0] ??
+    null;
+
+  function collectsLine(): string {
+    if (!collection) return "";
+    return collection.paymentType === "cod"
+      ? `The courier will collect ${formatINR(collection.collectAmount)} at the door.`
+      : "The courier will collect nothing at the door.";
+  }
+
+  /**
+   * Stage the draft **for the selected courier**. Free, reversible, no AWB —
+   * so no confirmation, exactly like the bare "Send draft" button.
+   *
+   * The carrier travels with the draft rather than being saved in a second
+   * press: a draft staged with no carrier and a carrier saved against no draft
+   * are both half-states someone then has to notice.
+   */
+  function draftWith(option: CourierOption) {
+    startDraft(async () => {
+      const res = await draftOrderInNimbusAction(
+        order.id,
+        option.courierId,
+        option.name
+      );
+      if (!res.ok) {
+        toast.error(res.error, { duration: 10000 });
+        return;
+      }
+      toast.success(
+        res.alreadyStaged
+          ? `A draft was already waiting in NimbusPost — ${option.name} is saved for it.`
+          : `Draft staged for ${option.name} — no AWB, nothing charged.`,
+        {
+          description: `Booking it will charge ${formatINR(option.total)}. ${collectsLine()}`,
+          duration: 9000,
+        }
+      );
+      onDone();
+      router.refresh();
+    });
+  }
+
   function book(option: CourierOption | null) {
     const who = option ? option.name : "whichever courier NimbusPost allocates";
     const charge = option
       ? `Your NimbusPost wallet will be charged ${formatINR(option.total)}.`
       : "Your NimbusPost wallet will be charged at NimbusPost's rate.";
-    const collects = collection
-      ? collection.paymentType === "cod"
-        ? `The courier will collect ${formatINR(collection.collectAmount)} at the door.`
-        : "The courier will collect nothing at the door."
-      : "";
+    const collects = collectsLine();
 
     if (
       !confirm(
@@ -626,6 +813,11 @@ function CourierPicker({
     });
   }
 
+  // One busy flag for the whole panel: drafting and booking both write to the
+  // same order, so allowing the second while the first is in flight is how an
+  // order ends up with two NimbusPost records.
+  const busyPicker = booking || drafting;
+
   return (
     <div className="overflow-hidden rounded-lg border border-accent/40">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-accent/5 px-2.5 py-1.5">
@@ -635,7 +827,9 @@ function CourierPicker({
         <InfoTip term="Courier rates">
           What your NimbusPost wallet is charged if you book with that courier —
           forward leg, return-to-origin and the COD collection fee. Cheapest
-          first. Booking is immediate and generates the AWB here.
+          first, and the cheapest is selected for you. Choosing a row changes
+          nothing on its own: the two buttons underneath are what stage a free
+          draft or book the AWB with it.
         </InfoTip>
       </div>
 
@@ -688,7 +882,7 @@ function CourierPicker({
             not mean the booking will. You can let NimbusPost allocate a courier
             instead — you will still see which one it picked.
           </p>
-          <Btn tone="accent" onClick={() => book(null)} disabled={booking}>
+          <Btn tone="accent" onClick={() => book(null)} disabled={busyPicker}>
             {booking && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />}
             Book without choosing
           </Btn>
@@ -703,30 +897,56 @@ function CourierPicker({
           <table className="w-full min-w-[540px] text-xs">
             <thead className="sticky top-0 bg-card">
               <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-muted-foreground">
+                <th className="px-2.5 py-1">
+                  <span className="sr-only">Choose</span>
+                </th>
                 <th className="px-2.5 py-1 font-medium">Courier</th>
                 <th className="px-2.5 py-1 font-medium">ETA</th>
                 <th className="px-2.5 py-1 font-medium">Forward</th>
                 <th className="px-2.5 py-1 font-medium">RTO</th>
                 <th className="px-2.5 py-1 font-medium">COD</th>
                 <th className="px-2.5 py-1 font-medium">Charge</th>
-                <th className="px-2.5 py-1" />
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
               {options.map((c, i) => {
-                const picked = order.nimbusCourierId === c.courierId;
+                const saved = order.nimbusCourierId === c.courierId;
+                const on = selected?.courierId === c.courierId;
+                const rowId = `courier-${order.id}-${c.courierId}`;
                 return (
-                  <tr key={c.courierId} className={picked ? "bg-accent/5" : ""}>
+                  // The whole row is the radio's label, so the 10px target in
+                  // the first cell is not the only way to change the choice.
+                  <tr
+                    key={c.courierId}
+                    className={cn(
+                      "cursor-pointer transition-colors",
+                      on ? "bg-accent/10" : "hover:bg-muted/50"
+                    )}
+                    onClick={() => setChosenId(c.courierId)}
+                  >
                     <td className="px-2.5 py-1">
-                      <span className="font-medium">{c.name}</span>
+                      <input
+                        type="radio"
+                        id={rowId}
+                        name={`courier-${order.id}`}
+                        checked={on}
+                        onChange={() => setChosenId(c.courierId)}
+                        className="h-3.5 w-3.5 cursor-pointer accent-[var(--accent)]"
+                        aria-label={`Choose ${c.name} at ${formatINR(c.total)}`}
+                      />
+                    </td>
+                    <td className="px-2.5 py-1">
+                      <label htmlFor={rowId} className="cursor-pointer font-medium">
+                        {c.name}
+                      </label>
                       {i === 0 && (
                         <Badge tone="success" className="ml-1.5">
                           cheapest
                         </Badge>
                       )}
-                      {picked && (
+                      {saved && (
                         <Badge tone="accent" className="ml-1.5">
-                          chosen
+                          saved
                         </Badge>
                       )}
                       {c.type && (
@@ -753,26 +973,59 @@ function CourierPicker({
                     <td className="px-2.5 py-1 font-medium tabular-nums">
                       {formatINR(c.total)}
                     </td>
-                    <td className="px-2.5 py-1 text-right">
-                      <Btn
-                        tone="accent"
-                        onClick={() => book(c)}
-                        disabled={booking}
-                        className="px-2"
-                        title={`Book with ${c.name} and charge your wallet ${formatINR(c.total)}`}
-                      >
-                        {booking ? (
-                          <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
-                        ) : (
-                          "Book"
-                        )}
-                      </Btn>
-                    </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* ---- The two verbs, sharing one choice ----
+          Free on the left, money on the right, and the money one names both
+          the wallet charge and what the courier collects before it is pressed
+          (again, in the confirm). */}
+      {selected && (
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-border bg-muted/30 px-2.5 py-2">
+          <p className="min-w-0 flex-1 text-[11px] leading-snug">
+            <span className="text-muted-foreground">Chosen: </span>
+            <b>{selected.name}</b>
+            <span className="text-muted-foreground">
+              {" · "}
+              {formatINR(selected.total)} to your wallet
+              {selected.tatDays ? ` · about ${selected.tatDays} d` : ""}
+            </span>
+          </p>
+
+          {canDraft && (
+            <Btn
+              tone="outline"
+              onClick={() => draftWith(selected)}
+              disabled={busyPicker}
+              title={`Stage an unbooked draft for ${selected.name}. Free, and you can withdraw it.`}
+            >
+              {drafting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : (
+                <FileText className="h-3.5 w-3.5" aria-hidden />
+              )}
+              Draft with {selected.name}
+            </Btn>
+          )}
+
+          <Btn
+            tone="accent"
+            onClick={() => book(selected)}
+            disabled={busyPicker}
+            title={`Book with ${selected.name}, generate the AWB and charge your wallet ${formatINR(selected.total)}`}
+          >
+            {booking ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+            ) : (
+              <Truck className="h-3.5 w-3.5" aria-hidden />
+            )}
+            Book — {formatINR(selected.total)}
+          </Btn>
         </div>
       )}
 
@@ -788,7 +1041,7 @@ function CourierPicker({
           <button
             type="button"
             onClick={clearChoice}
-            disabled={booking}
+            disabled={busyPicker}
             className="inline-flex min-h-9 cursor-pointer items-center underline underline-offset-2 hover:text-foreground disabled:opacity-50"
           >
             clear

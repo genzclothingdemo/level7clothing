@@ -29,6 +29,26 @@
  * somewhere else would not match the door you came through; **Orders** is
  * second, because it is the one people go hunting for.
  *
+ * ## Shipping is gone, and Integrations replaced it
+ *
+ * There used to be a **Shipping** tab. By the end it held two controls: a
+ * free-shipping threshold and the NimbusPost master switch. Everything that
+ * makes a parcel a parcel — the per-product rule, the weight, the box — lives
+ * on the product, and whether a confirmed order reaches the courier is the
+ * Orders tab. A tab with one number and one switch, neither of which is about
+ * the same thing as the other, is a tab you open by mistake.
+ *
+ * So the switch moved to **Integrations**, beside Razorpay, where it belongs:
+ * both are outside services with a master switch and a key pair, and the owner
+ * asking "is the courier connected?" is asking the same question as "is the
+ * gateway connected?". The threshold moved to **Payments**, because free
+ * shipping over ₹X is a checkout charge — the mirror image of the cash-handling
+ * fee it now sits next to. One adds to the basket, one takes away.
+ *
+ * Integrations shows **whether** a key pair is configured and never the value.
+ * The keys are environment variables and are not editable here at all, which is
+ * the strongest form of that rule: there is no input to leak from.
+ *
  * Inside each tab the same rule applies one level down: what changes weekly is
  * on top, what is set once is behind a `Disclosure`, and every long explanation
  * is behind an `(i)` rather than in a paragraph.
@@ -69,18 +89,18 @@ export const TABS = [
   {
     key: "payments",
     label: "Payments",
-    heading: "Payments",
-    blurb: "How customers are allowed to pay",
+    heading: "Payments & charges",
+    blurb: "How customers pay, and what checkout adds",
     guide:
-      "Which methods checkout offers, and whether the online gateway is live at all. A method appears only when three things agree: its switch here, the gateway (for the two online methods) and the product's own allowed methods. Turning all four off is refused by the server — it would not close checkout, it would silently turn every order into a pay-the-owner request.",
+      "Three ways to pay — cash on delivery, part now and the rest on delivery, or the whole thing online — and the charges that sit on top of the basket. A method appears at checkout only when its switch here, the gateway (for the two that need it) and the product's own allowed methods all agree. Turning the last one off is refused: checkout would have nothing to offer, and there is no fallback mode for it to drop into.",
   },
   {
-    key: "shipping",
-    label: "Shipping",
-    heading: "Shipping & fulfilment",
-    blurb: "What delivery costs, and who carries it",
+    key: "integrations",
+    label: "Integrations",
+    heading: "Connected services",
+    blurb: "The two outside services, and whether they are live",
     guide:
-      "The store-wide free-shipping threshold and the NimbusPost connection. Per-product shipping rules and parcel dimensions are not here — they live on each product, because a hoodie and a tee are different parcels. Whether a confirmed order reaches the courier by itself is the Orders tab, not this one.",
+      "Razorpay takes the money and NimbusPost carries the parcel. Each has a master switch here and a key pair set in the deployment's environment; the switch decides whether the store uses the service, the keys decide whether it can. Keys are never shown on this screen — only whether they are present — because a secret rendered into a page is a secret that can be read from the page.",
   },
   {
     key: "returns",

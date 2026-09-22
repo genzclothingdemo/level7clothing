@@ -31,6 +31,7 @@ import {
   XCircle,
   type LucideIcon,
 } from "lucide-react";
+import { courierPhase } from "@/lib/nimbus-status";
 
 /** A raw `Order.statusHistory` row, as the admin actions write it. */
 export type StatusEntry = {
@@ -49,14 +50,22 @@ export type StatusEntry = {
 /* -------------------------------------------------------------- the flow */
 
 /**
- * The four steps a customer is promised: placed → confirmed → shipped →
+ * The four steps a customer is promised: placed → confirmed → dispatched →
  * delivered. `label` is what fits under a stepper dot on a 320px screen;
  * `long` is the sentence form used in the status line and the history.
+ *
+ * **`shipped` reads as "Dispatched", never "Shipped".** The stored status flips
+ * the moment an AWB is generated, which is typically hours before anyone
+ * collects the parcel — so "Shipped" was routinely a claim that the box had
+ * left the building when it was still on the shelf. "Dispatched" is true from
+ * the AWB onwards (we have handed it to a courier's system), and the precise
+ * state — waiting for pickup, on its way, out for delivery — is what
+ * {@link customerOrderState} says underneath it.
  */
 export const ORDER_FLOW = [
   { key: "pending", label: "Placed", long: "Order placed", icon: Clock },
   { key: "confirmed", label: "Confirmed", long: "Confirmed", icon: Package },
-  { key: "shipped", label: "Shipped", long: "Shipped", icon: Truck },
+  { key: "shipped", label: "Dispatched", long: "Dispatched", icon: Truck },
   { key: "delivered", label: "Delivered", long: "Delivered", icon: Home },
 ] as const;
 
@@ -131,6 +140,157 @@ export const ORDER_STATUS_PILL: Record<string, string> = {
 
 export function orderStatusPill(status: string): string {
   return ORDER_STATUS_PILL[status] ?? "bg-muted text-muted-foreground";
+}
+
+/* --------------------------------------------------- the customer's words */
+
+export type CustomerStateCode =
+  | "placed"
+  | "confirmed"
+  | "awaiting-pickup"
+  | "moving"
+  | "out"
+  | "attempted"
+  | "returning"
+  | "delivered"
+  | "cancelled"
+  | "failed";
+
+export type CustomerOrderState = {
+  code: CustomerStateCode;
+  /** The one line that answers "where is it?". */
+  label: string;
+  /** One short clause under it, or null when the label says everything. */
+  note: string | null;
+  /**
+   * True when the label was derived from the courier's last scan. The raw
+   * courier text is then redundant — printing both gives
+   * "Out for delivery · Out For Delivery".
+   */
+  fromScan: boolean;
+};
+
+/**
+ * **The customer's reading of an order** — the coarse half of "one stored
+ * status, two vocabularies".
+ *
+ * The operator's version is `adminOrderState` in `lib/orders-pipeline.ts`, and
+ * it names the draft, the AWB and the carrier because an operator's next press
+ * depends on all three. A customer's does not. They want one fact — *where is
+ * my parcel* — so nothing here mentions NimbusPost, a draft, an AWB or a
+ * wallet, and "confirmed" and "dispatched" are as far into our plumbing as the
+ * wording ever goes.
+ *
+ * Both vocabularies read the **same** row of the **same** table:
+ * `courierPhase()` in `lib/nimbus-status.ts`, beside `mapNimbusStatus()`. That
+ * is the rule this file must not break — a second courier-status map here is
+ * exactly the drift that made `pickup done` mean two things.
+ *
+ * The one case worth stating: `shipped` **with no scan yet** is *"Waiting for
+ * pickup"*, not "Shipped". The status flips when the AWB is generated, so for
+ * the hours between booking and collection a bald "Shipped" is a parcel the
+ * customer is told has left and has not.
+ */
+export function customerOrderState(
+  status: string,
+  deliveryStatus?: string | null
+): CustomerOrderState {
+  const phase = courierPhase(deliveryStatus);
+
+  const say = (
+    code: CustomerStateCode,
+    label: string,
+    note: string | null,
+    fromScan = false
+  ): CustomerOrderState => ({ code, label, note, fromScan });
+
+  // A parcel turned around outranks whatever the order status still says —
+  // there is no order status for "coming back", and the customer needs to know
+  // before they keep waiting at the door.
+  if (phase === "rto" && status !== "delivered") {
+    return say(
+      "returning",
+      "Coming back to the store",
+      "The delivery couldn't be completed, so the parcel is on its way back. We'll be in touch about your money.",
+      true
+    );
+  }
+
+  switch (status) {
+    case "delivered":
+      return say("delivered", "Delivered", "This order has arrived.");
+
+    case "cancelled":
+      return say("cancelled", "Cancelled", "This order was cancelled.");
+
+    case "payment_failed":
+      return say(
+        "failed",
+        "Payment failed",
+        "The payment didn't go through, so nothing was dispatched."
+      );
+
+    case "pending":
+      return say(
+        "placed",
+        "Order placed",
+        "We've got it. You'll hear from us once it's confirmed."
+      );
+
+    case "confirmed":
+      return say(
+        "confirmed",
+        "Confirmed — being packed",
+        "We're getting it ready to hand to the courier."
+      );
+
+    case "shipped":
+      switch (phase) {
+        case "picked":
+        case "transit":
+          return say(
+            "moving",
+            "On its way",
+            "The courier has your parcel and it's moving towards you.",
+            true
+          );
+        case "out":
+          return say(
+            "out",
+            "Out for delivery",
+            "It's with the rider today — please keep your phone nearby.",
+            true
+          );
+        case "attempted":
+          return say(
+            "attempted",
+            "Delivery attempted",
+            "The courier couldn't hand it over and will try again.",
+            true
+          );
+        case "delivered":
+          return say("delivered", "Delivered", "The courier reports it arrived.", true);
+        case "cancelled":
+          return say(
+            "cancelled",
+            "Shipment cancelled",
+            "The courier cancelled this shipment. Please contact us.",
+            true
+          );
+        // `scheduled`, and — the common one — no scan at all. The AWB exists;
+        // the parcel does not yet.
+        default:
+          return say(
+            "awaiting-pickup",
+            "Waiting for pickup",
+            "Packed and labelled. The courier collects it next, and tracking starts moving from there.",
+            phase === "scheduled"
+          );
+      }
+
+    default:
+      return say("placed", orderStatusLabel(status), null);
+  }
 }
 
 /* ------------------------------------------------------------- formatting */

@@ -2,6 +2,7 @@
 
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
+import { runAutomationTrigger } from "@/lib/automation";
 import { prisma } from "@/lib/prisma";
 import { getAdminSession } from "@/lib/auth";
 import { DEFAULT_SETTINGS } from "@/lib/settings";
@@ -14,12 +15,13 @@ import {
   syncReturnFromNimbus,
 } from "@/lib/nimbus-returns";
 import {
-  DEFAULT_REFUND_SETTINGS,
   MAX_REFUND_REFERENCE_LENGTH,
   MAX_RETURN_REASONS,
   MAX_RETURN_REASON_LENGTH,
   PARCEL_HOLDER_LABEL,
+  REFUND_DESTINATIONS,
   REFUND_METHODS,
+  RETURN_OUTCOMES,
   RETURN_STATUSES,
   computeRefund,
   evaluateReturnEligibility,
@@ -30,11 +32,15 @@ import {
   matchReturnReason,
   normaliseReturnReasons,
   normaliseUpiId,
+  outcomeOfRefundMethod,
   parcelHolder,
+  refundDestinationsFor,
+  refundMethodFor,
+  refundMovesMoney,
   reverseLegOf,
+  type RefundDestination,
   type RefundMethod,
   type RefundOrder,
-  type RefundSettings,
   type ReturnBlock,
   type ReturnStatus,
 } from "@/lib/returns";
@@ -53,8 +59,14 @@ type ReturnSettings = {
   returnWindowDays: number;
   returnReasons: string[];
   returnPolicyNote: string;
-  /** The money rules, read from the same row in the same query. */
-  refund: RefundSettings;
+  /**
+   * The store's plain-English refund wording. **There are no refund *rules* to
+   * read any more** — a return is a full refund of the goods, the advance on a
+   * part-paid order is never returned, and the store carries the return leg
+   * when the fault is its own. All three are in `computeRefund`, which no
+   * longer takes a settings argument, so no query can change what a refund
+   * comes to.
+   */
   refundPolicyNote: string;
 };
 
@@ -79,10 +91,6 @@ async function readReturnSettings(): Promise<ReturnSettings | null> {
         returnWindowDays: true,
         returnReasons: true,
         returnPolicyNote: true,
-        refundFeePercent: true,
-        refundFeeFlat: true,
-        partialAdvanceRefundable: true,
-        waiveRefundFeeOnOurFault: true,
         refundPolicyNote: true,
       },
     });
@@ -92,19 +100,6 @@ async function readReturnSettings(): Promise<ReturnSettings | null> {
       returnWindowDays: row?.returnWindowDays ?? DEFAULT_SETTINGS.returnWindowDays,
       returnReasons: normaliseReturnReasons(row?.returnReasons),
       returnPolicyNote: (row?.returnPolicyNote ?? "").trim(),
-      // A missing row means a fresh database, so the schema defaults apply —
-      // which for the fee means zero. Never invent a deduction.
-      refund: {
-        refundFeePercent:
-          row?.refundFeePercent ?? DEFAULT_REFUND_SETTINGS.refundFeePercent,
-        refundFeeFlat: row?.refundFeeFlat ?? DEFAULT_REFUND_SETTINGS.refundFeeFlat,
-        partialAdvanceRefundable:
-          row?.partialAdvanceRefundable ??
-          DEFAULT_REFUND_SETTINGS.partialAdvanceRefundable,
-        waiveRefundFeeOnOurFault:
-          row?.waiveRefundFeeOnOurFault ??
-          DEFAULT_REFUND_SETTINGS.waiveRefundFeeOnOurFault,
-      },
       refundPolicyNote: (row?.refundPolicyNote ?? "").trim(),
     };
   } catch (err) {
@@ -132,6 +127,8 @@ function refundOrderFrom(
     amountPaid: number;
     balanceDue: number;
     subtotal: number;
+    shipping: number;
+    paymentFee: number;
     discountTotal: number;
     status: string;
     paymentStatus: string;
@@ -150,6 +147,12 @@ function refundOrderFrom(
     amountPaid: order.amountPaid,
     balanceDue: order.balanceDue,
     subtotal: order.subtotal,
+    // Carried so the breakdown can *name* what the store keeps in rupees.
+    // Neither is ever refunded and neither is part of the goods value, so they
+    // change no arithmetic — they only stop the customer inventing a fee to
+    // explain the gap between the order total and the refund.
+    shipping: order.shipping,
+    paymentFee: order.paymentFee,
     discountTotal: order.discountTotal,
     status: order.status,
     paymentStatus: order.paymentStatus,
@@ -163,6 +166,8 @@ const REFUND_ORDER_SELECT = {
   amountPaid: true,
   balanceDue: true,
   subtotal: true,
+  shipping: true,
+  paymentFee: true,
   discountTotal: true,
   status: true,
   paymentStatus: true,
@@ -190,6 +195,17 @@ const requestSchema = z.object({
   // Validated against the admin's configured list below, not here: the list
   // lives in the database and can change between renders.
   reason: z.string().trim().min(1, "Pick a reason"),
+  /**
+   * What the customer wants to happen. Defaults to `refund` so a client that
+   * predates this field still behaves exactly as it did.
+   */
+  outcome: z.enum(RETURN_OUTCOMES).default("refund"),
+  /**
+   * Where a refund should go. Only consulted when `outcome` is `refund`, and
+   * re-checked against the order below — a cash-on-delivery order has no
+   * original rail to send money down, whatever the form posts.
+   */
+  refundDestination: z.enum(REFUND_DESTINATIONS).optional(),
   customerNote: z.string().trim().max(1000).optional(),
   images: z.array(z.string()).max(6).default([]),
 });
@@ -293,6 +309,30 @@ export async function requestReturn(input: RequestReturnInput) {
     .map((o) => `${o.name}: ${o.value}`)
     .join(" · ");
 
+  /**
+   * The customer's chosen outcome, recorded now.
+   *
+   * It rides on `refundMethod` (see `refundMethodFor`), which is why a
+   * replacement or an exchange needs no new column — and why the admin panel
+   * opens on what the customer actually asked for instead of defaulting every
+   * request to "send the money back".
+   *
+   * The destination is re-derived from the order rather than trusted: a
+   * cash-on-delivery order has no card to refund, so a posted `original` is
+   * silently corrected to `upi` rather than stored as a promise nothing can
+   * keep.
+   */
+  const offered = refundDestinationsFor({
+    total: order.total,
+    amountPaid: order.amountPaid,
+    balanceDue: order.balanceDue,
+  });
+  const destination: RefundDestination =
+    data.refundDestination && offered.includes(data.refundDestination)
+      ? data.refundDestination
+      : offered[0];
+  const refundMethod = refundMethodFor(data.outcome, destination);
+
   try {
     const created = await prisma.returnRequest.create({
       data: {
@@ -307,17 +347,36 @@ export async function requestReturn(input: RequestReturnInput) {
         customerNote: data.customerNote?.trim() || null,
         images: data.images,
         status: "pending",
+        // The ask, not a decision: no figure is written until the admin
+        // approves, so this cannot be mistaken for a refund that was agreed.
+        refundMethod,
         statusHistory: [
           {
             status: "pending",
-            note: "Requested by customer",
+            note: `Requested by customer — wants ${
+              data.outcome === "replace"
+                ? "a replacement"
+                : data.outcome === "exchange"
+                  ? "a different size"
+                  : destination === "upi"
+                    ? "a refund by UPI"
+                    : "a refund to the original payment"
+            }`,
             at: new Date().toISOString(),
           },
         ] as unknown as object[],
       },
-      select: { requestNumber: true },
+      select: { id: true, requestNumber: true },
     });
     revalidateReturns(order.orderNumber);
+
+    // Automation rules bound to `return.requested`. Deliberately after the row
+    // exists and after revalidation: a rule that fails must not cost the
+    // customer the return they just raised. `runAutomationTrigger` never throws.
+    await runAutomationTrigger("return.requested", { id: created.id }).catch(
+      (err) => console.error("[returns] automation trigger failed:", err)
+    );
+
     return {
       ok: true as const,
       requestNumber: created.requestNumber,
@@ -361,14 +420,20 @@ export type ReturnPolicySnapshot = {
    * Everything the form needs to work out the refund itself, so the figure a
    * shopper is shown before submitting comes from the same `computeRefund`
    * the admin approves with. Sending the inputs rather than a number lets the
-   * preview update live as they change the reason (the our-fault waiver), with
-   * no extra round trip and no second implementation of the maths.
+   * preview update live as they change the outcome or the reason, with no extra
+   * round trip and no second implementation of the maths.
+   *
+   * There is no `settings` here any more: the rules are not configurable, so
+   * there is nothing to send. What *is* sent is `destinations` — a COD order
+   * cannot refund to a card, and the form must offer one option rather than two
+   * with one of them dimmed.
    *
    * Null only when the order could not be read.
    */
   refund: {
     order: RefundOrder;
-    settings: RefundSettings;
+    /** Refund destinations this order can actually support, in order. */
+    destinations: RefundDestination[];
     /** The store's plain-English refund rules, shown above the preview. */
     note: string;
   } | null;
@@ -480,11 +545,14 @@ export async function getReturnPolicySnapshot(
     code: store.code,
     message: store.message,
     lines,
-    refund: {
-      order: refundOrderFrom(order, order.returnRequests),
-      settings: settings.refund,
-      note: settings.refundPolicyNote,
-    },
+    refund: (() => {
+      const refundOrder = refundOrderFrom(order, order.returnRequests);
+      return {
+        order: refundOrder,
+        destinations: refundDestinationsFor(refundOrder),
+        note: settings.refundPolicyNote,
+      };
+    })(),
   };
 }
 
@@ -524,8 +592,18 @@ export type DecideReturnInput = z.input<typeof decideSchema>;
  * that was never collected.
  *
  * `refundGross` / `refundFee` / `refundAmount` are **written now and never
- * recomputed**. Raise the store's fee next month and this row still says what
- * was decided today, which is the only way a refund history can be audited.
+ * recomputed**, which is the only way a refund history can be audited: a row
+ * decided last month still reads as it was decided, whatever has changed since.
+ *
+ * ## The outcome is honoured, not assumed
+ *
+ * `refundMethod` carries what the customer asked for — refund, replacement or
+ * size exchange — and this function reads it before it writes any figure. On a
+ * replacement or an exchange the three money columns are written as **zero**,
+ * deliberately and explicitly: nothing is owed, nothing reserves a share of the
+ * order's refundable pool, and `markRefundPaid` has nothing to pay. The admin
+ * can still change the outcome here (a replacement is out of stock, so it
+ * becomes a refund) — but only by saying so, never by omission.
  *
  * On approval the reverse pickup is drafted with NimbusPost. That call is
  * allowed to fail without failing the approval — the decision is ours, the
@@ -600,24 +678,26 @@ export async function decideReturn(input: DecideReturnInput) {
   }
 
   /* ------------------------------------------------------------ approval */
-  const settings = await readReturnSettings();
-  if (!settings) {
-    return {
-      ok: false as const,
-      error: "Couldn't read the refund policy just now — try again in a moment.",
-    };
-  }
-
   const refundOrder = refundOrderFrom(
     existing.order,
     existing.order.returnRequests,
     existing.id
   );
+
+  // What is being agreed: the admin's choice if they made one, otherwise the
+  // outcome the customer asked for when they raised the request. Never a bare
+  // default — "send the money back" has to be something somebody chose.
+  const method: RefundMethod =
+    data.refundMethod ?? (existing.refundMethod as RefundMethod | null) ?? "original";
+  const outcome = outcomeOfRefundMethod(method);
+  const movesMoney = refundMovesMoney(method);
+
   const computed = computeRefund({
     order: refundOrder,
     lines: [{ unitPrice: existing.unitPrice, quantity: existing.quantity }],
-    settings: settings.refund,
     reason: existing.reason,
+    outcome,
+    destination: method === "upi" ? "upi" : "original",
   });
 
   // The hard ceiling, independent of the line maths: what is left of the money
@@ -626,13 +706,26 @@ export async function decideReturn(input: DecideReturnInput) {
   // (goodwill, return postage) but never above this.
   const ceiling = computed.payable;
 
-  let net = computed.net;
-  let gross = computed.gross;
-  let fee = computed.fee;
+  // A replacement or a size exchange settles at zero, explicitly — not by the
+  // arithmetic happening to produce nothing. That is what stops a fulfilment
+  // outcome reserving a slice of the order's refundable pool, and what makes
+  // "only refund moves money" a property of this function rather than a habit.
+  let net = movesMoney ? computed.net : 0;
+  let gross = movesMoney ? computed.gross : 0;
+  // Always 0 now: a return pays back the full value of the goods. The column
+  // stays because rows decided under the old fee policy still carry one.
+  let fee = 0;
   let overrideNote: string | null = null;
 
   const wants = data.refundOverride;
-  if (typeof wants === "number" && wants !== computed.net) {
+  if (typeof wants === "number" && wants !== net) {
+    if (!movesMoney) {
+      return {
+        ok: false as const,
+        error:
+          "This return is being settled with a replacement or an exchange, so there is no amount to pay. Switch it to a refund first.",
+      };
+    }
     if (!data.overrideReason?.trim()) {
       return {
         ok: false as const,
@@ -646,8 +739,8 @@ export async function decideReturn(input: DecideReturnInput) {
       };
     }
     net = wants;
-    // Keep the gross honest: the store can't "keep" a negative fee, and an
-    // above-computed payout simply means no fee was taken.
+    // Keep the gross honest: an above-computed payout is goodwill, not a
+    // negative fee, so the gross follows the net up.
     gross = Math.max(computed.gross, net);
     fee = Math.max(0, gross - net);
     overrideNote = `Refund set to ${net} by hand (computed ${computed.net}): ${data.overrideReason.trim()}`;
@@ -658,13 +751,23 @@ export async function decideReturn(input: DecideReturnInput) {
     return { ok: false as const, error: "That doesn't look like a UPI ID (name@bank)." };
   }
 
-  const method: RefundMethod = data.refundMethod ?? computed.method;
-
   const history = readHistory(existing.statusHistory);
   history.push({
     status: "approved",
     note:
-      [data.adminNote?.trim(), overrideNote].filter(Boolean).join(" · ") || undefined,
+      [
+        // The outcome is in the timeline, not only in a column, so "we agreed
+        // to replace this" survives a later change of method.
+        movesMoney
+          ? `Refund agreed — ${method === "upi" ? "by UPI" : "to the original payment"}`
+          : outcome === "replace"
+            ? "Agreed: replacement, no refund"
+            : "Agreed: different size, no refund",
+        data.adminNote?.trim(),
+        overrideNote,
+      ]
+        .filter(Boolean)
+        .join(" · ") || undefined,
     at: new Date().toISOString(),
     by: "admin",
   });
@@ -694,7 +797,9 @@ export async function decideReturn(input: DecideReturnInput) {
   return {
     ok: true as const,
     status: "approved",
-    refund: { gross, fee, net, method },
+    refund: { gross, fee, net, method, outcome },
+    /** Our mistake ⇒ the store carries the reverse leg. A cost, not a deduction. */
+    storePaysReturnShipping: computed.storePaysReturnShipping,
     pickupBooked: pickup?.ok ?? false,
     pickupIssue: pickup && !pickup.ok ? pickup.error ?? pickup.skipped ?? null : null,
   };
@@ -784,18 +889,16 @@ export async function markRefundPaid(input: MarkRefundPaidInput) {
     };
   }
 
-  // Backfill for a request approved before this screen existed.
+  const method: RefundMethod =
+    data.method ?? (existing.refundMethod as RefundMethod | null) ?? "original";
+
+  // Backfill for a request approved before this screen existed. Computed with
+  // the same outcome that is about to be recorded, so a replacement that was
+  // never given a figure backfills as zero rather than as a payout.
   let gross = existing.refundGross;
   let fee = existing.refundFee;
   let net = existing.refundAmount;
   if (net == null) {
-    const settings = await readReturnSettings();
-    if (!settings) {
-      return {
-        ok: false as const,
-        error: "Couldn't read the refund policy just now — try again in a moment.",
-      };
-    }
     const computed = computeRefund({
       order: refundOrderFrom(
         existing.order,
@@ -803,16 +906,23 @@ export async function markRefundPaid(input: MarkRefundPaidInput) {
         existing.id
       ),
       lines: [{ unitPrice: existing.unitPrice, quantity: existing.quantity }],
-      settings: settings.refund,
       reason: existing.reason,
+      outcome: outcomeOfRefundMethod(method),
+      destination: method === "upi" ? "upi" : "original",
     });
     gross = computed.gross;
-    fee = computed.fee;
+    fee = 0;
     net = computed.net;
   }
 
-  const method: RefundMethod =
-    data.method ?? (existing.refundMethod as RefundMethod | null) ?? "original";
+  // A replacement or an exchange can never pay out, whatever is on the row.
+  // The stored figure is trusted for a refund and overruled here for the other
+  // two, because the outcome is the thing that decides it.
+  if (!refundMovesMoney(method)) {
+    gross = 0;
+    fee = 0;
+    net = 0;
+  }
 
   const upi = data.upi?.trim() ? normaliseUpiId(data.upi) : null;
   if (data.upi?.trim() && !upi) {
@@ -827,9 +937,9 @@ export async function markRefundPaid(input: MarkRefundPaidInput) {
   }
 
   const reference = data.reference?.trim() || null;
-  // A replacement moves goods, not money, and a ₹0 payout has nothing to look
-  // up — everything else must leave a trail.
-  if (!reference && net > 0 && method !== "replacement" && method !== "none") {
+  // A replacement or an exchange moves goods, not money, and a ₹0 payout has
+  // nothing to look up — everything else must leave a trail.
+  if (!reference && net > 0 && refundMovesMoney(method)) {
     return {
       ok: false as const,
       error: "Add the payment reference (UTR) so the customer can trace it.",
@@ -863,7 +973,13 @@ export async function markRefundPaid(input: MarkRefundPaidInput) {
     status: "refunded",
     note:
       [
-        net > 0 ? `Refund of ${net} paid by ${method}` : "Closed with no payout",
+        net > 0
+          ? `Refund of ${net} paid by ${method}`
+          : method === "replacement"
+            ? "Closed — replacement sent, no payout"
+            : method === "exchange"
+              ? "Closed — different size sent, no payout"
+              : "Closed with no payout",
         reference ? `ref ${reference}` : null,
         // Recorded on the row, not just permitted. Six weeks later "why did we
         // pay this one out early?" has an answer.
@@ -1166,13 +1282,13 @@ const defaultsSchema = z.object({
     .default([]),
   returnPolicyNote: z.string().max(2000).default(""),
   // ---- Refunds ----
-  // 0–50%. Capped well below 100 on purpose: a fee that swallows the whole
-  // refund is a mis-typed setting, not a policy, and the customer-facing
-  // maths clamps it anyway.
-  refundFeePercent: z.coerce.number().int().min(0).max(50).default(0),
-  refundFeeFlat: z.coerce.number().int().min(0).max(10000).default(0),
-  partialAdvanceRefundable: z.boolean().default(false),
-  waiveRefundFeeOnOurFault: z.boolean().default(true),
+  // Only the wording. `refundFeePercent`, `refundFeeFlat`,
+  // `partialAdvanceRefundable` and `waiveRefundFeeOnOurFault` are deliberately
+  // NOT accepted: the refund rule is fixed in `computeRefund` and there is no
+  // longer a screen that can change it. Zod strips anything not in the schema
+  // silently, so a stale client still posting them is simply ignored — and the
+  // writer below pins the four columns to their neutral values so the database
+  // agrees with the code rather than merely being unread.
   refundPolicyNote: z.string().max(2000).default(""),
 });
 
@@ -1204,6 +1320,16 @@ export async function updateReturnDefaults(input: ReturnDefaultsInput) {
     returnReasons: normaliseReturnReasons(parsed.data.returnReasons),
     returnPolicyNote: parsed.data.returnPolicyNote.trim(),
     refundPolicyNote: parsed.data.refundPolicyNote.trim(),
+    // The four dead refund columns, neutralised on every save.
+    //
+    // Nothing reads them — `computeRefund` cannot even be handed a fee — so
+    // this is not what makes refunds full. It is what stops a value left over
+    // from the old policy sitting in the database looking like a live rule to
+    // the next person who opens the table. One writer, one truthful row.
+    refundFeePercent: 0,
+    refundFeeFlat: 0,
+    partialAdvanceRefundable: false,
+    waiveRefundFeeOnOurFault: true,
   };
 
   try {

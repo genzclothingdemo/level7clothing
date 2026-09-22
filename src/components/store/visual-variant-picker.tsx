@@ -64,9 +64,19 @@ export function VisualVariantPicker({
         )}
       </div>
 
-      {/* Full-bleed on mobile so the strip can scroll edge-to-edge. */}
-      <div className="-mx-5 sm:mx-0">
-        <div className="no-scrollbar flex snap-x snap-mandatory gap-2.5 overflow-x-auto px-5 pb-1 sm:px-0">
+      {/* Full-bleed on mobile so the strip can scroll edge-to-edge.
+
+          The wrapper is a flex row and the scroller is `min-w-0 flex-1`, which
+          is what actually keeps this rail inside the page. `overflow-x-auto`
+          clips and scrolls, but it does NOT stop the strip's min-content width
+          (values × 84px + gaps + padding) escaping into whichever ancestor is
+          intrinsically sized — a grid item, a flex item, a table cell. That is
+          how this rail widened the whole document to 500px at a 375px viewport.
+          A flex item with an explicit `min-width: 0` has a zero automatic
+          minimum size, so the rail contributes nothing upwards and can only
+          ever scroll inside itself. Don't collapse this back to a bare div. */}
+      <div className="-mx-5 flex sm:mx-0">
+        <div className="no-scrollbar flex min-w-0 flex-1 snap-x snap-mandatory gap-2.5 overflow-x-auto px-5 pb-1 sm:px-0">
           {values.map((val) => {
             const isActive = selected === val;
             const enabled = isEnabled(val);

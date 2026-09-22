@@ -2,7 +2,16 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { ExternalLink, Plus } from "lucide-react";
 import { prisma } from "@/lib/prisma";
-import { asPortfolioKind, isOptimisableImage } from "@/lib/portfolio";
+import {
+  PORTFOLIO_SECTION_META,
+  asPortfolioKind,
+  embedSrcFromHtml,
+  isOptimisableImage,
+  isSafeHref,
+  publicTags,
+  sectionOf,
+} from "@/lib/portfolio";
+import { resolveVideo } from "@/lib/videos";
 import { PortfolioFilters } from "@/components/admin/portfolio-filters";
 import {
   PortfolioTable,
@@ -12,7 +21,7 @@ import {
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Portfolio" };
 
-type SP = Promise<{ q?: string; kind?: string; status?: string; link?: string }>;
+type SP = Promise<{ q?: string; kind?: string; status?: string; section?: string }>;
 
 export default async function AdminPortfolio({
   searchParams,
@@ -23,8 +32,8 @@ export default async function AdminPortfolio({
   const q = (sp.q ?? "").trim().toLowerCase();
   const kind = sp.kind ?? "";
   const status = sp.status ?? "";
-  const link = sp.link ?? "";
-  const filtered = Boolean(q || kind || status || link);
+  const section = sp.section ?? "";
+  const filtered = Boolean(q || kind || status || section);
 
   const rows = await prisma.portfolioItem
     .findMany({ orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }] })
@@ -50,6 +59,18 @@ export default async function AdminPortfolio({
   const all: PortfolioRow[] = rows.map((r) => {
     const product = r.productId ? byId.get(r.productId) ?? null : null;
     const thumbnail = r.imageUrl ?? product?.images[0] ?? null;
+
+    // Worked out exactly the way the storefront works it out — same helper,
+    // same inputs. The admin saying one shelf while the page shows another is
+    // the "two readers" bug CLAUDE.md keeps warning about, so there is only
+    // ever one reader: `sectionOf`.
+    const embedUrl =
+      embedSrcFromHtml(r.embedHtml) ??
+      (r.url && isSafeHref(r.url)
+        ? resolveVideo({ title: r.title, url: r.url }).embedUrl
+        : null);
+    const sectionId = sectionOf(r.tags, Boolean(embedUrl));
+
     return {
       id: r.id,
       kind: asPortfolioKind(r.kind),
@@ -57,28 +78,34 @@ export default async function AdminPortfolio({
       url: r.url,
       thumbnail,
       thumbnailOptimisable: thumbnail ? isOptimisableImage(thumbnail) : false,
+      section: sectionId,
+      sectionLabel: PORTFOLIO_SECTION_META[sectionId].label,
       productName: product?.name ?? null,
       productSlug: product?.slug ?? null,
       danglingProduct: Boolean(r.productId) && !product,
-      tags: r.tags,
+      // Internal tags (`section:…`, `set:demo`) are bookkeeping. They stay
+      // searchable below but are not printed as chips, here or on the site.
+      tags: publicTags(r.tags),
       sortOrder: r.sortOrder,
       isFeatured: r.isFeatured,
       isActive: r.isActive,
     };
   });
 
-  // Filtering happens here rather than in a WHERE clause because "which tab
-  // does this land on" is derived from `productId` plus whether that product
-  // still exists — two columns and a join, which is not a filter SQL can take.
+  // Filtering happens here rather than in a WHERE clause because "which shelf
+  // does this land on" is derived from the tags *and* from whether a URL
+  // resolved to something playable — which is not a filter SQL can take.
   const visible = all.filter((row) => {
     if (kind && row.kind !== kind) return false;
     if (status === "active" && !row.isActive) return false;
     if (status === "hidden" && row.isActive) return false;
     if (status === "featured" && !row.isFeatured) return false;
-    if (link === "product" && !row.productSlug) return false;
-    if (link === "other" && row.productSlug) return false;
+    if (section && row.section !== section) return false;
     if (q) {
-      const hay = [row.title, row.url ?? "", row.productName ?? "", ...row.tags]
+      // Searches the raw tags too, so an admin who knows a row is tagged
+      // `set:demo` can still find it by typing that.
+      const raw = rows.find((r) => r.id === row.id)?.tags ?? [];
+      const hay = [row.title, row.url ?? "", row.productName ?? "", ...raw]
         .join(" ")
         .toLowerCase();
       if (!hay.includes(q)) return false;
@@ -116,13 +143,24 @@ export default async function AdminPortfolio({
       </div>
 
       <div className="mt-6 min-w-0 rounded-2xl border border-border bg-muted/30 p-4 sm:p-5">
-        <p className="eyebrow text-muted-foreground">How the two tabs are decided</p>
+        <p className="eyebrow text-muted-foreground">
+          How a piece finds its section
+        </p>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          A piece with a product attached shows under{" "}
-          <span className="text-foreground">From our products</span>; everything
-          else shows under <span className="text-foreground">Everything else</span>.
-          The video links already saved on each product appear under the first tab
-          automatically — you don&rsquo;t need to add them here.
+          The portfolio page is about the label, not the catalogue:{" "}
+          <span className="text-foreground">who we are</span>,{" "}
+          <span className="text-foreground">milestones</span>,{" "}
+          <span className="text-foreground">reels &amp; films</span>,{" "}
+          <span className="text-foreground">happy customers</span>,{" "}
+          <span className="text-foreground">collaborations</span> and{" "}
+          <span className="text-foreground">bulk &amp; custom work</span>. Pick a
+          section on the piece, or leave it on auto and we read it from your tags
+          — anything that plays and has no tag lands under Reels &amp; films.
+        </p>
+        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+          Attaching a product no longer moves a piece anywhere; it just adds a
+          small &ldquo;Wearing …&rdquo; link so a shopper can find the garment in
+          the shot.
         </p>
       </div>
 

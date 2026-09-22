@@ -194,15 +194,21 @@ check for this file before believing the database is down.
 ## SiteSettings — Admin → Settings is now the only editor
 
 This used to say "three editors, keep them apart". It is now **one**, at
-`/admin/settings`, in seven tabs: `store · orders · payments · shipping ·
-returns · storefront · email`. Returns and Order automation were editable on
+`/admin/settings`, in seven tabs: `store · orders · payments · integrations ·
+returns · storefront · email`. **Shipping is gone** — the only thing left in it
+was the free-shipping threshold, which is a checkout charge and moved to
+Payments beside the cash fees; the courier credentials moved to Integrations.
+A stale `?tab=shipping` bookmark falls back to Store. Returns and Order
+automation were editable on
 their own screens and are now *mounted into* Settings; those screens keep a
 **read-only strip with a link** ("Order automation · AUTO-CONFIRM: MANUAL ·
 DRAFT ONLY · Change in settings").
 
 | Columns | Tab | Form component | Server action |
 |---|---|---|---|
-| Brand, contact, copy, payments, shipping, product defaults, email | store / payments / shipping / storefront / email | `settings-form.tsx` | `updateSettings` |
+| Brand, contact, copy, payment toggles, product defaults, email | store / payments / storefront / email | `settings-form.tsx` | `updateSettings` |
+| `codFeeAmount`, `partialFeeAmount`, free-shipping threshold | payments | `settings-form.tsx` | `settings/actions.ts` |
+| Razorpay + NimbusPost status (read-only — no secret is ever rendered) | integrations | `settings-sections.tsx` | — |
 | `returnsEnabled`, `defaultReturnable`, `returnWindowDays`, `returnReasons`, `returnPolicyNote`, `defaultReturnsInfo`, five `refund*` | returns | `return-policy-form.tsx` (`ReturnPolicyCard`) | `updateReturnDefaults` |
 | `orderConfirmMode`, `autoConfirm{Prepaid,Partial,Cod}`, `autoShipOnConfirm`, `autoShipCourier` | orders | `settings-sections.tsx` | `updateOrderPipelineSettings` |
 
@@ -242,9 +248,41 @@ copy both vanish; back to `null` → both return.
 that changes nothing is worse than no control. Wire those two call sites first
 if multi-currency is ever wanted.
 
-Also guarded server-side: turning **all four** payment methods off is refused,
-because `resolveAllowedModes` falls back to `["direct"]` and would silently
-turn every order into a pay-the-owner request.
+## Three checkout modes, two instruments — and no fallback
+
+**COD · partial (advance + COD) · prepaid**, paid in **cash** or **online via
+Razorpay**. Prepaid and the advance leg must be online.
+
+**"Direct" was removed on 2026-09-22.** `directEnabled` is now pinned `false` on
+every save, which matters more than it looks: `settingsSchema` declares
+`.default(true)`, so *omitting* the field would have written `true` back.
+`METHOD_TO_MODE` deliberately keeps its `Direct` row so historical orders still
+read back — dropping it would let them fall to the `?? "cod"` default and claim
+cash was collected on an order that never took any.
+
+**`resolveAllowedModes` has no fallback, on purpose.** An empty intersection
+returns `[]`, `placeOrder` refuses, and checkout states that it cannot take
+payment for this basket with the button disabled. It used to fall back to
+`["direct"]` — silently reinterpreting an order into something the shopper never
+agreed to. Any fallback reintroduces that bug in a new costume.
+
+Cash costs the store money (NimbusPost charges to collect it), so
+`codFeeAmount` / `partialFeeAmount` are added at checkout as a **named line**,
+ride the cash leg only, and are frozen onto `Order.paymentFee` — stored, not
+recomputed, so a past order still adds up after the setting changes.
+
+## A `"use server"` file may only export async functions
+
+`export const CHECKOUT_MODES = [...]` from `src/app/actions/orders.ts` broke
+**every** server action in that module at runtime:
+
+```
+A "use server" file can only export async functions, found object
+```
+
+`tsc` passes it and `next build` passes it — same class as the RSC traps below,
+and found only by loading checkout. Constants shared with a client belong in
+`lib/`, or stay module-private.
 
 ## RSC boundary traps — neither is caught by tsc or `next build`
 
@@ -494,8 +532,9 @@ several requests).
 ## NimbusPost dispatch
 
 **Working.** Rewritten onto the **Partner API v2** (`https://api-v2.nimbuspost.com`)
-and verified live against this account (org `level7clothing`, warehouse `clothing` /
-WH-001, Gandhinagar 382016).
+and verified live against this account (org `level7clothing`, **sole warehouse
+`Artvelle`**, Gandhinagar 382016 — read the warehouse note below before changing
+that name anywhere).
 
 > An earlier note here claimed "no valid API credential is configured". **That was
 > wrong.** The key pair was always valid — it was sent as a *Bearer token*, which v2
@@ -585,8 +624,21 @@ the same shape as the `defaultReturnsInfo` trap above.
 ### Two things that will block a real booking
 
 - **Wallet is ₹0.00.** Drafts are free; booking needs a top-up.
-- `NIMBUSPOST_WAREHOUSE_NAME` is `"clothing"` and matches the dashboard. The client
-  now resolves the warehouse via `GET /v2/warehouses` (matching name / display name /
+- `NIMBUSPOST_WAREHOUSE_NAME` is **`"Artvelle"`**, and that is correct — checked
+  against `GET /v2/warehouses` on 2026-09-22, which returns **exactly one**
+  warehouse, named `Artvelle`. This line previously claimed `"clothing"`, which
+  was never true; an agent then read the mismatch against this file as a bug and
+  reported that every booking silently falls back to the primary warehouse. It
+  does not — the name matches exactly and resolution succeeds. **Do not "fix"
+  the env var to `clothing`; that would genuinely break it.**
+
+  The warehouse is, however, still named after the **legacy brand** this repo has
+  otherwise purged. That is a name inside the NimbusPost account, not in this
+  codebase, so renaming it is a dashboard job for the owner — and the env var has
+  to change in the same breath, or booking breaks. Until then a courier label may
+  carry the old name.
+
+  The client resolves via `GET /v2/warehouses` (matching name / display name /
   code, falling back to the primary), so a mismatch warns rather than hard-failing.
 
 ## The reverse leg — returns are a second shipment, not a status
@@ -647,6 +699,35 @@ text loses the order. All four are columns, not logic — add them together.
 Reverse events also send **no customer email**: `sendOrderStatusEmail` talks
 about an order's progress, which is the wrong voice for a parcel going the
 other way. A return template belongs in `lib/email.ts`.
+
+## Email has been silently undeliverable — `EMAIL_FROM` cannot be a Gmail address
+
+`.env` had `EMAIL_FROM="genzclothingdemo@gmail.com"`. **Resend only sends from a
+domain you have verified in your Resend account**, and nobody can verify
+`gmail.com`, so every send returned 403. `lib/email.ts` catches that and logs a
+console warning, which means **order confirmations, password resets and contact
+replies have all been failing without a single visible error** — the code path
+looks like it worked and returns fine.
+
+It surfaced only when Admin → Automation gave the failures a screen to appear on.
+
+Local `.env` now reads `EMAIL_FROM="Level7 Clothing <onboarding@resend.dev>"`,
+which is Resend's shared sending domain and needs no verification.
+**Production reads its own copy from Vercel and is still wrong until that is
+changed** — Settings → Environment Variables → `EMAIL_FROM`, then redeploy.
+
+Two caveats worth knowing before trusting it:
+
+- `onboarding@resend.dev` on a free Resend account will only deliver to **the
+  address that owns the Resend account**. Good enough to prove the pipeline;
+  not good enough for real customers.
+- The real fix is a verified domain. `level7clothing.shop` is disabled (see the
+  top of this file), so that has to be sorted first — which is why this is
+  written down rather than quietly "fixed".
+
+Also: the `RESEND_API_KEY` in `.env` is a **send-only restricted key**. It
+returns `401 restricted_api_key` for `GET /domains`, so you cannot list or
+verify domains with it — don't waste time trying.
 
 ## Errors must not become 404s
 

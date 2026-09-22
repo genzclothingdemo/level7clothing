@@ -1,33 +1,52 @@
 /**
  * portfolio — the admin-managed body of work shown at /portfolio.
  *
- * This replaces the hardcoded `CURATED_POSTS` grid. The page is deliberately
- * **not** Instagram-only: a reel, a blog post, a bulk-order job and a
- * collaboration are all the same kind of thing to the owner, and only one of
- * them happens to live on Instagram.
+ * ## What this page is for, and what it stopped being
  *
- * Three decisions worth keeping:
+ * It used to split into "From our products" and "Everything else", which made
+ * it a second shop: the first shelf was a product grid with a Shop button on
+ * every tile, and it was fed automatically from `Product.videos`, so adding a
+ * link to a product silently published a portfolio tile about that product.
+ *
+ * The owner's ask was the opposite of that — *"product waha pe nahi chahiye"*.
+ * A portfolio answers **who we are**, not **what is in stock**. So the page is
+ * now organised by what a piece of work *says about the brand*:
+ *
+ *   who we are · milestones · reels & films · happy customers ·
+ *   collaborations · bulk & custom work
+ *
+ * A piece may still *mention* a garment — `productId` is unchanged and the
+ * tile still links to it — but the garment is a footnote on the tile, never
+ * the organising idea, and there is no shelf whose subject is the catalogue.
+ *
+ * **`productVideoEntries()` is deliberately gone.** It read every active
+ * product's `videos` array and published each one as a portfolio tile. That is
+ * exactly the "second shop" behaviour, and because it was a derived read there
+ * was no way for the owner to take one of those tiles down. Work that belongs
+ * in the portfolio is now always a row somebody wrote.
+ *
+ * ## Four decisions worth keeping
  *
  * 1. **One seam for "is this live?".** `fetchInstagramMedia()` below is the
  *    only function that knows whether a real Graph API token exists. Every
- *    caller goes through `getPortfolio()` and gets the same shape either way,
- *    so wiring a token in later changes nothing downstream. See the block
- *    comment on that function for the exact steps.
+ *    caller goes through `getPortfolio()` and gets the same shape either way.
  *
  * 2. **Nothing here fabricates a feed.** With no token the page shows stored
- *    `PortfolioItem` rows and says, on screen, that they are curated. An
- *    invented "live" feed would be worse than an honest curated one.
+ *    `PortfolioItem` rows and says, on screen, that they are curated.
  *
  * 3. **`productId` is a plain column, not a relation** (see schema.prisma). A
  *    portfolio entry outlives the product it was about, so the id is resolved
  *    here and the link is simply dropped when the product is gone or
  *    deactivated. A dangling id never breaks the page.
+ *
+ * 4. **The section is derived from tags, not from a new column.** The schema
+ *    is not ours to migrate, and a section is a curation decision the owner
+ *    already expresses in words. See `SECTION` below for the exact rule.
  */
 
 import { cache } from "react";
 import { prisma } from "@/lib/prisma";
 import { resolveVideo } from "@/lib/videos";
-import type { ProductVideo } from "@/lib/types";
 
 /* ------------------------------------------------------------------ */
 /*  Shape                                                              */
@@ -44,19 +63,196 @@ export function asPortfolioKind(value: string): PortfolioKind {
 }
 
 /**
- * The two shelves on the storefront.
+ * The shelves on /portfolio, in the order they are read down the page.
  *
- * "products" is everything that points at something buyable; "other" is the
- * rest of the work. Two tabs rather than a filter dropdown because there are
- * exactly two questions a visitor arrives with: "show me the clothes" and
- * "show me what else you do".
+ * This order is the argument the page makes: here is who we are, here is what
+ * we have done, here is us moving, here is somebody else saying it, here is
+ * who we work with, here is how to hire us. Reordering this array reorders the
+ * page, and nothing else has to change.
  */
-export const PORTFOLIO_VIEWS = ["products", "other"] as const;
-export type PortfolioView = (typeof PORTFOLIO_VIEWS)[number];
+export const PORTFOLIO_SECTIONS = [
+  "story",
+  "milestones",
+  "reels",
+  "customers",
+  "collabs",
+  "bulk",
+] as const;
 
-export function asPortfolioView(raw: string | string[] | undefined): PortfolioView {
+export type PortfolioSection = (typeof PORTFOLIO_SECTIONS)[number];
+
+/**
+ * How each shelf introduces itself, and — `layout` — the card shape its
+ * entries get.
+ *
+ * `layout` is the one thing the storefront branches on, so a new section is a
+ * row in this table plus an entry in `PORTFOLIO_SECTIONS`, never a new
+ * component:
+ *
+ * | layout | reads as | needs |
+ * |---|---|---|
+ * | `media` | poster that becomes a player | a thumbnail or an embed |
+ * | `quote` | a testimonial, name underneath | a description |
+ * | `stat` | a big figure and a line of context | a title |
+ * | `note` | an editorial card, photo optional | anything |
+ */
+export const PORTFOLIO_SECTION_META: Record<
+  PortfolioSection,
+  { label: string; blurb: string; layout: "media" | "quote" | "stat" | "note" }
+> = {
+  story: {
+    label: "Who we are",
+    blurb: "The shoots, the notes and the thinking behind the label.",
+    layout: "note",
+  },
+  milestones: {
+    label: "Milestones",
+    blurb: "What the label has done so far, in numbers we can stand behind.",
+    layout: "stat",
+  },
+  reels: {
+    label: "Reels & films",
+    blurb: "Plays here — you don't have to leave for Instagram or YouTube.",
+    layout: "media",
+  },
+  customers: {
+    label: "Happy customers",
+    blurb: "In their words, not ours.",
+    layout: "quote",
+  },
+  collabs: {
+    label: "Collaborations",
+    blurb: "Creators, artists and the people we have made things with.",
+    layout: "note",
+  },
+  bulk: {
+    label: "Bulk & custom work",
+    blurb: "Campus, corporate and made-to-order runs.",
+    layout: "note",
+  },
+};
+
+export function isPortfolioSection(value: string): value is PortfolioSection {
+  return (PORTFOLIO_SECTIONS as readonly string[]).includes(value);
+}
+
+/**
+ * Read `?section=` off the URL. `null` means "show the whole page", which is
+ * the default and the canonical address — a single shelf is a narrowing, not a
+ * tab, so there is exactly one URL for the full page rather than two.
+ *
+ * A legacy `?view=products` / `?view=other` lands here as an unknown value and
+ * degrades to `null`. Those URLs still return 200 with the whole page, which
+ * is the right answer for a shelf that no longer exists.
+ */
+export function asPortfolioSection(
+  raw: string | string[] | undefined
+): PortfolioSection | null {
   const first = Array.isArray(raw) ? raw[0] : raw;
-  return first === "other" ? "other" : "products";
+  if (!first) return null;
+  const v = first.trim().toLowerCase();
+  return isPortfolioSection(v) ? v : null;
+}
+
+/* ---- the tag convention ------------------------------------------- */
+
+/**
+ * **A tag containing a colon is internal.** It steers this module and is never
+ * rendered on the storefront, which is what lets a row carry bookkeeping
+ * (`set:demo`, so the demo seeder can find its own rows again) without that
+ * bookkeeping showing up as a chip under the tile.
+ *
+ * `section:<id>` is the explicit, unambiguous placement. Everything else is a
+ * best guess the owner never has to learn:
+ *
+ * 1. an explicit `section:<id>` tag wins;
+ * 2. else the first plain tag that reads like a section name wins;
+ * 3. else anything playable is a reel and anything else is part of the story.
+ *
+ * Rule 3 is what guarantees no row can ever fall off the page — a piece with
+ * no tags at all still lands somewhere a visitor will see it.
+ */
+const INTERNAL_TAG = /:/;
+const SECTION_TAG = /^section:(.+)$/i;
+
+/** Plain words the owner already writes, mapped to a shelf. */
+const SECTION_KEYWORD: Record<string, PortfolioSection> = {
+  milestone: "milestones",
+  milestones: "milestones",
+  achievement: "milestones",
+  achievements: "milestones",
+  award: "milestones",
+  press: "milestones",
+  featured_in: "milestones",
+
+  testimonial: "customers",
+  review: "customers",
+  customer: "customers",
+  "happy customer": "customers",
+  ugc: "customers",
+
+  collab: "collabs",
+  collabs: "collabs",
+  collaboration: "collabs",
+  creator: "collabs",
+  influencer: "collabs",
+  partner: "collabs",
+
+  bulk: "bulk",
+  "bulk order": "bulk",
+  wholesale: "bulk",
+  corporate: "bulk",
+  campus: "bulk",
+  b2b: "bulk",
+  custom: "bulk",
+  printing: "bulk",
+
+  reel: "reels",
+  reels: "reels",
+  film: "reels",
+  video: "reels",
+  shoot: "reels",
+  short: "reels",
+  shorts: "reels",
+
+  story: "story",
+  about: "story",
+  lookbook: "story",
+  journal: "story",
+  blog: "story",
+  "behind the scenes": "story",
+};
+
+/** Tags a visitor actually sees — internal ones stripped, order preserved. */
+export function publicTags(tags: string[]): string[] {
+  return tags.filter((t) => t && !INTERNAL_TAG.test(t));
+}
+
+/** Which shelf a row belongs on. See the block comment above. */
+export function sectionOf(tags: string[], playable: boolean): PortfolioSection {
+  for (const tag of tags) {
+    const explicit = SECTION_TAG.exec(tag.trim())?.[1]?.trim().toLowerCase();
+    if (explicit && isPortfolioSection(explicit)) return explicit;
+  }
+  for (const tag of tags) {
+    const hit = SECTION_KEYWORD[tag.trim().toLowerCase()];
+    if (hit) return hit;
+  }
+  return playable ? "reels" : "story";
+}
+
+/**
+ * Split a milestone title into the figure and the rest.
+ *
+ * `"250+ pieces in eleven days"` renders the `250+` large and the words under
+ * it. Purely presentational and entirely optional: a title that does not start
+ * with a number comes back with `figure: null` and the card prints it plainly,
+ * so nothing has to be written in a special way for this to be safe.
+ */
+export function splitStat(title: string): { figure: string | null; rest: string } {
+  const m = /^\s*([₹$]?\s?[\d][\d,.]*\s?[+kKmM%]?)\s+(.*)$/.exec(title);
+  if (!m || !m[2]?.trim()) return { figure: null, rest: title };
+  return { figure: m[1].replace(/\s+/g, ""), rest: m[2].trim() };
 }
 
 /** The product a portfolio entry points at, once the id has been resolved. */
@@ -74,20 +270,28 @@ export type PortfolioProductRef = {
 export type PortfolioSource =
   /** A `PortfolioItem` row the admin wrote. */
   | "portfolio"
-  /** Derived from `Product.videos` — the links already on the product page. */
-  | "product-video"
   /** Pulled live from the Instagram Graph API. Only possible with a token. */
   | "instagram-api";
+
+/**
+ * Which player a tile mounts, decided on the server.
+ *
+ * The grid is a client component and this module imports Prisma, so it cannot
+ * call `resolveVideo` itself — resolving the provider here keeps that boundary
+ * clean and makes the client branch a plain string compare.
+ */
+export type PortfolioProvider = "instagram" | "youtube" | "facebook" | "other";
 
 /** One tile. Everything the grid needs, already resolved — no lookups in render. */
 export type PortfolioEntry = {
   id: string;
   kind: PortfolioKind;
+  section: PortfolioSection;
   title: string;
   description: string | null;
   /** Where "open" goes when there is nothing to embed. */
   url: string | null;
-  /** Poster for the grid. Never an embed — see requirement 3. */
+  /** Poster for the grid. Never an embed — the iframe is mounted on click. */
   thumbnail: string | null;
   /**
    * Whether `thumbnail` may go through `next/image`, decided here rather than
@@ -99,19 +303,30 @@ export type PortfolioEntry = {
   thumbnailOptimisable: boolean;
   /** An iframe src, when one could be worked out safely. */
   embedUrl: string | null;
+  provider: PortfolioProvider;
   /** Portrait framing for reels/shorts, landscape otherwise. */
   vertical: boolean;
+  /** Internal tags already stripped — safe to render as-is. */
   tags: string[];
   isFeatured: boolean;
   product: PortfolioProductRef | null;
   source: PortfolioSource;
 };
 
+/** One shelf, with its copy already resolved. */
+export type PortfolioSectionGroup = {
+  id: PortfolioSection;
+  label: string;
+  blurb: string;
+  layout: (typeof PORTFOLIO_SECTION_META)[PortfolioSection]["layout"];
+  entries: PortfolioEntry[];
+};
+
 export type PortfolioData = {
-  /** Entries that point at a product. */
-  products: PortfolioEntry[];
-  /** Everything else — blog links, collaborations, bulk work. */
-  other: PortfolioEntry[];
+  /** Non-empty shelves only, in `PORTFOLIO_SECTIONS` order. */
+  sections: PortfolioSectionGroup[];
+  /** Every entry across every shelf. */
+  total: number;
   /** True only when a token is set AND the fetch actually returned media. */
   live: boolean;
   /** True when `INSTAGRAM_ACCESS_TOKEN` is set, whether or not it worked. */
@@ -211,6 +426,22 @@ export function embedSrcFromHtml(html: string | null | undefined): string | null
   }
 }
 
+/** Which player an embed src belongs to. Drives autoplay and framing. */
+function providerOf(embedUrl: string | null, url: string | null): PortfolioProvider {
+  const probe = embedUrl ?? url;
+  if (!probe) return "other";
+  try {
+    const host = new URL(probe).hostname.replace(/^www\./, "").toLowerCase();
+    if (host.endsWith("youtube.com") || host.endsWith("youtu.be")) return "youtube";
+    if (host.endsWith("youtube-nocookie.com")) return "youtube";
+    if (host.endsWith("instagram.com")) return "instagram";
+    if (host.endsWith("facebook.com") || host.endsWith("fb.watch")) return "facebook";
+    return "other";
+  } catch {
+    return "other";
+  }
+}
+
 /** Picks the first usable poster and decides how it has to be served. */
 function thumbOf(
   ...candidates: (string | null | undefined)[]
@@ -240,11 +471,15 @@ function dedupeKey(url: string | null | undefined): string | null {
 /* ------------------------------------------------------------------ */
 
 /**
- * THE ONE FUNCTION that decides whether this page is a live mirror.
+ * THE ONE FUNCTION that decides whether this page is a live mirror of the
+ * whole Instagram account.
  *
  * Today it returns `null` on every deployment, because no token is configured
- * — and `getPortfolio()` then serves the stored rows. Nothing else in the
- * codebase needs to change when that stops being true.
+ * — and `getPortfolio()` then serves the stored rows. Note that per-post
+ * mirroring does **not** depend on this: `lib/instagram-resolve.ts` reads one
+ * public permalink with no credentials at all, and the admin's import button
+ * copies the poster into our own blob store. This function is only about
+ * pulling the *whole feed* automatically.
  *
  * ## Exactly what to do to make it live
  *
@@ -299,12 +534,13 @@ async function fetchInstagramMedia(): Promise<
     };
 
     const entries: PortfolioEntry[] = (json.data ?? []).map((m) => {
-      const isVideo = m.media_type === "VIDEO";
       // A caption is a paragraph, not a title. First line, clipped.
       const firstLine = (m.caption ?? "").split("\n")[0]?.trim() ?? "";
       return {
         id: `ig-${m.id}`,
         kind: "instagram" as const,
+        // A live post is, by definition, a reel or a photo from the feed.
+        section: "reels" as const,
         title: firstLine.slice(0, 80) || "Instagram post",
         description: (m.caption ?? "").trim() || null,
         url: m.permalink ?? null,
@@ -314,7 +550,11 @@ async function fetchInstagramMedia(): Promise<
         // served through a plain <img> and no config change is ever needed.
         ...thumbOf(m.thumbnail_url, m.media_url),
         embedUrl: m.permalink ? `${m.permalink.replace(/\/+$/, "")}/embed` : null,
-        vertical: isVideo,
+        provider: "instagram" as const,
+        // Portrait, like every other Instagram embed — see the note in
+        // `rowToEntry`. Instagram's own `/embed` card is portrait whatever the
+        // media inside it is, so framing it 16:9 only adds letterboxing.
+        vertical: true,
         tags: [],
         isFeatured: false,
         product: null,
@@ -360,58 +600,6 @@ async function resolveProducts(
   );
 }
 
-/**
- * Turn `Product.videos` into portfolio entries.
- *
- * These are the Instagram reels and YouTube clips the owner already pasted
- * into each product, so the portfolio surfaces work that is otherwise buried
- * one click below the fold of a single product page. Nothing is copied into
- * the database — this is a read, so a link edited on the product updates here
- * with no sync step to forget.
- */
-async function productVideoEntries(): Promise<PortfolioEntry[]> {
-  const rows = await prisma.product
-    .findMany({
-      where: { isActive: true },
-      select: { id: true, slug: true, name: true, images: true, videos: true },
-      orderBy: { createdAt: "desc" },
-    })
-    .catch(() => []);
-
-  const out: PortfolioEntry[] = [];
-
-  for (const p of rows) {
-    const list = Array.isArray(p.videos) ? (p.videos as unknown as ProductVideo[]) : [];
-    list.forEach((raw, i) => {
-      if (!raw || typeof raw.url !== "string" || !raw.url.trim()) return;
-      const v = resolveVideo(raw);
-      if (!isSafeHref(v.url)) return;
-
-      out.push({
-        id: `pv-${p.id}-${i}`,
-        kind: v.provider === "instagram" ? "instagram" : "video",
-        title: v.title && v.title !== "Watch" ? v.title : p.name,
-        description: null,
-        url: v.url,
-        ...thumbOf(v.thumbnailUrl, p.images[0]),
-        embedUrl: v.embedUrl,
-        vertical: v.vertical,
-        tags: [],
-        isFeatured: false,
-        product: {
-          id: p.id,
-          slug: p.slug,
-          name: p.name,
-          image: p.images[0] ?? null,
-        },
-        source: "product-video",
-      });
-    });
-  }
-
-  return out;
-}
-
 /** A stored row → a tile, with the product already looked up. */
 function rowToEntry(
   row: {
@@ -440,19 +628,37 @@ function rowToEntry(
       : null;
 
   const embedUrl = embedSrcFromHtml(row.embedHtml) ?? resolved?.embedUrl ?? null;
+  const url = row.url && isSafeHref(row.url) ? row.url : null;
+  const provider = providerOf(embedUrl, url);
 
   return {
     id: row.id,
     kind,
+    section: sectionOf(row.tags, Boolean(embedUrl)),
     title: row.title,
     description: row.description,
-    url: row.url && isSafeHref(row.url) ? row.url : null,
+    url,
     ...thumbOf(row.imageUrl, resolved?.thumbnailUrl, product?.image),
     embedUrl,
-    // Instagram is reels-first, so an entry the admin marked Instagram is
-    // framed portrait unless the resolver knows better.
-    vertical: resolved?.vertical ?? kind === "instagram",
-    tags: row.tags,
+    provider,
+    /*
+     * **Instagram is always framed portrait**, and that is a fix rather than a
+     * preference. `resolveInstagramPost` canonicalises every permalink to
+     * `/p/<code>/` — reels included, because Instagram resolves the shortcode
+     * either way — and `resolveVideo` then reads that `/p/` and reports
+     * `vertical: false`. So an imported reel came back as 16:9 and played
+     * letterboxed inside a landscape box.
+     *
+     * `?? ` could not catch it either: `false` is not `undefined`, so the old
+     * `resolved?.vertical ?? kind === "instagram"` fallback never fired once a
+     * URL had been resolved. Keying off the provider is what makes it correct
+     * for a row saved before or after the importer existed.
+     *
+     * Everything else trusts the resolver, which is right: a YouTube short is
+     * portrait and a normal YouTube video is not.
+     */
+    vertical: provider === "instagram" ? true : resolved?.vertical ?? false,
+    tags: publicTags(row.tags),
     isFeatured: row.isFeatured,
     product,
     source: "portfolio",
@@ -462,14 +668,15 @@ function rowToEntry(
 /**
  * Everything the /portfolio page renders, in one call.
  *
- * Ordering rule: featured first, then the admin's `sortOrder`. Product videos
- * come after the curated rows in the products shelf, because a row someone
- * deliberately wrote should outrank one that was inferred.
+ * Ordering rule: shelves in `PORTFOLIO_SECTIONS` order; inside a shelf,
+ * featured first and then the admin's `sortOrder`. Empty shelves are dropped
+ * rather than rendered as a heading over nothing — a brand page with four
+ * "nothing here yet" panels reads as a site under construction.
  *
  * Wrapped in React `cache()` for per-request dedup — the same reason
  * `getProductBySlug` and `getSettings` are (CLAUDE.md). `generateMetadata` has
- * to know the real page count to emit a correct canonical for an out-of-range
- * `?page=`, and without this that alone would double every query on the route.
+ * to know what is on the page to emit a correct canonical, and without this
+ * that alone would double every query on the route.
  */
 export const getPortfolio = cache(async function getPortfolio(): Promise<PortfolioData> {
   const [rows, live] = await Promise.all([
@@ -509,31 +716,27 @@ export const getPortfolio = cache(async function getPortfolio(): Promise<Portfol
     return key === null || !curatedKeys.has(key);
   });
 
-  // ---- product videos, minus anything already curated ----
-  const videos = await productVideoEntries();
-  const seen = new Set([
-    ...curatedKeys,
-    ...freshLive.map((e) => dedupeKey(e.url)).filter((v): v is string => Boolean(v)),
-  ]);
-  const freshVideos = videos.filter((e) => {
-    const key = dedupeKey(e.url);
-    if (key === null) return true;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const all = [...curated, ...freshLive];
 
   const byFeatured = (a: PortfolioEntry, b: PortfolioEntry) =>
     Number(b.isFeatured) - Number(a.isFeatured);
 
-  const withProduct = [...curated.filter((e) => e.product)].sort(byFeatured);
-  const withoutProduct = [...curated.filter((e) => !e.product), ...freshLive].sort(
-    byFeatured
-  );
+  const sections: PortfolioSectionGroup[] = PORTFOLIO_SECTIONS.map((id) => {
+    const meta = PORTFOLIO_SECTION_META[id];
+    return {
+      id,
+      label: meta.label,
+      blurb: meta.blurb,
+      layout: meta.layout,
+      // `sort` on a fresh array — `filter` already copied, so the source order
+      // from the query (sortOrder, then createdAt) survives underneath.
+      entries: all.filter((e) => e.section === id).sort(byFeatured),
+    };
+  }).filter((s) => s.entries.length > 0);
 
   return {
-    products: [...withProduct, ...freshVideos],
-    other: withoutProduct,
+    sections,
+    total: all.length,
     live: freshLive.length > 0 || liveEntries.length > 0,
     tokenConfigured: Boolean(process.env.INSTAGRAM_ACCESS_TOKEN?.trim()),
     liveError,

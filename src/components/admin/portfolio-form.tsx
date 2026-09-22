@@ -29,11 +29,11 @@ import { Card, Field, Segmented, SwitchRow } from "@/components/admin/form-kit";
 import { PhotoPicker } from "@/components/admin/photo-picker";
 import {
   createPortfolioItem,
-  importInstagramPost,
+  importSocialPost,
   updatePortfolioItem,
 } from "@/app/actions/portfolio";
 import type { PortfolioKind } from "@/lib/portfolio";
-import { instagramShortcode } from "@/lib/instagram-resolve";
+import { socialProviderOf } from "@/lib/instagram-resolve";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -86,6 +86,54 @@ const KIND_OPTIONS: { value: PortfolioKind; label: string }[] = [
   { value: "link", label: "Link" },
 ];
 
+/**
+ * The shelves on /portfolio, as UI copy — same reason as `KIND_OPTIONS`: the
+ * real list lives in `PORTFOLIO_SECTION_META`, and this is a client component.
+ *
+ * Adding a section means a line here and a line there. That duplication is
+ * deliberate and cheap; the alternative is a Prisma client in the browser.
+ *
+ * The picker writes a reserved `section:<id>` tag rather than a column,
+ * because the schema is not ours to migrate. `sectionOf()` on the server reads
+ * that tag first, so this control is exact — "Work it out for me" leaves the
+ * tag off and lets the keyword guess run instead.
+ */
+const SECTION_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "Work it out from the tags" },
+  { value: "story", label: "Who we are" },
+  { value: "milestones", label: "Milestones" },
+  { value: "reels", label: "Reels & films" },
+  { value: "customers", label: "Happy customers" },
+  { value: "collabs", label: "Collaborations" },
+  { value: "bulk", label: "Bulk & custom work" },
+];
+
+const SECTION_LABEL = new Map(SECTION_OPTIONS.map((o) => [o.value, o.label]));
+
+/** `section:<id>` out of a comma-separated tag string. */
+function sectionFromTags(tags: string): string {
+  for (const raw of tags.split(",")) {
+    const m = /^\s*section:(.+?)\s*$/i.exec(raw);
+    const id = m?.[1]?.toLowerCase();
+    if (id && SECTION_LABEL.has(id)) return id;
+  }
+  return "";
+}
+
+/**
+ * Swap the `section:` tag without disturbing the owner's own tags or their
+ * order — the picker and the tag box are two views of one column, so this is
+ * the read-modify-write that keeps them from fighting.
+ */
+function withSectionTag(tags: string, section: string): string {
+  const kept = tags
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t && !/^section:/i.test(t));
+  if (section) kept.unshift(`section:${section}`);
+  return kept.join(", ");
+}
+
 /* ------------------------------------------------------------------ */
 /*  The form                                                           */
 /* ------------------------------------------------------------------ */
@@ -106,24 +154,31 @@ export function PortfolioForm({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  /* ---- Instagram import ---------------------------------------------
+  /* ---- Mirror an Instagram post or a YouTube video -------------------
      Paste a permalink, press the button, and the caption, the embed and a
-     *copy* of the poster arrive filled in. The copy matters: Instagram's
-     CDN addresses carry a signed expiry — four days on the posts this was
-     built against — so the obvious move of pasting the image address gives
-     a grid that breaks next week with nothing to explain it. The action
-     puts the bytes in our own blob store and returns that address. */
+     *copy* of the poster arrive filled in. The copy matters for Instagram:
+     its CDN addresses carry a signed expiry — four days on the posts this
+     was built against — so the obvious move of pasting the image address
+     gives a grid that breaks next week with nothing to explain it. The
+     action puts the bytes in our own blob store and returns that address.
+     YouTube posters live on `i.ytimg.com`, which does not expire and is
+     already allow-listed, so there the copy is a preference rather than a
+     requirement and the fallback is a real one. */
   const [importing, setImporting] = useState(false);
   const [imported, setImported] = useState<{
+    provider: "instagram" | "youtube";
     author: string | null;
     warning?: string;
   } | null>(null);
+
+  /** null when the link is not one we can read; drives the button's label. */
+  const linkProvider = useMemo(() => socialProviderOf(v.url), [v.url]);
 
   const runImport = useCallback(async () => {
     setImporting(true);
     setError(null);
     setImported(null);
-    const res = await importInstagramPost(v.url);
+    const res = await importSocialPost(v.url);
     setImporting(false);
 
     if (!res.success) {
@@ -133,14 +188,24 @@ export function PortfolioForm({
 
     setV((prev) => ({
       ...prev,
-      kind: "instagram",
+      kind: res.provider === "youtube" ? "video" : "instagram",
       url: res.url,
       // Never clobber a title the owner has already written.
       title: prev.title.trim() || res.title || prev.title,
       imageUrl: res.imageUrl ?? prev.imageUrl,
       embedHtml: res.embedHtml,
+      // A reel or a film belongs on the reels shelf, and the owner just told
+      // us which it is by pasting the link. Only filled in when they have not
+      // already chosen a shelf themselves.
+      tags: sectionFromTags(prev.tags)
+        ? prev.tags
+        : withSectionTag(prev.tags, "reels"),
     }));
-    setImported({ author: res.author, warning: res.warning });
+    setImported({
+      provider: res.provider,
+      author: res.author,
+      warning: res.warning,
+    });
   }, [v.url]);
 
   const set = useCallback(
@@ -154,22 +219,41 @@ export function PortfolioForm({
     []
   );
 
-  /** The one sentence that answers "where does this end up?". */
+  /** The shelf currently chosen, or "" while it is being worked out. */
+  const section = useMemo(() => sectionFromTags(v.tags), [v.tags]);
+
+  /**
+   * The one sentence that answers "where does this end up?".
+   *
+   * **It only names a shelf when it can be certain**, which is when the picker
+   * has written a `section:` tag. Without one the server runs a keyword pass
+   * over the plain tags *before* falling back to "playable means reels"
+   * (`sectionOf` in `lib/portfolio.ts`), and this component cannot run that
+   * pass: the table lives in a module that imports Prisma.
+   *
+   * The tempting shortcut — guess "Reels & films" whenever there is a link —
+   * is wrong the moment somebody tags a reel `testimonial`, and a verdict that
+   * says one shelf while the page shows another is worse than one that admits
+   * it does not know. So it names the rule instead of guessing the answer.
+   */
   const verdict = useMemo(() => {
     if (!v.isActive) {
       return { tone: "idle" as const, line: "Hidden. Nobody sees this piece." };
     }
-    if (v.productId) {
+    if (section) {
       return {
         tone: "good" as const,
-        line: 'Shows under "From our products", linked to that product.',
+        line: `Shows under "${SECTION_LABEL.get(section)}".`,
       };
     }
+    const playable = Boolean(v.embedHtml.trim()) || isSocialUrl(v.url);
     return {
       tone: "good" as const,
-      line: 'Shows under "Everything else".',
+      line: playable
+        ? "No section picked — your tags decide, and if none of them say otherwise this plays, so it lands under Reels & films."
+        : "No section picked — your tags decide, and with nothing to go on it lands under Who we are.",
     };
-  }, [v.isActive, v.productId]);
+  }, [v.isActive, section, v.embedHtml, v.url]);
 
   /** Nothing to show = a title on a grey box. Mirrored server-side. */
   const emptyPiece =
@@ -270,8 +354,28 @@ export function PortfolioForm({
         </Field>
 
         <Field
+          label="Section"
+          tip="Which part of the portfolio page this shows under. Leave it on 'Work it out from the tags' and we place it from what you typed — a tag like 'bulk order' or 'testimonial' is enough. Anything that plays and has no tag lands under Reels & films."
+        >
+          {(id) => (
+            <select
+              id={id}
+              value={section}
+              onChange={(e) => set("tags", withSectionTag(v.tags, e.target.value))}
+              className="input"
+            >
+              {SECTION_OPTIONS.map((o) => (
+                <option key={o.value || "auto"} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+
+        <Field
           label="Tags"
-          tip="Comma separated. They show as small chips under the tile and are searchable in this admin — useful for grouping a shoot or a collaboration."
+          tip="Comma separated. They show as small chips under the tile and are searchable in this admin — useful for grouping a shoot or a collaboration. A tag with a colon in it (like section:reels) is ours: it places the piece and is never shown to shoppers."
         >
           {(id) => (
             <input
@@ -292,7 +396,7 @@ export function PortfolioForm({
       >
         <Field
           label="Link"
-          tip="The Instagram permalink, blog post or page this piece lives at. If it's a reel or a YouTube video, we work out the embed and the poster from this automatically — you usually don't need the embed box below."
+          tip="The Instagram permalink, YouTube video, blog post or page this piece lives at. For Instagram and YouTube we fetch the caption, the cover image and the player from it, so the piece plays on your site instead of sending shoppers away."
         >
           {(id) => (
             <div className="flex flex-wrap items-center gap-2">
@@ -302,10 +406,10 @@ export function PortfolioForm({
                 inputMode="url"
                 value={v.url}
                 onChange={(e) => set("url", e.target.value)}
-                placeholder="https://www.instagram.com/reel/…"
+                placeholder="https://www.instagram.com/reel/… or https://youtu.be/…"
                 className="input min-w-0 flex-1"
               />
-              {isInstagramUrl(v.url) && (
+              {linkProvider && (
                 <button
                   type="button"
                   onClick={runImport}
@@ -317,7 +421,11 @@ export function PortfolioForm({
                   ) : (
                     <Download className="h-3.5 w-3.5" aria-hidden />
                   )}
-                  {importing ? "Fetching…" : "Fetch from Instagram"}
+                  {importing
+                    ? "Fetching…"
+                    : linkProvider === "youtube"
+                      ? "Fetch from YouTube"
+                      : "Fetch from Instagram"}
                 </button>
               )}
             </div>
@@ -328,9 +436,21 @@ export function PortfolioForm({
             an error, so neither is red. */}
         {imported?.author && (
           <p className="-mt-1 rounded-lg border border-orange-500/30 bg-orange-500/5 px-3 py-2 text-xs text-orange-600 dark:text-orange-400">
-            Posted by <strong className="font-medium">@{imported.author}</strong>,
-            not your own account. Fine for a collaboration or a creator feature —
-            worth crediting them in the title if you keep it.
+            {imported.provider === "youtube" ? (
+              <>
+                Uploaded by{" "}
+                <strong className="font-medium">{imported.author}</strong>. Check
+                that is your own channel — if it is somebody else&rsquo;s, credit
+                them in the title.
+              </>
+            ) : (
+              <>
+                Posted by{" "}
+                <strong className="font-medium">@{imported.author}</strong>, not
+                your own account. Fine for a collaboration or a creator feature —
+                worth crediting them in the title if you keep it.
+              </>
+            )}
           </p>
         )}
         {imported?.warning && (
@@ -341,7 +461,7 @@ export function PortfolioForm({
 
         <Field
           label="About a product"
-          tip="Attach a product and this piece moves to the 'From our products' tab, with a Shop this piece button on it. Leave it as None for collaborations, bulk work and blog posts."
+          tip="Optional. Attaching a garment adds a small 'Wearing …' link on the card so a shopper can find the piece in the shot. It no longer decides which section this shows under — the portfolio is about the label, not the catalogue."
         >
           {(id) => (
             <select
@@ -350,7 +470,7 @@ export function PortfolioForm({
               onChange={(e) => set("productId", e.target.value)}
               className="input"
             >
-              <option value="">None — everything else</option>
+              <option value="">None</option>
               {products.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -466,7 +586,7 @@ export function PortfolioForm({
 
         <SwitchRow
           label="Feature this"
-          tip="Featured pieces sort to the front of their tab and carry a small Featured badge. Feature a handful, not everything — if all of them are featured, none of them are."
+          tip="Featured pieces sort to the front of their section and carry a small Featured badge. Feature a handful, not everything — if all of them are featured, none of them are."
           checked={v.isFeatured}
           onChange={(next) => set("isFeatured", next)}
           icon={<Star className="h-4 w-4 shrink-0" />}
@@ -525,7 +645,13 @@ export function PortfolioForm({
   );
 }
 
-/** Only offer the import button for something it can actually read. */
-function isInstagramUrl(url: string): boolean {
-  return instagramShortcode(url) !== null;
+/**
+ * Would the server treat this link as playable?
+ *
+ * Only used to keep the "where this shows" verdict honest before a save — the
+ * real placement is `sectionOf()` on the server, which decides from the embed
+ * it actually resolved rather than from the raw URL.
+ */
+function isSocialUrl(url: string): boolean {
+  return socialProviderOf(url) !== null;
 }

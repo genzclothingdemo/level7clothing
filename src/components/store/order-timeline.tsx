@@ -7,9 +7,9 @@ import {
   FALLBACK_STATUS_ICON,
   ORDER_FLOW,
   ORDER_STATUS_ICON,
+  customerOrderState,
   isOffFlow,
   orderStageIndex,
-  orderStatusLabel,
   orderStatusPill,
   stampFor,
   type TrailEntry,
@@ -66,6 +66,12 @@ export function OrderTimeline({
   const Icon = ORDER_STATUS_ICON[status] ?? FALLBACK_STATUS_ICON;
   const currentStamp = stampFor(trail, status);
 
+  // The customer's half of "one stored status, two vocabularies". The stepper
+  // above still draws the four milestones — this is the line that says where
+  // the parcel actually is, which for a freshly booked AWB is "waiting for
+  // pickup" and not "Shipped".
+  const state = customerOrderState(status, deliveryStatus);
+
   return (
     <div className={cn("min-w-0", className)}>
       {offFlow ? (
@@ -77,11 +83,14 @@ export function OrderTimeline({
           )}
         >
           <Icon aria-hidden className="h-4 w-4 shrink-0 text-danger" />
-          <span className="font-medium text-danger">
-            {orderStatusLabel(status)}
-          </span>
+          <span className="font-medium text-danger">{state.label}</span>
           {currentStamp && (
             <span className="text-muted-foreground">{currentStamp}</span>
+          )}
+          {state.note && (
+            <span className="w-full text-[11px] leading-relaxed text-muted-foreground">
+              {state.note}
+            </span>
           )}
         </p>
       ) : (
@@ -143,12 +152,16 @@ export function OrderTimeline({
               )}
             >
               <Icon aria-hidden className="h-3 w-3" />
-              {orderStatusLabel(status)}
+              {state.label}
             </span>
             {currentStamp && (
               <span className="text-muted-foreground">{currentStamp}</span>
             )}
-            {deliveryStatus && (
+            {/* The courier's own words, only when they are not already what the
+                line above says — otherwise this reads "Out for delivery · Out
+                For Delivery". An unrecognised scan still shows, because then it
+                is the only thing the courier has told us. */}
+            {deliveryStatus && !state.fromScan && (
               <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] text-foreground/80">
                 {deliveryStatus}
               </span>
@@ -160,6 +173,12 @@ export function OrderTimeline({
               </span>
             )}
           </p>
+
+          {state.note && (
+            <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+              {state.note}
+            </p>
+          )}
         </>
       )}
 

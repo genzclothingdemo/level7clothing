@@ -26,7 +26,7 @@ export function PortfolioFilters() {
   const q = params.get("q") ?? "";
   const kind = params.get("kind") ?? "";
   const status = params.get("status") ?? "";
-  const link = params.get("link") ?? "";
+  const section = params.get("section") ?? "";
 
   function setParam(key: string, value: string) {
     const next = new URLSearchParams(params.toString());
@@ -36,7 +36,7 @@ export function PortfolioFilters() {
     router.replace(query ? `${pathname}?${query}` : pathname);
   }
 
-  const narrowing = !!(q || kind || status || link);
+  const narrowing = !!(q || kind || status || section);
 
   const select = (live: boolean) =>
     cn(
@@ -82,15 +82,23 @@ export function PortfolioFilters() {
         <option value="featured">Featured</option>
       </select>
 
+      {/* The shelf on /portfolio, not the tab that used to exist. The values
+          match `PORTFOLIO_SECTIONS`; they are repeated here rather than
+          imported because `lib/portfolio.ts` pulls in Prisma and this is a
+          client component. */}
       <select
-        value={link}
-        onChange={(e) => setParam("link", e.target.value)}
-        aria-label="Filter by whether a product is attached"
-        className={select(!!link)}
+        value={section}
+        onChange={(e) => setParam("section", e.target.value)}
+        aria-label="Filter by portfolio section"
+        className={select(!!section)}
       >
-        <option value="">Any tab</option>
-        <option value="product">From our products</option>
-        <option value="other">Everything else</option>
+        <option value="">Any section</option>
+        <option value="story">Who we are</option>
+        <option value="milestones">Milestones</option>
+        <option value="reels">Reels &amp; films</option>
+        <option value="customers">Happy customers</option>
+        <option value="collabs">Collaborations</option>
+        <option value="bulk">Bulk &amp; custom work</option>
       </select>
 
       {narrowing && (

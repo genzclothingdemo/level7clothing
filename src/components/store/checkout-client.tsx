@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState, useTransition } from "react"
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { toast } from "sonner";
-import { Loader2, Lock, Truck, CreditCard, Wallet, MessageCircle } from "lucide-react";
+import { Loader2, Lock, Truck, CreditCard, Wallet } from "lucide-react";
 import { useCart } from "@/context/cart";
 import { useSettings } from "@/context/settings";
 import { Button, ButtonLink } from "@/components/ui/button";
@@ -22,16 +22,35 @@ import {
 import { InfoTip } from "@/components/store/info-tip";
 import type { PaymentMode } from "@/lib/types";
 
-// The stored order label for each checkout mode.
-const MODE_TO_METHOD: Record<PaymentMode, "Razorpay" | "COD" | "Partial" | "Direct"> = {
+/**
+ * The three modes checkout offers — **the only three**, and the client half of
+ * `CHECKOUT_MODES` in `app/actions/orders.ts`.
+ *
+ * Two instruments underneath: cash, and online through Razorpay. Prepaid is
+ * entirely online, COD is entirely cash, and partial is one of each — the
+ * advance online, the remainder in cash at the door.
+ *
+ * "Direct" ("no online payment — arrange with us") was a fourth and has been
+ * withdrawn. It is not in this list, it is not in `MODE_TO_METHOD`, and there
+ * is no fallback that can reintroduce it: if nothing is available the page says
+ * so, because dropping every order into a pay-the-owner request was the failure
+ * this removal exists to end.
+ */
+const CHECKOUT_MODES = ["prepaid", "partial", "cod"] as const;
+
+type CheckoutMode = (typeof CHECKOUT_MODES)[number];
+
+/** The stored `Order.paymentMethod` label for each checkout mode. */
+const MODE_TO_METHOD: Record<CheckoutMode, "Razorpay" | "COD" | "Partial"> = {
   prepaid: "Razorpay",
   cod: "COD",
   partial: "Partial",
-  direct: "Direct",
 };
 
 type CheckoutContext = {
-  methods: Record<PaymentMode, boolean>;
+  methods: Record<CheckoutMode, boolean>;
+  /** Cash-handling fees in whole rupees, 0 when the store absorbs them. */
+  fees: { cod: number; partial: number };
   products: { id: string; paymentModes: PaymentMode[]; advancePercent: number | null }[];
 };
 
@@ -106,7 +125,7 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
 
   // Payment rules for the cart, loaded from the server (authoritative).
   const [ctx, setCtx] = useState<CheckoutContext | null>(null);
-  const [method, setMethod] = useState<PaymentMode | null>(null);
+  const [method, setMethod] = useState<CheckoutMode | null>(null);
 
   // Identity is seeded from the account; the delivery fields are filled by the
   // address picker below — never from `user.address`, which is the legacy
@@ -195,9 +214,24 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
     shipping = dynamicShippingFee ?? 0;
   }
 
-      
   const discountTotal = appliedCoupon ? appliedCoupon.discountAmount : 0;
-  const total = Math.max(0, subtotal + shipping - discountTotal);
+
+  /**
+   * What the store charges for handling cash on this order.
+   *
+   * Shown as its own named line below rather than folded into the total: a
+   * shopper who picks cash on delivery and watches the total move is owed the
+   * word for why. Prepaid never carries one — there is no cash to collect — and
+   * a store that absorbs the cost sets it to 0, which renders no line at all.
+   */
+  const paymentFee =
+    method === "cod"
+      ? (ctx?.fees.cod ?? 0)
+      : method === "partial"
+        ? (ctx?.fees.partial ?? 0)
+        : 0;
+
+  const total = Math.max(0, subtotal + shipping + paymentFee - discountTotal);
 
   // A stable signature of the cart's product ids so we only refetch on change.
   const idKey = items.map((i) => i.productId).sort().join(",");
@@ -260,21 +294,31 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
     return () => { alive = false; };
   }, [form.pincode, method, items]);
 
-  // Modes offered = intersection of each product's modes, filtered by globals.
-  const allowedModes = useMemo<PaymentMode[]>(() => {
+  /**
+   * Modes offered = intersection of each product's modes, filtered by the
+   * store-wide toggles. Mirrors `resolveAllowedModes` on the server, which is
+   * the one that actually decides — this only chooses what to draw.
+   *
+   * An empty result stays empty. There is no "…or else direct" line any more:
+   * a cart with nothing available says so and cannot be submitted, rather than
+   * being silently converted into a request the shopper never asked for.
+   */
+  const allowedModes = useMemo<CheckoutMode[]>(() => {
     if (!ctx) return [];
     const byId = new Map(ctx.products.map((p) => [p.id, p]));
-    const all: PaymentMode[] = ["prepaid", "cod", "partial", "direct"];
-    let modes = all.filter((m) =>
-      items.every((i) => {
-        const p = byId.get(i.productId);
-        const list = p?.paymentModes?.length ? p.paymentModes : ["prepaid", "cod"];
-        return list.includes(m);
-      })
+    return CHECKOUT_MODES.filter(
+      (m) =>
+        ctx.methods[m] &&
+        items.every((i) => {
+          const p = byId.get(i.productId);
+          const list = p?.paymentModes?.length ? p.paymentModes : ["prepaid", "cod"];
+          return list.includes(m);
+        })
     );
-    modes = modes.filter((m) => ctx.methods[m]);
-    return modes.length ? modes : ["direct"];
   }, [ctx, items]);
+
+  /** Loaded, and genuinely nothing on offer — not merely still loading. */
+  const noMethods = !!ctx && allowedModes.length === 0;
 
   // Advance (partial) = sum of each line's advance% of its line total.
   const advance = useMemo(() => {
@@ -288,10 +332,18 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
     return Math.min(Math.max(a, 0), total);
   }, [ctx, items, total]);
 
-  // Keep the selected mode valid as the allowed set resolves/changes.
+  // Keep the selected mode valid as the allowed set resolves/changes. An empty
+  // set clears the selection rather than leaving a stale one behind — the
+  // submit button reads `method`, so a leftover value would let an order be
+  // sent in a mode the page has stopped offering.
   useEffect(() => {
-    if (allowedModes.length === 0) return;
-    setMethod((cur) => (cur && allowedModes.includes(cur) ? cur : allowedModes[0]));
+    setMethod((cur) =>
+      allowedModes.length === 0
+        ? null
+        : cur && allowedModes.includes(cur)
+          ? cur
+          : allowedModes[0]
+    );
   }, [allowedModes]);
 
   const isOnline = method === "prepaid" || method === "partial";
@@ -415,10 +467,10 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
       return;
     }
 
-    // COD / Direct — confirmed immediately, no payment window.
+    // Cash on delivery — nothing to charge now, so no payment window.
     if (!("payment" in res) || !res.payment) {
       clear();
-      toast.success(method === "direct" ? "Order request sent!" : "Order placed!");
+      toast.success("Order placed!");
       router.push(`/order/${res.orderNumber}`);
       return;
     }
@@ -475,7 +527,7 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
 
   // Presentation details for each offered mode.
   const MODE_UI: Record<
-    PaymentMode,
+    CheckoutMode,
     { label: string; desc: string; icon: React.ReactNode }
   > = {
     // Labels must match product-notices.tsx word for word — a shopper who read
@@ -489,7 +541,7 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
     partial: {
       label: "Part now, rest on delivery",
       desc: `Pay ${formatINR(advance)} online now, then ${formatINR(
-        total - advance
+        Math.max(0, total - advance)
       )} in cash when it arrives. The advance is non-refundable.`,
       icon: <Wallet className="h-4 w-4 text-muted-foreground" />,
     },
@@ -498,22 +550,24 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
       desc: "Pay the courier in full when your order arrives.",
       icon: <Truck className="h-4 w-4 text-muted-foreground" />,
     },
-    direct: {
-      label: "Arrange with us",
-      desc: "No payment now — we'll contact you to finalise your made-to-order piece. These are non-refundable once production starts.",
-      icon: <MessageCircle className="h-4 w-4 text-muted-foreground" />,
-    },
+  };
+
+  /** The fee's own name, so the summary line is never just "Fee". */
+  const FEE_LABEL: Record<CheckoutMode, string> = {
+    prepaid: "",
+    partial: "Part-payment handling",
+    cod: "Cash on delivery handling",
   };
 
   const buttonLabel = !method
-    ? "Loading…"
+    ? ctx
+      ? "Unavailable"
+      : "Loading…"
     : method === "prepaid"
-    ? `Pay ${formatINR(total)}`
-    : method === "partial"
-    ? `Pay ${formatINR(advance)} now`
-    : method === "direct"
-    ? "Request customised order"
-    : `Place order · ${formatINR(total)}`;
+      ? `Pay ${formatINR(total)}`
+      : method === "partial"
+        ? `Pay ${formatINR(advance)} now`
+        : `Place order · ${formatINR(total)}`;
 
   return (
     <div className="container-px mx-auto max-w-6xl py-12">
@@ -589,6 +643,19 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
               <div className="mt-4 flex items-center gap-2 rounded-2xl border border-border p-4 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" /> Loading payment
                 options…
+              </div>
+            ) : noMethods ? (
+              // Stated, never silently replaced. The old fallback dropped this
+              // case into "arrange with us", so a store with every method off
+              // kept taking orders nobody had agreed terms for.
+              <div className="mt-4 rounded-2xl border border-danger/40 bg-danger/5 p-4 text-sm">
+                <p className="font-medium">
+                  We can&apos;t take payment for this basket right now.
+                </p>
+                <p className="mt-1 text-muted-foreground">
+                  None of our payment options covers every item in it. Message us
+                  and we&apos;ll sort it out — or remove an item and try again.
+                </p>
               </div>
             ) : (
               <div className="mt-4 space-y-3">
@@ -718,6 +785,22 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
                 <span className="text-xs">{shippingError}</span>
               </div>
             )}
+            {/* The cash-handling fee, named and on its own line. Rendered only
+                when there is one: a "₹0 handling" row is noise, and the store
+                absorbing the cost is the default. */}
+            {method && paymentFee > 0 && (
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-1 text-muted-foreground">
+                  {FEE_LABEL[method]}
+                  <InfoTip term={FEE_LABEL[method]}>
+                    Collecting cash at the door costs us a courier collection
+                    charge, so we pass on a flat {formatINR(paymentFee)}. Paying
+                    online in full has no such fee.
+                  </InfoTip>
+                </span>
+                <span>{formatINR(paymentFee)}</span>
+              </div>
+            )}
             {appliedCoupon && (
               <div className="flex justify-between text-success">
                 <span>Discount ({appliedCoupon.code})</span>
@@ -748,12 +831,6 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
             {method === "cod" && (
               <p className="text-xs text-muted-foreground">
                 Pay {formatINR(total)} in cash on delivery.
-              </p>
-            )}
-            {method === "direct" && (
-              <p className="text-xs text-muted-foreground">
-                No payment now — we&apos;ll contact you to finalise your
-                customised piece. Customised orders are non-refundable.
               </p>
             )}
           </div>

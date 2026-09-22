@@ -15,7 +15,17 @@
  * with no database in the way. The moment one of these answers is inlined at a
  * call site it starts drifting from the others — which is how `pickup done`
  * came to mean two different things (see `lib/nimbus-status.ts`).
+ *
+ * A fourth question was added later and belongs to the same family:
+ *
+ *   4. what does this order *read* as, to an operator?  → {@link adminOrderState}
+ *
+ * It is pure for the same reason the other three are: the sentence on the
+ * orders table, the sentence on the expanded card and the sentence a bulk
+ * result prints all have to be the one sentence.
  */
+
+import { courierPhase } from "./nimbus-status";
 
 /* ------------------------------------------------------------------ */
 /*  Settings                                                           */
@@ -521,7 +531,7 @@ const FINISHED_STATUSES = new Set(["delivered", "returned", "rto"]);
  * | cancelled / failed    | any           | none (a staged draft may be withdrawn) |
  * | delivered / returned  | none          | none — nothing left to ship        |
  * | delivered / returned  | draft         | none (the stale draft may be withdrawn) |
- * | confirmed / shipped   | none          | **Ship now** · **Send draft**      |
+ * | confirmed / shipped   | none          | **Choose courier** · **Send draft**|
  * | confirmed / shipped   | draft         | **Book AWB** · Sync · cancel draft |
  *
  * **`booked` is tested first**, and deliberately: a parcel that has already
@@ -623,6 +633,254 @@ export function shipmentGateFor(order: ShippableOrder): ShipmentGate {
     can: { ...NO_CONTROLS, shipNow: true, draft: true },
     reason: "Nothing has been sent to NimbusPost for this order yet.",
   };
+}
+
+/* ------------------------------------------------------------------ */
+/*  What the order READS as — the operator's vocabulary                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Tones, spelled as the admin `Badge` spells them.
+ *
+ * Structural rather than imported: `components/admin/order-ui.tsx` carries
+ * `"use client"`, and a pure module must not depend on one (see the RSC traps
+ * in CLAUDE.md). The literals match `BadgeTone`, so TypeScript checks the fit
+ * at the call site without either file importing the other.
+ */
+export type StateTone = "neutral" | "accent" | "success" | "danger" | "warn" | "info";
+
+/** Which rule produced the sentence. Branch on this, never on the prose. */
+export type AdminStateCode =
+  | "pending"
+  | "confirmed-unstaged"
+  | "drafted"
+  | "awaiting-pickup"
+  | "moving"
+  | "attempted"
+  | "rto"
+  | "delivered"
+  | "cancelled"
+  | "payment-failed"
+  | "manual";
+
+/** The facts the sentence is allowed to see. */
+export type NarratableOrder = ShippableOrder & {
+  /** The courier's own words for its last scan, e.g. "Out For Delivery". */
+  deliveryStatus?: string | null;
+  deliveryLocation?: string | null;
+  /** The carrier actually carrying it, once one is allocated. */
+  courier?: string | null;
+  /** The carrier chosen but not yet booked with. */
+  nimbusCourierName?: string | null;
+};
+
+export type AdminOrderState = {
+  code: AdminStateCode;
+  /** Two or three words, for a pill in a 8rem column. */
+  headline: string;
+  /** The "…, waiting for X" half. Never empty. */
+  detail: string;
+  /** `headline` and `detail` joined — the sentence, for anywhere with room. */
+  line: string;
+  tone: StateTone;
+  stage: ShipmentStage;
+};
+
+/**
+ * **The admin's reading of an order**: its status *composed with* where the
+ * shipment has got to.
+ *
+ * The owner's complaint was that `confirmed` and `shipped` are the same two
+ * words for four genuinely different situations — *nothing has been sent to
+ * NimbusPost*, *a draft is waiting for me to book it*, *an AWB exists and
+ * nobody has collected the parcel*, and *it is actually moving*. An operator
+ * cannot act on "confirmed"; they can act on "waiting for NimbusPost".
+ *
+ * So: **one stored status, two vocabularies.** This is the operator's, and it
+ * is deliberately the detailed one — it names the draft, the AWB and the scan,
+ * because those are the three things an operator's next press depends on. The
+ * customer's is {@link customerOrderState} in
+ * `components/store/order-status.ts`, and is deliberately coarser.
+ *
+ * Nothing new is stored. `Order.status` stays exactly the five values it
+ * always held; the extra resolution comes from `shipmentGateFor` (which knows
+ * about the draft and the AWB) and `courierPhase` (which knows what the last
+ * scan meant). Both already existed — this only says them out loud.
+ *
+ * Precedence, and why:
+ *
+ * 1. **Dead statuses first** — cancelled and payment-failed replace the
+ *    journey rather than sitting on it, exactly as the storefront's off-flow
+ *    statuses do.
+ * 2. **Delivered next**, so a late scan cannot re-narrate an arrived parcel.
+ * 3. **`pending`**, because an unconfirmed order's shipment state is
+ *    irrelevant — there is only one thing to do with it.
+ * 4. **RTO before anything else about a live parcel**: a parcel coming back is
+ *    the single most important thing on the screen and `Order.status` has no
+ *    value for it.
+ * 5. Then the shipment stage, refined by the courier's own last scan.
+ */
+export function adminOrderState(order: NarratableOrder): AdminOrderState {
+  const status = String(order.status ?? "").trim().toLowerCase();
+  const gate = shipmentGateFor(order);
+  const stage = gate.stage;
+  const phase = courierPhase(order.deliveryStatus);
+  const where = order.deliveryLocation?.trim();
+  const carrier = order.courier?.trim() || order.nimbusCourierName?.trim() || "";
+
+  const say = (
+    code: AdminStateCode,
+    headline: string,
+    detail: string,
+    tone: StateTone
+  ): AdminOrderState => ({
+    code,
+    headline,
+    detail,
+    line: `${headline} — ${detail}`,
+    tone,
+    stage,
+  });
+
+  // 1 — dead. A draft abandoned on one is the only thing left worth saying.
+  if (status === "cancelled") {
+    return say(
+      "cancelled",
+      "Cancelled",
+      stage === "draft"
+        ? "stock returned, but an unbooked draft is still sitting in NimbusPost"
+        : stage === "booked"
+          ? "cancelled after it was dispatched; the parcel is still with the courier"
+          : "stock returned, nothing to ship",
+      "danger"
+    );
+  }
+  if (status === "payment_failed") {
+    return say(
+      "payment-failed",
+      "Payment failed",
+      stage === "draft"
+        ? "not being packed, and a draft is still sitting in NimbusPost"
+        : "not being packed",
+      "danger"
+    );
+  }
+
+  // 2 — arrived.
+  if (status === "delivered") {
+    return say(
+      "delivered",
+      "Delivered",
+      stage === "draft"
+        ? "the customer has it, but an unbooked draft is still in NimbusPost"
+        : "the customer has it",
+      stage === "draft" ? "warn" : "success"
+    );
+  }
+
+  // 3 — nobody has accepted it yet.
+  if (status === "pending") {
+    return say(
+      "pending",
+      "Pending",
+      stage === "draft"
+        ? "waiting for you to confirm; a draft was staged before it went back to pending"
+        : "waiting for you to confirm",
+      "warn"
+    );
+  }
+
+  // 4 — coming back. No order status can express this, so it is said here.
+  if (phase === "rto") {
+    return say(
+      "rto",
+      "Returning to you",
+      where
+        ? `delivery gave up; the parcel is coming back to you, last seen at ${where}`
+        : "delivery gave up; the parcel is coming back to you",
+      "danger"
+    );
+  }
+
+  // 5 — a real AWB exists. What the courier last said decides the wording.
+  if (stage === "booked") {
+    const via = carrier ? ` by ${carrier}` : "";
+    switch (phase) {
+      case "picked":
+        return say("moving", "Picked up", `collected${via}, on its way`, "accent");
+      case "transit":
+        return say(
+          "moving",
+          "In transit",
+          where ? `in the network, last seen at ${where}${via ? `, carried${via}` : ""}` : `in the network${via ? `, carried${via}` : ""}`,
+          "accent"
+        );
+      case "out":
+        return say(
+          "moving",
+          "Out for delivery",
+          where ? `with the rider today, from ${where}` : "with the rider today",
+          "accent"
+        );
+      case "attempted":
+        return say(
+          "attempted",
+          "Delivery failed",
+          "the courier tried and could not deliver; it will retry",
+          "warn"
+        );
+      case "cancelled":
+        return say(
+          "cancelled",
+          "Shipment cancelled",
+          "the courier cancelled this shipment",
+          "danger"
+        );
+      case "delivered":
+        return say("delivered", "Delivered", "the courier reports it arrived", "success");
+      default:
+        // Booked and not scanned. This is the state that used to read
+        // "Shipped" and tell an operator nothing: the AWB exists, the wallet
+        // has been charged, and the parcel is still on our own shelf.
+        return say(
+          "awaiting-pickup",
+          "AWB booked",
+          carrier
+            ? `waiting for ${carrier} to collect it`
+            : "waiting for the courier to collect it",
+          "accent"
+        );
+    }
+  }
+
+  // 6 — a draft, and nothing else. The state the owner said reads as "nothing
+  // has happened": it is not nothing, it is one press away from an AWB.
+  if (stage === "draft") {
+    return say(
+      "drafted",
+      "Draft ready",
+      carrier
+        ? `waiting for you to book it with ${carrier}; nothing charged yet`
+        : "waiting for you to book it; nothing charged yet",
+      "info"
+    );
+  }
+
+  // 7 — confirmed with nothing staged, or marked shipped by hand.
+  if (status === "shipped") {
+    return say(
+      "manual",
+      "Shipped by hand",
+      "marked shipped without an AWB; add the tracking, or book it here",
+      "warn"
+    );
+  }
+  return say(
+    "confirmed-unstaged",
+    "Confirmed",
+    "waiting for NimbusPost; nothing has been staged yet",
+    "warn"
+  );
 }
 
 /* ------------------------------------------------------------------ */

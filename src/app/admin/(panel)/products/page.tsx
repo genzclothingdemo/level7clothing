@@ -191,6 +191,10 @@ export default async function AdminProducts({
           rows={products.map((p) => ({
             id: p.id,
             name: p.name,
+            // Only for the "view on the storefront" link. An inactive product
+            // has no live page — the row hides the link rather than offering a
+            // 404 (see ProductsTable).
+            slug: p.slug,
             image: p.images[0] ?? null,
             category: p.category,
             subcategoryName: p.subcategory?.name ?? null,

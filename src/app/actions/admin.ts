@@ -2,6 +2,7 @@
 
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
+import { runAutomationTrigger } from "@/lib/automation";
 import { prisma } from "@/lib/prisma";
 import { getAdminSession, hashPassword } from "@/lib/auth";
 import { getSettings } from "@/lib/settings";
@@ -15,6 +16,7 @@ import {
   createDraftForOrder,
   dispatchOrder,
   getCourierOptionsForOrder,
+  refreshTracking,
   runConfirmationPipeline,
   shipOrderNow,
   syncAllOpenOrders,
@@ -812,7 +814,7 @@ export async function updateSettings(input: SettingsInput) {
     return {
       ok: false as const,
       error:
-        "Leave at least one payment method on. With all four off, checkout silently falls back to Customised order (pay to owner).",
+        "Leave at least one payment method on — COD, prepaid or advance + COD. With all three off there is no way to pay, so checkout closes and nothing can be ordered.",
     };
   }
 
@@ -930,6 +932,22 @@ export async function updateOrderStatus(
   } catch (err) {
     console.error("[admin] status email failed:", err);
   }
+
+  // Automation rules bound to `order.status_changed`.
+  //
+  // `previousStatus` is read from the row BEFORE the update above, which is
+  // what lets a rule say "only when it becomes shipped" rather than firing on
+  // every save. The engine dedupes on `<orderId>:<newStatus>`, so pressing
+  // Update twice on the same status sends once.
+  //
+  // NOTE: the seeded "order confirmed" and "order shipped" rules ship DISABLED
+  // because `sendOrderStatusEmail` above already mails the customer on a status
+  // change. Enable them only when that sender is retired, or the customer gets
+  // both.
+  await runAutomationTrigger("order.status_changed", {
+    id: order.id,
+    context: { previousStatus: order.status },
+  }).catch((err) => console.error("[admin] automation trigger failed:", err));
 
   revalidatePath("/admin/orders");
   revalidatePath("/admin");
@@ -1126,9 +1144,12 @@ export async function confirmOrder(id: string) {
  */
 
 /**
- * **Ship now** — book the AWB with the courier the admin picked from the live
+ * **Book** — generate the AWB with the courier the admin picked from the live
  * rates. Stages the draft first if there isn't one, so the review gate's
  * draft-before-AWB ordering still holds inside NimbusPost.
+ *
+ * Its free sibling is `draftOrderInNimbusAction`, which takes the same courier
+ * and stops at the draft. Two verbs, one choice — see `CourierPicker`.
  */
 export async function shipOrderNowAction(
   id: string,
@@ -1159,7 +1180,7 @@ export async function shipOrderNowAction(
     return {
       ok: false as const,
       error:
-        "The draft was staged but NimbusPost did not return an AWB. The draft is safe — try Ship now again, or book it in the NimbusPost dashboard.",
+        "The draft was staged but NimbusPost did not return an AWB. The draft is safe — press Book again, or book it in the NimbusPost dashboard.",
     };
   }
 
@@ -1201,11 +1222,25 @@ export async function shipOrderNowAction(
  * *books* when a draft already exists, so routing the draft button through it
  * would make a second press charge the wallet. Free, idempotent, and reversible
  * from the NimbusPost dashboard, which is why it needs no confirmation.
+ *
+ * `courierId`/`courierName` are the carrier the draft is *for*, from the rates
+ * panel. Optional, because "Send draft" still stages without a decision — but
+ * when one has been made it travels with the draft rather than needing a second
+ * press, which is what makes "choose a courier **and draft**" one act. It
+ * cannot allocate anything or cost anything: a NimbusPost draft has no carrier,
+ * so this is only recorded on our row and read later by `shipDraft`.
  */
-export async function draftOrderInNimbusAction(id: string) {
+export async function draftOrderInNimbusAction(
+  id: string,
+  courierId?: string | null,
+  courierName?: string | null
+) {
   await requireAdmin();
 
-  const result = await createDraftForOrder(id);
+  const result = await createDraftForOrder(
+    id,
+    courierId && courierName ? { id: courierId, name: courierName } : null
+  );
   if (!result.ok) {
     const error =
       result.error ??
@@ -1271,6 +1306,107 @@ export async function syncAllOrdersAction() {
   revalidatePath("/admin/orders");
   revalidatePath("/admin");
   return result;
+}
+
+/**
+ * How long a tracking read stays "fresh enough" for the automatic path.
+ *
+ * Fifteen minutes is not a courier guarantee — NimbusPost's own scans arrive
+ * far less often than that. It is a **spend limit**: it bounds how many times
+ * opening and re-opening the same order can hit their API, while still meaning
+ * that any order an operator has not looked at in the last quarter of an hour
+ * is re-checked the moment they do.
+ */
+const AUTO_SYNC_MIN_AGE_MS = 15 * 60 * 1000;
+
+/**
+ * **Auto-sync** — the silent half of tracking.
+ *
+ * The owner asked for tracking that keeps itself current once an AWB exists
+ * rather than waiting for somebody to press Sync. Three things now do that,
+ * and this is the third:
+ *
+ *   1. the **webhook** (`/api/webhooks/nimbuspost`) — push, instant, but only
+ *      lands if NimbusPost is configured to call us and the call arrives;
+ *   2. the **cron** (`/api/cron/nimbus-sync`) — pull, unattended, covers every
+ *      open order including the ones nobody opens;
+ *   3. **this** — pull, on sight. Expanding an order in the admin asks the
+ *      courier where the parcel is, so the screen a human is actually looking
+ *      at is never the stalest thing in the system.
+ *
+ * Deliberately different from `syncOrderFromNimbusAction` in three ways, all of
+ * them because nobody pressed anything:
+ *
+ * - **It is rate-limited.** Within {@link AUTO_SYNC_MIN_AGE_MS} of the last
+ *   sync it returns immediately, having done one indexed read and no network
+ *   call. Re-opening the same row ten times is one API call, not ten.
+ * - **It only runs for an AWB.** A staged draft is asked about by the cron; a
+ *   render is not the place to go looking for a booking nobody has made.
+ * - **It never throws and never emails on its own account.** Everything a
+ *   status change should send is sent by `refreshTracking`, which is the shared
+ *   write path — this only decides *when* to call it.
+ *
+ * `changed` is what the caller refreshes on. A poll that re-rendered the table
+ * every time it found nothing new would fight the operator for their scroll
+ * position, which is how a "helpful" background refresh becomes the reason
+ * someone stops using a screen.
+ */
+export async function autoSyncOrderAction(id: string) {
+  await requireAdmin();
+
+  const order = await prisma.order
+    .findUnique({
+      where: { id },
+      select: {
+        status: true,
+        trackingNumber: true,
+        deliveryStatus: true,
+        lastSyncedAt: true,
+      },
+    })
+    .catch(() => null);
+
+  if (!order) return { ok: false as const, error: "Order not found" };
+
+  const awb = order.trackingNumber?.trim();
+  if (!awb) return { ok: true as const, changed: false, skipped: "no-awb" as const };
+
+  // A delivered or cancelled parcel has nowhere left to go. Polling it forever
+  // is the sort of thing that quietly burns an API quota for no information.
+  if (order.status === "delivered" || order.status === "cancelled") {
+    return { ok: true as const, changed: false, skipped: "finished" as const };
+  }
+
+  const age = order.lastSyncedAt
+    ? Date.now() - order.lastSyncedAt.getTime()
+    : Number.POSITIVE_INFINITY;
+  if (age < AUTO_SYNC_MIN_AGE_MS) {
+    return { ok: true as const, changed: false, skipped: "fresh" as const };
+  }
+
+  const result = await refreshTracking(id, awb).catch((err) => ({
+    ok: false as const,
+    error: err instanceof Error ? err.message : String(err),
+  }));
+
+  if (!result.ok) {
+    // Logged, not surfaced: the operator did not ask for this, and a courier
+    // outage must not decorate a working screen with a red toast. The Sync
+    // button is still there and still reports loudly.
+    console.error("[admin] auto-sync failed:", result.error);
+    return { ok: true as const, changed: false, skipped: "error" as const };
+  }
+
+  const changed =
+    result.outcome === "tracked" &&
+    (result.deliveryStatus !== order.deliveryStatus ||
+      result.orderStatus !== order.status);
+
+  if (changed) {
+    revalidatePath("/admin/orders");
+    revalidatePath("/admin");
+  }
+  return { ok: true as const, changed, skipped: null };
 }
 
 /**
@@ -1575,7 +1711,12 @@ function describeShipment(shipment: ConfirmationPipelineResult): string {
     case "booked":
       return `Confirmed and booked — AWB ${shipment.awb}${shipment.courier ? ` (${shipment.courier})` : ""}.${shipment.caveat ? ` ${shipment.caveat}` : ""}`;
     case "drafted":
-      return "Confirmed — draft staged in NimbusPost.";
+      // Names the pre-picked carrier and its price. "Draft staged" alone was
+      // the line the owner read as "nothing has happened"; this one says what
+      // is waiting and what pressing Book will cost.
+      return shipment.courier
+        ? `Confirmed — draft staged in NimbusPost, waiting to be booked with ${shipment.courier}${shipment.quote != null ? ` (₹${shipment.quote})` : ""}.`
+        : "Confirmed — draft staged in NimbusPost, waiting to be booked.";
     case "skipped":
       return `Confirmed. ${shipment.message}`;
     case "failed":

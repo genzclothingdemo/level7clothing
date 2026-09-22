@@ -8,6 +8,10 @@
     {
       "path": "/api/cron/purge-media",
       "schedule": "0 0 * * 0"
+    },
+    {
+      "path": "/api/cron/automation",
+      "schedule": "0 * * * *"
     }
   ]
 }

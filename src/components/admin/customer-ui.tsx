@@ -25,9 +25,11 @@ import { Badge } from "@/components/admin/order-ui";
 import { InfoTip } from "@/components/store/info-tip";
 import { cn } from "@/lib/utils";
 import {
+  CUSTOMER_KIND_HELP,
   CUSTOMER_STATUS_HELP,
   CUSTOMER_STATUS_LABEL,
   CUSTOMER_STATUS_TONE,
+  type CustomerKind,
   type CustomerRecord,
   type CustomerSignal,
   type CustomerSignalKind,
@@ -78,6 +80,38 @@ export function formatAgo(d: Date, now: number): string {
   if (months < 12) return `${months} month${months === 1 ? "" : "s"} ago`;
   const years = Math.round(months / 12);
   return `${years} year${years === 1 ? "" : "s"} ago`;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Customer or guest                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * "Guest" beside the name, and nothing at all for a customer.
+ *
+ * Only one of the two is worth a badge. A row on the Customers list is a
+ * customer by construction, so stamping "Customer" on every one of them is
+ * noise; "Guest" is the exception and is worth seeing — most of all on the
+ * detail page, which can be reached from a search that crossed both lists.
+ */
+export function CustomerKindBadge({
+  kind,
+  withTip = false,
+  className,
+}: {
+  kind: CustomerKind;
+  withTip?: boolean;
+  className?: string;
+}) {
+  if (kind === "customer") return null;
+  return (
+    <span className={cn("inline-flex items-center gap-0.5", className)}>
+      <Badge tone="neutral" title={CUSTOMER_KIND_HELP.guest}>
+        Guest
+      </Badge>
+      {withTip && <InfoTip term="Guest">{CUSTOMER_KIND_HELP.guest}</InfoTip>}
+    </span>
+  );
 }
 
 /* ------------------------------------------------------------------ */

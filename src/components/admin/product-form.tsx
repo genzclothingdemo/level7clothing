@@ -31,6 +31,7 @@ import {
 } from "@/components/admin/store-default-field";
 import { InfoTip } from "@/components/store/info-tip";
 import { allCombinations, comboKey } from "@/lib/options";
+import { IMAGE_CONTROLLER_NONE } from "@/lib/variants";
 import { formatINR, cn } from "@/lib/utils";
 import type { ProductDTO, ProductOption, ProductVideo } from "@/lib/types";
 
@@ -238,11 +239,24 @@ export function ProductForm({
   const [options, setOptions] = useState<ProductOption[]>(
     product?.options ?? []
   );
-  // Which option's values drive the per-variant image galleries (Media tab).
-  // Persisted as Product.propertyModules.images = [name]; defaults to first option.
-  const [imageOption, setImageOption] = useState<string>(
-    product?.propertyModules?.images?.[0] ?? ""
-  );
+  /**
+   * Which option's values drive the per-variant image galleries (Media tab).
+   *
+   * Three states, because "nobody has chosen yet" and "the admin chose None"
+   * are different answers and only one of them may be overwritten by a default:
+   *
+   *   ""                      → unset; the first option drives images
+   *   IMAGE_CONTROLLER_NONE   → explicitly none; photos don't vary by option
+   *   "Colour"                → that option drives images
+   *
+   * Persisted as `Product.propertyModules.images`: `[name]` or, for None, `[]`.
+   * A saved `[]` is what rehydrates the sentinel here — see visualAttributeName.
+   */
+  const [imageOption, setImageOption] = useState<string>(() => {
+    const declared = product?.propertyModules?.images;
+    if (!Array.isArray(declared)) return ""; // saved before this contract existed
+    return declared[0] ?? IMAGE_CONTROLLER_NONE;
+  });
 
   // ---- Variants (price / stock / availability per combo) ----
   const [useVariants, setUseVariants] = useState<boolean>(
@@ -357,9 +371,15 @@ export function ProductForm({
     [options]
   );
 
-  // The effective image-driving option: the admin's choice if it still exists,
-  // else the first option. Empty string when the product has no options.
+  /**
+   * The effective image-driving option: the admin's choice if it still exists,
+   * else the first option. Empty string means *no* option drives the gallery —
+   * either because the admin answered None, or because the product has no
+   * options at all. Both persist as `propertyModules.images: []` and both show
+   * only the common photos, so they need no further distinction downstream.
+   */
   const imageDrivingOption = useMemo(() => {
+    if (imageOption === IMAGE_CONTROLLER_NONE) return "";
     const names = optionMatrix.map((o) => o.name);
     return imageOption && names.includes(imageOption) ? imageOption : names[0] ?? "";
   }, [imageOption, optionMatrix]);
@@ -669,7 +689,10 @@ export function ProductForm({
     const derivedImages = [...allVariantImages];
 
     // Persist which option drives the image galleries (storefront reader contract:
-    // Product.propertyModules.images = [optionName]). Preserve any other modules.
+    // Product.propertyModules.images = [optionName]). An EMPTY array is the
+    // explicit "None" answer — distinct from the key being absent, which is what
+    // rows saved before this contract carry and what still falls back to the
+    // first option. Preserve any other modules.
     const propertyModules = {
       ...(product?.propertyModules ?? {}),
       images: imageDrivingOption ? [imageDrivingOption] : [],
@@ -1527,7 +1550,14 @@ export function ProductForm({
         >
           <VariantMediaTab
             options={options}
-            visualOptionName={imageDrivingOption}
+            /* The sentinel has to survive the trip: `imageDrivingOption` is ""
+               for both "None" and "no options", and the tab needs to tell them
+               apart to know whether to offer the controller at all. */
+            visualOptionName={
+              imageOption === IMAGE_CONTROLLER_NONE
+                ? IMAGE_CONTROLLER_NONE
+                : imageDrivingOption
+            }
             onVisualOptionChange={setImageOption}
             state={visualGallery}
             onChange={setVisualGallery}

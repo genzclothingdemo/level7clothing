@@ -56,6 +56,74 @@ import { formatINR, normalisePhone } from "@/lib/utils";
 import type { BadgeTone } from "@/components/admin/order-ui";
 
 /* ------------------------------------------------------------------ */
+/*  Customer or guest                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The owner's split: *"customer me 2 part rakho — actual customer jisne login
+ * kiya hai (iska id hai), and one is just interested type jo mini login se
+ * contact diye … if guest do login then merge it to customer, remove from
+ * guest"*.
+ *
+ * So there are exactly two groups, and the line between them is one question:
+ * **is there a `User` row?**
+ *
+ * ── Why this is a presentation split and not a second identity rule ──────────
+ *
+ * This is the whole point of putting it here. `kind` is read off
+ * `accounts.length` on a record the merge has already produced — it is not a
+ * second pass over the tables and it never asks its own questions about email
+ * or phone. That is what makes the owner's last sentence true *for free*:
+ *
+ *   a guest gives their email at add-to-cart  → a `Lead` with that email
+ *   → no `User` → one record, `kind: "guest"`
+ *
+ *   that person signs up with the same email  → a `User` with that email
+ *   → the token rule joins them into **one** bucket (rule 1 at the top of this
+ *     file) → that bucket now has an account → `kind: "customer"`
+ *
+ * Nothing moves them; there was never a second row to move. The guest list is
+ * `records.filter(r => r.kind === "guest")`, so they leave it in the same read
+ * that puts them in the other one. Had this been a "guests = leads without a
+ * matching user" query, the two lists would have had two different ideas of
+ * who a person is, and the totals would have drifted the first time somebody
+ * signed up with a differently-cased address.
+ *
+ * `splitCustomers()` below is the only partition. Both lists, both counts and
+ * both empty states come from it.
+ */
+export const CUSTOMER_KINDS = ["customer", "guest"] as const;
+
+export type CustomerKind = (typeof CUSTOMER_KINDS)[number];
+
+export function isCustomerKind(v: string): v is CustomerKind {
+  return (CUSTOMER_KINDS as readonly string[]).includes(v);
+}
+
+export const CUSTOMER_KIND_LABEL: Record<CustomerKind, string> = {
+  customer: "Customers",
+  guest: "Guests",
+};
+
+export const CUSTOMER_KIND_HELP: Record<CustomerKind, string> = {
+  customer:
+    "Has an account on the store. Anything they did before signing up — guest orders, carts, chats — is folded into the same record, matched on email then phone.",
+  guest:
+    "No account. We know them only from a contact detail they left: the mini sign-up at add-to-cart, a guest checkout, or a chat. The moment they sign up with the same email or phone they move to Customers and take their history with them.",
+};
+
+/** The one partition. Every count and every list on the screen uses it. */
+export function splitCustomers(records: CustomerRecord[]): {
+  customers: CustomerRecord[];
+  guests: CustomerRecord[];
+} {
+  const customers: CustomerRecord[] = [];
+  const guests: CustomerRecord[] = [];
+  for (const r of records) (r.kind === "customer" ? customers : guests).push(r);
+  return { customers, guests };
+}
+
+/* ------------------------------------------------------------------ */
 /*  Status                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -63,6 +131,13 @@ import type { BadgeTone } from "@/components/admin/order-ui";
  * Derived on every read, never stored. A column would need writing from
  * checkout, signup, the lead capture and the chat resolver, and would be wrong
  * the moment any one of them was missed.
+ *
+ * Status is finer than `kind` and the two are not redundant: inside Customers
+ * it separates the ones who have bought from the ones who only registered, and
+ * inside Guests it separates a guest who checked out from one who only ever
+ * filled a cart. Note that `registered` can only appear under Customers and
+ * `interested` only under Guests — `ordered` is the one that appears in both,
+ * which is exactly why the split is worth having.
  */
 export const CUSTOMER_STATUSES = ["ordered", "registered", "interested"] as const;
 
@@ -272,6 +347,12 @@ export type CustomerRecord = {
   emails: string[];
   phone: string | null;
   phones: string[];
+  /**
+   * Customer (has a `User`) or guest (does not). Read off `accounts.length`
+   * after the merge — see `CUSTOMER_KINDS` for why it is derived here rather
+   * than asked again by whoever is drawing a list.
+   */
+  kind: CustomerKind;
   status: CustomerStatus;
   accounts: CustomerAccount[];
   orders: CustomerOrder[];
@@ -978,6 +1059,11 @@ function buildRecord(b: Bucket, tokens: string[]): CustomerRecord {
   if (b.returns.length) sourceParts.push(plural(b.returns.length, "return"));
   if (b.wishlist.length) sourceParts.push(plural(b.wishlist.length, "wishlist save"));
 
+  // One question, asked once, of the merged record. Everything downstream —
+  // the two lists, their counts, their empty states — reads this and never
+  // looks at the tables again.
+  const kind: CustomerKind = accounts.length ? "customer" : "guest";
+
   const status: CustomerStatus = orders.length
     ? "ordered"
     : accounts.length
@@ -999,6 +1085,7 @@ function buildRecord(b: Bucket, tokens: string[]): CustomerRecord {
     emails,
     phone: primaryPhone,
     phones,
+    kind,
     status,
     accounts,
     orders,

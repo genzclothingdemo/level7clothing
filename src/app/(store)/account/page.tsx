@@ -163,6 +163,7 @@ export default async function AccountPage({
       payment: {
         subtotal: order.subtotal,
         shipping: order.shipping,
+        paymentFee: order.paymentFee,
         discountTotal: order.discountTotal,
         couponCode: order.couponCode,
         total: order.total,

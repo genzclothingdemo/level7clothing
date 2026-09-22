@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { runAutomationTrigger } from "@/lib/automation";
 import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
 import { sendLeadEmail } from "@/lib/email";
@@ -38,6 +39,19 @@ export async function POST(req: Request) {
     } catch (err) {
       console.error("[leads] email failed:", err);
     }
+
+    // Automation rules bound to `cart.abandoned`.
+    //
+    // Fired when the lead is *created*, not when a cart is later judged
+    // abandoned — there is no such event on a serverless host. The rule's
+    // `delayMinutes` is what makes it a nudge: a 24h rule queues an
+    // `AutomationJob` for tomorrow, and the engine re-checks before sending, so
+    // somebody who orders in the meantime is not chased for a cart they
+    // emptied. Enqueue is idempotent on (rule, subject), so a shopper adding
+    // three items does not get three nudges.
+    await runAutomationTrigger("cart.abandoned", { id: lead.id }).catch((err) =>
+      console.error("[leads] automation trigger failed:", err)
+    );
 
     return NextResponse.json({ ok: true, id: lead.id });
   } catch (err) {

@@ -155,9 +155,18 @@ async function buildShipmentInput(
  * Stage a NimbusPost DRAFT order for an order (called when an order is
  * confirmed). Best-effort: silently skips when shipping is off/unconfigured or
  * a draft/AWB already exists. Never throws to the caller's happy path.
+ *
+ * `courier` is the carrier the draft is *intended* for. NimbusPost drafts carry
+ * no carrier — that is what makes them free — so this is recorded on our row
+ * and read later by `shipDraft`. Passing it here rather than making the caller
+ * remember to call `chooseCourierForOrder` separately is what keeps
+ * "draft **with this courier**" one act: a draft staged with no carrier and a
+ * carrier chosen against no draft are both half-states an operator then has to
+ * notice.
  */
 export async function createDraftForOrder(
-  orderId: string
+  orderId: string,
+  courier?: { id: string | null; name: string | null } | null
 ): Promise<{ ok: boolean; skipped?: string; nimbusOrderId?: string; error?: string }> {
   const settings = await getSettings();
   if (!settings.nimbusEnabled) return { ok: false, skipped: "shipping disabled" };
@@ -185,17 +194,30 @@ export async function createDraftForOrder(
     const history = Array.isArray(order.statusHistory)
       ? (order.statusHistory as unknown as { status: string; note?: string; at: string }[])
       : [];
+    const carrier = courier?.name?.trim() || null;
     history.push({
       status: order.status,
       // The collection line matters here: it is the only place a human can
       // check, before any money moves, that the courier will be asked for the
       // right amount.
-      note: `Draft shipment created in NimbusPost — ready to dispatch. ${built.collection.reason}`,
+      note: `Draft shipment created in NimbusPost${carrier ? ` for ${carrier}` : ""} — waiting to be booked. ${built.collection.reason}`,
       at: new Date().toISOString(),
     });
     await prisma.order.update({
       where: { id: orderId },
-      data: { nimbusShipmentId: nimbusOrderId, statusHistory: history as unknown as object[] },
+      data: {
+        nimbusShipmentId: nimbusOrderId,
+        // Only written when a courier was actually named. `undefined` leaves
+        // the column alone; writing `null` here would wipe a choice the admin
+        // had already made and then re-drafted around.
+        ...(courier
+          ? {
+              nimbusCourierId: courier.id ?? null,
+              nimbusCourierName: courier.name ?? null,
+            }
+          : {}),
+        statusHistory: history as unknown as object[],
+      },
     });
     return { ok: true, nimbusOrderId };
   } catch (err) {
@@ -541,7 +563,7 @@ export async function dispatchOrder(orderId: string): Promise<DispatchResult> {
 /**
  * Book this order **now**, with the courier the admin just chose.
  *
- * The admin-facing half of "Ship now". It is still draft-first — it simply does
+ * The admin-facing half of the rates panel's Book button. Still draft-first — it simply does
  * not make the human press twice for something they have already decided.
  * `dispatchOrder` is called at most twice:
  *
@@ -551,7 +573,7 @@ export async function dispatchOrder(orderId: string): Promise<DispatchResult> {
  * so the draft always exists in NimbusPost before the AWB does, and
  * `createShipment()` (the one-shot create-and-book) stays unused exactly as
  * CLAUDE.md requires. The difference from the old button is honesty: pressing
- * "Ship now" cannot leave you with a draft and a success toast.
+ * pressing Book cannot leave you with a draft and a success toast.
  *
  * **A failed booking leaves the draft intact.** `dispatchOrder` only writes on
  * success, so a wallet with ₹0.00 in it produces an error and an order that
@@ -564,7 +586,7 @@ export async function shipOrderNow(
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     // `nimbusShipmentId` is part of the gate's answer, not decoration: it is
-    // what separates "ready" (Ship now) from "staged" (Book the draft), and a
+    // what separates "ready" (draft or book) from "staged" (book only), and a
     // select that omits it hands the gate a half-truth.
     select: { status: true, trackingNumber: true, nimbusShipmentId: true },
   });
@@ -611,7 +633,17 @@ async function appendHistory(orderId: string, status: string, note: string) {
 
 export type ConfirmationPipelineResult =
   /** The documented default: an unbooked draft is waiting for a human. */
-  | { outcome: "drafted"; nimbusOrderId: string; message: string }
+  | {
+      outcome: "drafted";
+      nimbusOrderId: string;
+      /** The carrier the draft was staged for, picked off the live rates. */
+      courier?: string | null;
+      /** What that carrier quoted, in rupees. Null when rates were unavailable. */
+      quote?: number | null;
+      /** Why the carrier is not the one Settings asked for, when that happens. */
+      caveat?: string;
+      message: string;
+    }
   | {
       outcome: "booked";
       awb: string;
@@ -637,10 +669,21 @@ export type ConfirmationPipelineResult =
  *
  *   - `off`   — return immediately. Nothing is staged, nothing is booked, and
  *               the admin dispatches from the orders screen by hand.
- *   - `draft` — stage the unbooked NimbusPost draft and stop. No courier, no
- *               AWB, no wallet charge. **The default**, and the review gate
- *               CLAUDE.md records as deliberate.
- *   - `book`  — stage, then book. The only setting that spends money on its own.
+ *   - `draft` — stage the unbooked NimbusPost draft, **pick the courier off the
+ *               live rates and record it**, and stop. No AWB, no wallet charge.
+ *               **The default**, and the review gate CLAUDE.md records as
+ *               deliberate.
+ *   - `book`  — everything `draft` does, then book. The only setting that
+ *               spends money on its own.
+ *
+ * **The courier is chosen for `draft` as well as `book`**, and that is the
+ * difference between the three settings being three settings and being two.
+ * `draft` used to stage a carrier-less draft, so the order read as "something
+ * happened, unclear what": no carrier, no price, and the admin still had to
+ * open the rates to find out what booking it would cost. It now arrives with
+ * the cheapest (or pinned, or fastest) carrier already attached and its price
+ * in the history — the same decision `book` makes, stopped one step earlier.
+ * Choosing costs nothing: `serviceability` is a quote, not a booking.
  *
  * A booking that fails leaves the draft exactly where it was and reports the
  * error. It never writes `status: "shipped"`, and it records the failure in
@@ -702,28 +745,21 @@ export async function runConfirmationPipeline(
     };
   }
 
-  // Step 2 — stop here unless the admin explicitly opted into unattended
-  // booking. This is the default, and the whole review gate.
-  if (mode !== "book") {
-    if (!nimbusOrderId) {
-      return { outcome: "skipped", message: "A shipment is already staged for this order." };
-    }
-    return {
-      outcome: "drafted",
-      nimbusOrderId,
-      message: alreadyStaged
-        ? "A draft was already staged in NimbusPost."
-        : "Draft staged in NimbusPost — review it, then book to generate the AWB.",
-    };
-  }
-
-  // Step 3 — auto-ship is on. Choose the courier the admin asked for.
+  // Step 2 — choose the courier, for `draft` as much as for `book`.
   //
-  // A quote failure does NOT abort the booking. Serviceability is a separate,
-  // frequently flaky endpoint, and the admin has opted into unattended
-  // shipping; letting NimbusPost allocate is better than silently leaving a
-  // parcel unshipped. The caveat is reported so the choice is visible.
+  // This used to live below the `mode !== "book"` return, which is why a
+  // `draft` order arrived with no carrier and no price: the draft was staged
+  // and then the function went home. Quoting is `serviceability` — a price
+  // lookup, not a booking — so running it here costs nothing and spends
+  // nothing, and it is what turns "a draft exists" into "a draft exists, with
+  // a named carrier and its price, one press from an AWB".
+  //
+  // A quote failure does NOT abort anything. Serviceability is a separate and
+  // frequently flaky endpoint; for `draft` the admin picks the carrier by hand
+  // on the orders screen, and for `book` letting NimbusPost allocate beats
+  // silently leaving a parcel unshipped. Either way the caveat is reported.
   let caveat: string | undefined;
+  let chosenCourier: { name: string; total: number } | null = null;
   const quote = await getCourierOptionsForOrder(orderId).catch(() => ({
     ok: false as const,
     error: "Courier rates could not be fetched.",
@@ -732,6 +768,7 @@ export async function runConfirmationPipeline(
   if (quote.ok) {
     const chosen = pickCourier(quote.options, pipeline.autoShipCourier);
     if (chosen) {
+      chosenCourier = { name: chosen.name, total: chosen.total };
       await chooseCourierForOrder(orderId, chosen.courierId, chosen.name).catch(() => {});
       // A pinned courier that isn't quoting for this parcel falls back to
       // cheapest rather than leaving the parcel unshipped — but silently
@@ -742,11 +779,44 @@ export async function runConfirmationPipeline(
         chosen.name.trim().toLowerCase() !==
           String(pipeline.autoShipCourier).trim().toLowerCase()
       ) {
-        caveat = `${pipeline.autoShipCourier} is pinned in Settings but did not quote for this parcel, so it went with ${chosen.name} instead.`;
+        caveat = `${pipeline.autoShipCourier} is pinned in Settings but did not quote for this parcel, so ${chosen.name} was chosen instead.`;
       }
     }
   } else {
-    caveat = `Could not price the couriers (${quote.error}), so NimbusPost allocated one instead of the ${courierChoiceLabel(pipeline.autoShipCourier).toLowerCase()} option.`;
+    caveat =
+      mode === "book"
+        ? `Could not price the couriers (${quote.error}), so NimbusPost allocated one instead of the ${courierChoiceLabel(pipeline.autoShipCourier).toLowerCase()} option.`
+        : `Could not price the couriers (${quote.error}), so no carrier was pre-picked — choose one on the order before you book it.`;
+  }
+
+  // Step 3 — stop here unless the admin explicitly opted into unattended
+  // booking. This is the default, and the whole review gate.
+  if (mode !== "book") {
+    if (!nimbusOrderId) {
+      return { outcome: "skipped", message: "A shipment is already staged for this order." };
+    }
+    // Written into the history so the pre-pick is auditable on the order
+    // itself, not only in a toast that has already gone.
+    if (chosenCourier && !alreadyStaged) {
+      await appendHistory(
+        orderId,
+        "confirmed",
+        `${courierChoiceLabel(pipeline.autoShipCourier)} courier pre-picked for this draft: ${chosenCourier.name} at ₹${chosenCourier.total}. Nothing has been charged — booking generates the AWB.`
+      );
+    }
+    const picked = chosenCourier
+      ? ` ${chosenCourier.name} is pre-picked at ₹${chosenCourier.total}.`
+      : "";
+    return {
+      outcome: "drafted",
+      nimbusOrderId,
+      courier: chosenCourier?.name ?? null,
+      quote: chosenCourier?.total ?? null,
+      caveat,
+      message: alreadyStaged
+        ? `A draft was already staged in NimbusPost.${picked}`
+        : `Draft staged in NimbusPost — waiting for you to book it.${picked}`,
+    };
   }
 
   // Step 4 — book. This is the call that spends the wallet.

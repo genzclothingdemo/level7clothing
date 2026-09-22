@@ -55,6 +55,7 @@ import {
   updateOrderStatus,
   updatePaymentStatus,
 } from "@/app/actions/admin";
+import { adminOrderState } from "@/lib/orders-pipeline";
 import { useSettings } from "@/context/settings";
 
 /** Re-exported so the page keeps importing the type from here. */
@@ -190,11 +191,16 @@ function shipmentMeta(o: AdminOrder): {
   }
   if (o.nimbusShipmentId) {
     return {
-      text: "Draft staged",
+      // The carrier is named when one has been picked — by the confirmation
+      // pipeline on `draft`/`book`, or by hand in the rates panel. "Draft
+      // staged" on its own is the line that reads as "something happened,
+      // unclear what".
+      text: o.nimbusCourierName ? `Draft · ${o.nimbusCourierName}` : "Draft staged",
       tone: "info",
       icon: Truck,
-      title:
-        "An unbooked draft is waiting in NimbusPost. No courier, no AWB and no wallet charge until you book it.",
+      title: o.nimbusCourierName
+        ? `An unbooked draft is waiting in NimbusPost, set to go with ${o.nimbusCourierName}. No AWB and no wallet charge until you book it.`
+        : "An unbooked draft is waiting in NimbusPost. No courier, no AWB and no wallet charge until you book it.",
     };
   }
   return {
@@ -388,6 +394,10 @@ function OrderRow({
 }) {
   const pay = paymentMeta(o);
   const ship = shipmentMeta(o);
+  // The operator's sentence — the stored status composed with the shipment
+  // stage and the courier's last scan. One pure function, shared with the
+  // tracking panel, so the column and the card cannot word it differently.
+  const state = adminOrderState(o);
   const rw = returnWindowState(o, returnWindowDays);
   const custom = isCustom(o);
   const itemCount = o.items.reduce((n, i) => n + i.quantity, 0);
@@ -486,7 +496,18 @@ function OrderRow({
             column stop reading as a column. */}
         <span className={CELL}>
           <span className="block">
-            <StatusPill status={o.status} />
+            <StatusPill status={o.status} title={state.line} />
+          </span>
+          {/* The half `Order.status` cannot say. "Confirmed" alone covers both
+              "nothing has been staged" and "a draft is waiting for you", and
+              "Shipped" covers both "the AWB exists and the parcel is still
+              here" and "it is out for delivery" — this is the clause that
+              tells them apart. */}
+          <span
+            className="mt-0.5 block text-[10px] leading-tight text-muted-foreground"
+            title={state.line}
+          >
+            {state.detail}
           </span>
           {(custom || o.returnCount > 0) && (
             <span className="mt-1 flex flex-wrap gap-1">{flags}</span>
@@ -565,6 +586,13 @@ function OrderRow({
               {itemCount} item{itemCount === 1 ? "" : "s"}
             </span>
             <span className="min-w-0 max-w-full truncate">{ship.text}</span>
+          </span>
+
+          {/* Same clause as the desktop Status column. The shipment badge is
+              `hidden xl:block`, so without this a phone shows the status word
+              and nothing about where the parcel has got to. */}
+          <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+            {state.detail}
           </span>
         </button>
 
@@ -1001,7 +1029,15 @@ function StatusControls({
           if (shipment.caveat) toast.warning(shipment.caveat, { duration: 10000 });
           break;
         case "drafted":
-          toast.success("Order confirmed", { description: shipment.message });
+          toast.success("Order confirmed", {
+            description: shipment.message,
+            duration: 9000,
+          });
+          // A pinned courier that did not quote, or rates that failed
+          // altogether, changes which carrier this draft is waiting for —
+          // which is exactly the sort of thing that is only noticed on an
+          // invoice if nobody says it out loud.
+          if (shipment.caveat) toast.warning(shipment.caveat, { duration: 10000 });
           break;
         case "skipped":
           toast.success("Order confirmed", { description: shipment.message });

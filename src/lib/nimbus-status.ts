@@ -10,6 +10,20 @@
  *
  * No Prisma, no server-only imports, so both the route handler and the library
  * can share it.
+ *
+ * ## Two readings of the same row, not two tables
+ *
+ * Every row now carries **both** what the event means to an order (`status`)
+ * and where the parcel physically is (`phase`). That second column is what the
+ * admin's and the customer's wording are built from — *"AWB booked, waiting for
+ * pickup"* and *"waiting for pickup"* are the same fact said twice, and both
+ * have to come out of this table or they will drift from it exactly the way the
+ * two copies of the status map did.
+ *
+ * `status` is deliberately coarse — five values, because that is what the
+ * `Order.status` column stores. `phase` is deliberately finer — it is display
+ * only and writes nothing, so it can distinguish "booked but not collected"
+ * from "on a van" without inventing an order status for each.
  */
 
 /** Order statuses this app recognises. */
@@ -20,29 +34,58 @@ export type OrderStatus =
   | "delivered"
   | "cancelled";
 
-const STATUS_MAP: Record<string, OrderStatus> = {
+/**
+ * Where the parcel actually is, as the courier describes it.
+ *
+ * Read only — nothing is persisted from this. It exists because `Order.status`
+ * cannot tell "an AWB was generated an hour ago and nobody has collected it"
+ * apart from "it is on a van two cities away": both are stored as `shipped`,
+ * and telling a customer "Shipped" for the first is how a store gets asked
+ * "where is it?" by someone whose parcel is still on its own shelf.
+ */
+export type CourierPhase =
+  /** A courier is allocated / manifested. Nothing has been collected. */
+  | "scheduled"
+  /** Collected from us. The journey has started. */
+  | "picked"
+  /** Moving between hubs. */
+  | "transit"
+  /** With the rider, today. */
+  | "out"
+  /** A delivery was attempted and failed. Still the courier's parcel. */
+  | "attempted"
+  | "delivered"
+  /** Coming back to us — delivery gave up, or the customer refused it. */
+  | "rto"
+  /** The shipment is dead: cancelled, or the pickup was called off. */
+  | "cancelled";
+
+type StatusRow = { status: OrderStatus; phase: CourierPhase };
+
+const STATUS_MAP: Record<string, StatusRow> = {
   // ---- Pickup ----
-  "pickup scheduled": "confirmed",
+  "pickup scheduled": { status: "confirmed", phase: "scheduled" },
   // A completed pickup means the parcel has left us. The webhook used to call
   // this "confirmed", which silently moved orders *backwards* from shipped.
-  "pickup done": "shipped",
-  "picked up": "shipped",
-  "manifest created": "confirmed",
-  "pickup cancelled": "pending",
+  "pickup done": { status: "shipped", phase: "picked" },
+  "picked up": { status: "shipped", phase: "picked" },
+  "manifest created": { status: "confirmed", phase: "scheduled" },
+  "pickup cancelled": { status: "pending", phase: "cancelled" },
 
   // ---- In transit ----
-  "in transit": "shipped",
-  "reached destination": "shipped",
-  "out for delivery": "shipped",
-  "delivery failed": "shipped", // attempted, still in the courier's hands
+  "in transit": { status: "shipped", phase: "transit" },
+  "reached destination": { status: "shipped", phase: "transit" },
+  "out for delivery": { status: "shipped", phase: "out" },
+  // Attempted, still in the courier's hands.
+  "delivery failed": { status: "shipped", phase: "attempted" },
 
   // ---- Delivered ----
-  delivered: "delivered",
+  delivered: { status: "delivered", phase: "delivered" },
 
   // ---- Return to origin ----
-  "rto initiated": "shipped",
-  "rto in transit": "shipped",
-  "rto delivered": "cancelled",
+  "rto initiated": { status: "shipped", phase: "rto" },
+  "rto in transit": { status: "shipped", phase: "rto" },
+  "rto delivered": { status: "cancelled", phase: "rto" },
 
   // ---- Cancellation ----
   //
@@ -51,17 +94,23 @@ const STATUS_MAP: Record<string, OrderStatus> = {
   // undefined, the handler treated it as "nothing to change", and the order
   // sat at confirmed forever. Both British and American spellings, because
   // the payloads use them interchangeably.
-  cancelled: "cancelled",
-  canceled: "cancelled",
-  "order cancelled": "cancelled",
-  "order canceled": "cancelled",
-  "shipment cancelled": "cancelled",
-  "shipment canceled": "cancelled",
-  "cancellation requested": "cancelled",
-  "cancelled by seller": "cancelled",
-  "cancelled by customer": "cancelled",
-  returned: "cancelled",
+  cancelled: { status: "cancelled", phase: "cancelled" },
+  canceled: { status: "cancelled", phase: "cancelled" },
+  "order cancelled": { status: "cancelled", phase: "cancelled" },
+  "order canceled": { status: "cancelled", phase: "cancelled" },
+  "shipment cancelled": { status: "cancelled", phase: "cancelled" },
+  "shipment canceled": { status: "cancelled", phase: "cancelled" },
+  "cancellation requested": { status: "cancelled", phase: "cancelled" },
+  "cancelled by seller": { status: "cancelled", phase: "cancelled" },
+  "cancelled by customer": { status: "cancelled", phase: "cancelled" },
+  returned: { status: "cancelled", phase: "rto" },
 };
+
+function lookup(raw: string | null | undefined): StatusRow | null {
+  const key = String(raw ?? "").trim().toLowerCase();
+  if (!key) return null;
+  return STATUS_MAP[key] ?? null;
+}
 
 /**
  * Map a raw courier status to ours, or `null` when we don't recognise it.
@@ -70,9 +119,18 @@ const STATUS_MAP: Record<string, OrderStatus> = {
  * defaulted to something would be far worse than one that did nothing.
  */
 export function mapNimbusStatus(raw: string | null | undefined): OrderStatus | null {
-  const key = String(raw ?? "").trim().toLowerCase();
-  if (!key) return null;
-  return STATUS_MAP[key] ?? null;
+  return lookup(raw)?.status ?? null;
+}
+
+/**
+ * Where the parcel is, off the same row `mapNimbusStatus` reads.
+ *
+ * `null` for an unrecognised scan, for the same reason: the wording then falls
+ * back to what the order's own status can prove, rather than claiming a
+ * position in the journey nobody told us about.
+ */
+export function courierPhase(raw: string | null | undefined): CourierPhase | null {
+  return lookup(raw)?.phase ?? null;
 }
 
 /** True if the courier is telling us this shipment is dead. */

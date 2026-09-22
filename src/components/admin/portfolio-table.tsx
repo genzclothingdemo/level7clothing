@@ -73,6 +73,10 @@ export type PortfolioRow = {
   thumbnail: string | null;
   /** Decided on the server: `next/image` can only serve allow-listed hosts. */
   thumbnailOptimisable: boolean;
+  /** Which shelf on /portfolio, resolved by `sectionOf` on the server. */
+  section: string;
+  /** That shelf's label, resolved server-side — `lib/portfolio` imports Prisma. */
+  sectionLabel: string;
   productName: string | null;
   productSlug: string | null;
   /** Set when `productId` points at a product that no longer exists. */
@@ -231,7 +235,7 @@ export function PortfolioTable({
         <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
           {filtered
             ? "Clear a filter to see the rest of the list."
-            : "Add a reel, a blog post, a collaboration or a bulk-order job. Anything with a product attached shows on the “From our products” tab."}
+            : "Add a reel, a milestone, a customer’s words, a collaboration or a bulk-order job. Pick its section on the piece, or let the tags decide."}
         </p>
       </div>
     );
@@ -378,6 +382,10 @@ export function PortfolioTable({
                 </p>
 
                 <p className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                  {/* The shelf is the first thing to know about a piece now —
+                      it is what the storefront groups on. */}
+                  <span className="text-accent">{row.sectionLabel}</span>
+                  <span aria-hidden>·</span>
                   <span>{KIND_LABEL[row.kind]}</span>
                   <span aria-hidden>·</span>
                   <span className="tabular-nums">#{row.sortOrder}</span>

@@ -2,8 +2,9 @@
 
 import { z } from "zod";
 import type { Order } from "@prisma/client";
+import { runAutomationTrigger } from "@/lib/automation";
 import { prisma } from "@/lib/prisma";
-import { getSettings } from "@/lib/settings";
+import { getPaymentFees, getSettings } from "@/lib/settings";
 import { sendOrderEmails } from "@/lib/email";
 import { getUserSession, setUserCookie } from "@/lib/user-auth";
 
@@ -33,7 +34,48 @@ import type {
   PaymentMode,
 } from "@/lib/types";
 
-// Maps the stored paymentMethod label ↔ the product's PaymentMode.
+/**
+ * The three modes checkout offers, and the only three it may ever return.
+ *
+ * Two instruments sit underneath them — **cash** and **online (Razorpay)** —
+ * and each mode is one arrangement of the two:
+ *
+ *   prepaid — the whole total online, nothing at the door
+ *   partial — an online advance now, the remainder in cash on delivery
+ *   cod     — the whole total in cash on delivery
+ *
+ * "Direct" ("no online payment — arrange with the owner") used to be a fourth.
+ * It is **gone from checkout**: it was not a way of paying, it was a way of
+ * deferring the question, and it was also the fallback the empty case dropped
+ * to — so switching every real method off silently turned every order into a
+ * pay-the-owner request rather than closing checkout. The stored value is kept
+ * readable (see `METHOD_TO_MODE`), but nothing offers it and
+ * `resolveAllowedModes` can no longer return it.
+ *
+ * **Not exported, and it must not be.** This file carries the `"use server"`
+ * directive, and such a module may only export async functions — exporting this
+ * array made every Server Action in it fail at runtime with
+ *
+ *   A "use server" file can only export async functions, found object.
+ *
+ * which `tsc` and the build both pass cleanly, exactly like the two RSC traps
+ * CLAUDE.md records. `checkout-client.tsx` keeps its own copy of the list;
+ * duplicating three strings is the cheap half of that trade.
+ */
+const CHECKOUT_MODES = ["prepaid", "partial", "cod"] as const;
+
+type CheckoutMode = (typeof CHECKOUT_MODES)[number];
+
+/**
+ * Maps the stored `Order.paymentMethod` label ↔ the product's `PaymentMode`.
+ *
+ * **`Direct` stays in this table on purpose.** Orders placed before the mode
+ * was withdrawn still hold the string `"Direct"`, and this is the map every
+ * reader goes through — dropping the row would make those rows fall to the
+ * `?? "cod"` default and start claiming cash was collected at the door on an
+ * order where nothing ever was. Reading it is fine; nothing writes it, because
+ * `inputSchema` no longer accepts it.
+ */
 const METHOD_TO_MODE: Record<string, PaymentMode> = {
   Razorpay: "prepaid",
   COD: "cod",
@@ -41,27 +83,30 @@ const METHOD_TO_MODE: Record<string, PaymentMode> = {
   Direct: "direct",
 };
 
-type MethodAvailability = {
-  prepaid: boolean;
-  cod: boolean;
-  partial: boolean;
-  direct: boolean;
-};
+type MethodAvailability = Record<CheckoutMode, boolean>;
 
-/** Which modes are usable for this cart = intersection of products, then globals. */
+/**
+ * Which modes are usable for this cart = intersection of the products, then the
+ * store-wide toggles.
+ *
+ * **There is no fallback, and that is the fix.** This used to return
+ * `["direct"]` when the intersection came out empty, which meant a store with
+ * every method switched off did not close checkout — it quietly reinterpreted
+ * every order as "we'll sort the money out later". An empty list is the honest
+ * answer: `placeOrder` refuses any mode not in it, and the checkout page says
+ * so instead of offering an option nobody chose to offer.
+ */
 function resolveAllowedModes(
   products: { paymentModes: string[] }[],
   avail: MethodAvailability
-): PaymentMode[] {
-  const all: PaymentMode[] = ["prepaid", "cod", "partial", "direct"];
-  let modes = all.filter((m) =>
-    products.every((p) =>
-      (p.paymentModes?.length ? p.paymentModes : ["prepaid", "cod"]).includes(m)
-    )
+): CheckoutMode[] {
+  return CHECKOUT_MODES.filter(
+    (m) =>
+      avail[m] &&
+      products.every((p) =>
+        (p.paymentModes?.length ? p.paymentModes : ["prepaid", "cod"]).includes(m)
+      )
   );
-  modes = modes.filter((m) => avail[m]);
-  // Never leave the cart with no way to check out.
-  return modes.length ? modes : ["direct"];
 }
 
 /** Global (store-wide) availability of each method, combining toggles + config. */
@@ -70,17 +115,37 @@ function methodAvailability(
     codEnabled: boolean;
     prepaidEnabled: boolean;
     partialEnabled: boolean;
-    directEnabled: boolean;
     razorpayEnabled: boolean;
   }
 ): MethodAvailability {
+  // Both online modes need a working gateway: prepaid IS the online charge, and
+  // partial's advance leg has to be taken online too.
   const razorpay = settings.razorpayEnabled && isRazorpayConfigured();
   return {
     prepaid: settings.prepaidEnabled && razorpay,
     partial: settings.partialEnabled && razorpay,
     cod: settings.codEnabled,
-    direct: settings.directEnabled,
   };
+}
+
+/**
+ * What the store adds for handling cash on this order, in whole rupees.
+ *
+ * Taking money at the door is not free — NimbusPost charges a COD collection
+ * fee, and a part-paid order still has a cash leg — so the two amounts are
+ * settings rather than constants, and `0` (the default) means "absorb it".
+ * Prepaid never carries one: there is no cash to collect.
+ *
+ * The result is frozen onto `Order.paymentFee` at checkout, because the setting
+ * can change and a past order still has to add up.
+ */
+function paymentFeeFor(
+  mode: PaymentMode,
+  fees: { codFeeAmount: number; partialFeeAmount: number }
+): number {
+  const raw =
+    mode === "cod" ? fees.codFeeAmount : mode === "partial" ? fees.partialFeeAmount : 0;
+  return Number.isFinite(raw) ? Math.max(0, Math.round(raw)) : 0;
 }
 
 const inputSchema = z.object({
@@ -92,7 +157,9 @@ const inputSchema = z.object({
   state: z.string().min(2, "Enter your state"),
   pincode: z.string().min(4, "Enter your pincode"),
   note: z.string().optional(),
-  paymentMethod: z.enum(["COD", "Razorpay", "Partial", "Direct"]).default("COD"),
+  // Three modes, three labels. "Direct" is deliberately absent: it can still be
+  // read off an old order, but nothing may create a new one.
+  paymentMethod: z.enum(["COD", "Razorpay", "Partial"]).default("COD"),
   visitorId: z.string().optional(),
   couponCode: z.string().optional(),
   items: z
@@ -286,16 +353,30 @@ export async function placeOrder(input: PlaceOrderInput) {
     };
   }
 
-  const total = Math.max(0, subtotal + shipping - discountTotal);
-
   // ---- Resolve the chosen mode against the product rules + global toggles. ----
   const allowedModes = resolveAllowedModes(products, methodAvailability(settings));
-  if (!allowedModes.includes(mode)) {
+  if (allowedModes.length === 0) {
+    // No fallback any more. Saying so is the whole point — see
+    // `resolveAllowedModes`.
+    return {
+      ok: false as const,
+      error:
+        "No payment method is available for these items right now. Please contact us and we'll help you order.",
+    };
+  }
+  if (!(CHECKOUT_MODES as readonly PaymentMode[]).includes(mode) ||
+      !allowedModes.includes(mode as CheckoutMode)) {
     return {
       ok: false as const,
       error: "That payment option isn't available for these items. Please pick another.",
     };
   }
+
+  // ---- The cash-handling fee, fixed onto this order. ----
+  // Added to the total rather than netted off anything, and stored, so a later
+  // change to the setting cannot rewrite what this customer was charged.
+  const paymentFee = paymentFeeFor(mode, await getPaymentFees());
+  const total = Math.max(0, subtotal + shipping + paymentFee - discountTotal);
 
   // Advance (partial) = sum of each line's advancePercent of its line total.
   const productById = new Map(products.map((p) => [p.id, p]));
@@ -314,9 +395,11 @@ export async function placeOrder(input: PlaceOrderInput) {
     }
   }
 
-  // What we charge online now vs. what remains for delivery.
+  // What we charge online now vs. what remains for delivery. The cash-handling
+  // fee is inside `total`, so it rides on the leg that is actually collected in
+  // cash — the balance on a part-paid order, the whole amount on a COD one.
   const onlineCharge = mode === "prepaid" ? total : mode === "partial" ? advance : 0;
-  const balanceDue = total - onlineCharge; // prepaid→0, partial→remainder, cod/direct→total
+  const balanceDue = total - onlineCharge; // prepaid→0, partial→remainder, cod→total
   const needsPayment = onlineCharge > 0;
 
   const number = orderNumber();
@@ -349,6 +432,7 @@ export async function placeOrder(input: PlaceOrderInput) {
           items: validItems,
           subtotal,
           shipping,
+          paymentFee,
           discountTotal,
           couponCode: appliedCoupon?.code,
           total,
@@ -486,7 +570,7 @@ export async function placeOrder(input: PlaceOrderInput) {
     }
   }
 
-  // ---- COD / Direct: email, then let the pipeline decide. ----
+  // ---- COD (nothing to charge online): email, then let the pipeline decide. ----
   //
   // Nothing is confirmed here by hand. `autoConfirmOrder` applies the store's
   // `orderConfirmMode` (see lib/orders-pipeline.ts) and, when it does confirm,
@@ -506,6 +590,7 @@ export async function placeOrder(input: PlaceOrderInput) {
       items: validItems,
       subtotal,
       shipping,
+      paymentFee,
       total,
       paymentMethod: order.paymentMethod,
       note: order.note,
@@ -520,6 +605,14 @@ export async function placeOrder(input: PlaceOrderInput) {
     console.error("[orders] auto-confirm failed:", err)
   );
 
+  // Automation rules bound to `order.created`. Same rule as the line above: no
+  // automation may be the reason a completed checkout reports failure.
+  // `runAutomationTrigger` is written never to throw or reject, so this needs
+  // no catch of its own — the catch is belt and braces.
+  await runAutomationTrigger("order.created", { id: order.id }).catch((err) =>
+    console.error("[orders] automation trigger failed:", err)
+  );
+
   return { ok: true as const, orderNumber: order.orderNumber };
 }
 
@@ -529,8 +622,9 @@ export async function placeOrder(input: PlaceOrderInput) {
 // ---------------------------------------------------------------------------
 export async function getCheckoutContext(productIds: string[]) {
   const ids = Array.from(new Set(productIds)).filter(Boolean);
-  const [settings, products] = await Promise.all([
+  const [settings, fees, products] = await Promise.all([
     getSettings(),
+    getPaymentFees(),
     ids.length
       ? prisma.product.findMany({
           where: { id: { in: ids } },
@@ -541,6 +635,11 @@ export async function getCheckoutContext(productIds: string[]) {
 
   return {
     methods: methodAvailability(settings),
+    // Sent to the browser so the fee can be shown as its own named line in the
+    // order summary rather than folded invisibly into the total. The browser's
+    // copy is presentation only — `placeOrder` reads the setting again and
+    // recomputes the total from it.
+    fees: { cod: fees.codFeeAmount, partial: fees.partialFeeAmount },
     products: products.map((p) => ({
       id: p.id,
       paymentModes: (p.paymentModes?.length
@@ -677,6 +776,7 @@ export async function verifyRazorpayPayment(input: VerifyPaymentInput) {
       }[],
       subtotal: order.subtotal,
       shipping: order.shipping,
+      paymentFee: order.paymentFee,
       total: order.total,
       paymentMethod: order.paymentMethod,
       note: order.note,

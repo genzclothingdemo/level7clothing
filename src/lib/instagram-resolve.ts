@@ -1,5 +1,14 @@
 /**
- * Resolve one public Instagram permalink into the fields the portfolio needs.
+ * Resolve one public social permalink — Instagram or YouTube — into the fields
+ * the portfolio needs, with **no access token of any kind**.
+ *
+ * The filename still says Instagram because that is where this started and
+ * renaming it would churn three importers for nothing; the YouTube half lives
+ * at the bottom of the file and shares the same contract:
+ *
+ *   permalink in → `{ url, title, author, thumbnailUrl, embedUrl }` out, or
+ *   `null` when the link is not readable, in which case the caller saves it as
+ *   a plain link and nothing is lost.
  *
  * ── Why this exists, and what was measured ───────────────────────────────────
  *
@@ -43,7 +52,11 @@
  * Instagram serves anonymously.
  */
 
+/** Which site a resolved permalink came from. Drives the copy the admin sees. */
+export type SocialProvider = "instagram" | "youtube";
+
 export type ResolvedInstagramPost = {
+  provider: SocialProvider;
   /** Canonical permalink, normalised — no query string, no tracking token. */
   url: string;
   shortcode: string;
@@ -58,9 +71,22 @@ export type ResolvedInstagramPost = {
    * credit problem, so the caller is told and decides.
    */
   author: string | null;
-  /** **Expires.** Copy the bytes; never store this address. */
+  /**
+   * **Instagram: expires.** Copy the bytes; never store this address.
+   * **YouTube: permanent** (`i.ytimg.com`, which `next.config.ts` already
+   * allows), so a copy is a nicety there rather than a necessity.
+   */
   thumbnailUrl: string | null;
-  /** Stable — Instagram resolves the shortcode itself. Safe to store. */
+  /**
+   * Whether `thumbnailUrl` is safe to store as-is.
+   *
+   * This is the one real difference between the two providers and the caller
+   * has to know it: an Instagram CDN address is a four-day fuse, a YouTube
+   * poster frame is not. `importSocialPost` copies either way when it can, and
+   * falls back to storing the address only when this is true.
+   */
+  thumbnailExpires: boolean;
+  /** Stable — the provider resolves the id itself. Safe to store. */
   embedUrl: string;
 };
 
@@ -192,16 +218,195 @@ export async function resolveInstagramPost(
     if (!image && !title) return null;
 
     return {
+      provider: "instagram",
       url: instagramPermalink(shortcode),
       shortcode,
       title,
       author,
       thumbnailUrl: image,
+      thumbnailExpires: true,
       embedUrl: instagramEmbedUrl(shortcode),
     };
   } catch {
     return null;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  YouTube                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * YouTube is the easy half, and it is worth writing down *why* so nobody
+ * reaches for the Data API and an API key later:
+ *
+ * | what | how | key needed |
+ * |---|---|---|
+ * | title + channel | `youtube.com/oembed?url=…&format=json` | **no** |
+ * | poster frame | `i.ytimg.com/vi/<id>/<quality>.jpg` | **no** |
+ * | player | `youtube-nocookie.com/embed/<id>` | **no** |
+ *
+ * The oEmbed endpoint is public, unauthenticated and not rate-limited in any
+ * way that matters for an admin pressing a button. It fails for private and
+ * age-restricted videos, which is exactly when we want to fall back to a plain
+ * link anyway.
+ *
+ * Unlike Instagram, the poster frame does **not** expire: `i.ytimg.com/vi/**`
+ * is already in `next.config.ts`'s `remotePatterns`, so the address can be
+ * stored directly and still go through the image optimiser. We copy it into
+ * our own blob store anyway when one is configured — one fewer third party in
+ * the render path — but the fallback is a real fallback here, not a broken
+ * image four days later.
+ */
+
+/** The 11-char id out of any shape a person actually pastes. */
+export function youtubeId(raw: string): string | null {
+  if (!raw?.trim()) return null;
+  let u: URL;
+  try {
+    u = new URL(/^https?:\/\//i.test(raw.trim()) ? raw.trim() : `https://${raw.trim()}`);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.replace(/^www\./, "").toLowerCase();
+  const parts = u.pathname.split("/").filter(Boolean);
+
+  let id: string | null = null;
+  if (host === "youtu.be") id = parts[0] ?? null;
+  else if (host.endsWith("youtube.com") || host.endsWith("youtube-nocookie.com")) {
+    id =
+      u.searchParams.get("v") ??
+      (["shorts", "embed", "live", "v"].includes(parts[0]) ? parts[1] ?? null : null);
+  }
+  // An id is exactly 11 URL-safe characters. Checking is what stops
+  // `youtube.com/@level7` or `/results?search_query=…` resolving to nonsense.
+  return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+}
+
+/** `/shorts/<id>` is portrait; everything else is 16:9. */
+function youtubeVertical(raw: string): boolean {
+  try {
+    const u = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    return u.pathname.split("/").filter(Boolean)[0] === "shorts";
+  } catch {
+    return false;
+  }
+}
+
+export function youtubeEmbedUrl(id: string): string {
+  // `-nocookie` and no autoplay: nothing plays until the visitor asks, and the
+  // tracking cookie is not set just because a poster was rendered.
+  return `https://www.youtube-nocookie.com/embed/${id}?rel=0&modestbranding=1`;
+}
+
+/**
+ * Best poster that actually exists.
+ *
+ * `maxresdefault.jpg` is 1280×720 and is the one worth having, but it is only
+ * generated for videos uploaded at that resolution — for everything else it is
+ * a hard 404, not a downscale. `hqdefault.jpg` always exists. So we ask for
+ * the good one and fall back, which costs one HEAD request inside an admin
+ * button press and nothing at render time.
+ */
+async function bestYoutubePoster(id: string, signal: AbortSignal): Promise<string> {
+  const maxres = `https://i.ytimg.com/vi/${id}/maxresdefault.jpg`;
+  try {
+    const res = await fetch(maxres, { method: "HEAD", cache: "no-store", signal });
+    if (res.ok) return maxres;
+  } catch {
+    // Network hiccup or abort — the fallback below is always valid.
+  }
+  return `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
+}
+
+export async function resolveYouTubeVideo(
+  rawUrl: string,
+  { timeoutMs = 12_000 }: { timeoutMs?: number } = {}
+): Promise<ResolvedInstagramPost | null> {
+  const id = youtubeId(rawUrl);
+  if (!id) return null;
+
+  const vertical = youtubeVertical(rawUrl);
+  // Canonical watch URL — no playlist, no `t=`, no `si=` share token.
+  const canonical = vertical
+    ? `https://www.youtube.com/shorts/${id}`
+    : `https://www.youtube.com/watch?v=${id}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const oembed = `https://www.youtube.com/oembed?url=${encodeURIComponent(
+      canonical
+    )}&format=json`;
+
+    const [res, poster] = await Promise.all([
+      fetch(oembed, { cache: "no-store", signal: controller.signal }).catch(() => null),
+      bestYoutubePoster(id, controller.signal),
+    ]);
+
+    let title: string | null = null;
+    let author: string | null = null;
+
+    if (res?.ok) {
+      const json = (await res.json().catch(() => null)) as {
+        title?: string;
+        author_name?: string;
+      } | null;
+      const t = json?.title?.trim() ?? "";
+      title = t ? (t.length > 90 ? `${t.slice(0, 87).trimEnd()}…` : t) : null;
+      author = json?.author_name?.trim() || null;
+    }
+
+    // A private or age-gated video gives no oEmbed. The id is still valid and
+    // the poster still renders, so this is worth saving rather than refusing —
+    // the caller shows the plain-link warning and the owner types a title.
+    return {
+      provider: "youtube",
+      url: canonical,
+      shortcode: id,
+      title,
+      author,
+      thumbnailUrl: poster,
+      thumbnailExpires: false,
+      embedUrl: youtubeEmbedUrl(id),
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  One door                                                           */
+/* ------------------------------------------------------------------ */
+
+/** Which resolver, if any, can read this link. Cheap and synchronous. */
+export function socialProviderOf(rawUrl: string): SocialProvider | null {
+  if (instagramShortcode(rawUrl)) return "instagram";
+  if (youtubeId(rawUrl)) return "youtube";
+  return null;
+}
+
+/**
+ * Resolve whatever was pasted. One call site in the admin, one in the seeder.
+ *
+ * Deliberately **not** a `switch` in the caller: adding Vimeo later means a
+ * function here and a line in `socialProviderOf`, and nothing in the action or
+ * the form changes.
+ */
+export async function resolveSocialPost(
+  rawUrl: string,
+  options?: { timeoutMs?: number }
+): Promise<ResolvedInstagramPost | null> {
+  switch (socialProviderOf(rawUrl)) {
+    case "instagram":
+      return resolveInstagramPost(rawUrl, options);
+    case "youtube":
+      return resolveYouTubeVideo(rawUrl, options);
+    default:
+      return null;
   }
 }

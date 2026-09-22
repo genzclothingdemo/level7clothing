@@ -30,9 +30,9 @@ import { toast } from "sonner";
 import {
   AlertTriangle,
   Banknote,
-  BadgeIndianRupee,
   CreditCard,
   HandCoins,
+  KeyRound,
   Loader2,
   Truck,
   Upload,
@@ -78,14 +78,32 @@ import type { PaymentMode } from "@/lib/types";
  * starting values for the card this screen now hosts.
  */
 export type SettingsFacts = {
-  /** Razorpay key pair present in the environment. */
+  /**
+   * Razorpay key pair present in the environment. A **boolean and nothing
+   * else** — the values themselves must never cross to the browser, so the
+   * server answers "is it configured?" rather than handing over what it found.
+   */
   razorpayConfigured: boolean;
-  /** NimbusPost key pair present in the environment. */
+  /** NimbusPost key pair present in the environment. Same rule. */
   nimbusConfigured: boolean;
+  /**
+   * `NIMBUSPOST_WAREHOUSE_NAME` — the pickup warehouse's label in the
+   * NimbusPost dashboard. Not a secret (it is a name, not a credential), and
+   * worth showing: a mismatch here is the commonest reason a booking collects
+   * from the wrong address.
+   */
+  nimbusWarehouse: string;
   /** `SiteSettings.currency` — stored, and rendered by nothing. */
   currency: string;
-  /** Active products, and how many of them allow each payment mode. */
-  catalogue: { active: number; byMode: Record<PaymentMode, number> };
+  /**
+   * Active products, and how many of them allow each **offerable** payment
+   * mode. `"direct"` is not counted: nothing offers it, so a count would
+   * describe something that cannot happen.
+   */
+  catalogue: {
+    active: number;
+    byMode: Record<Exclude<PaymentMode, "direct">, number>;
+  };
   /**
    * The return & refund policy as `ReturnPolicyCard` wants it. The card owns
    * its own draft and its own save (`updateReturnDefaults`), so these are a
@@ -623,12 +641,27 @@ function CheckRow({
 }
 
 /* ------------------------------------------------------------------ */
-/*  3. Payments                                                        */
+/*  3. Payments & charges                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * **Three modes, two instruments.**
+ *
+ * The instruments are cash and online-through-Razorpay; the three modes are the
+ * only useful arrangements of them — all online, all cash, or one of each. A
+ * fourth used to sit here, "Customised order — pay to owner", and it has been
+ * removed from checkout entirely. It was never a way of paying: it was a way of
+ * deferring the question, and it was also the mode checkout silently fell back
+ * to when nothing else was available, which meant switching every real method
+ * off did not close checkout at all.
+ *
+ * That is why the "all off" warning below is phrased the way it is. There is no
+ * fallback now. Nothing available means nothing is offered, the shopper is told
+ * so, and the server refuses the order rather than reinterpreting it.
+ */
 const METHOD_META: {
-  mode: PaymentMode;
-  key: "codEnabled" | "prepaidEnabled" | "partialEnabled" | "directEnabled";
+  mode: Exclude<PaymentMode, "direct">;
+  key: "codEnabled" | "prepaidEnabled" | "partialEnabled";
   label: string;
   icon: React.ReactNode;
   needsGateway: boolean;
@@ -637,10 +670,18 @@ const METHOD_META: {
   {
     mode: "prepaid",
     key: "prepaidEnabled",
-    label: "Prepaid — pay online",
+    label: "Pay online in full",
     icon: <CreditCard className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />,
     needsGateway: true,
-    tip: "Paid in full before dispatch. The money has cleared before anything is packed, so this is the cheapest order you can take. Needs Razorpay on.",
+    tip: "Paid in full before dispatch. The money has cleared before anything is packed, so this is the cheapest order you can take — and the only one with no cash-handling cost. Needs Razorpay on.",
+  },
+  {
+    mode: "partial",
+    key: "partialEnabled",
+    label: "Part now, rest on delivery",
+    icon: <HandCoins className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />,
+    needsGateway: true,
+    tip: "A percentage online now, the balance to the courier. The advance is what commits a made-to-order piece and covers you if the parcel is refused — which is why it is never refunded. The percentage is per product, in the product editor. Needs Razorpay on.",
   },
   {
     mode: "cod",
@@ -650,43 +691,31 @@ const METHOD_META: {
     needsGateway: false,
     tip: "The courier collects the full amount at the door. No gateway involved, so it keeps working with Razorpay off — and it is the only method that can cost you a forward and a return leg with nothing collected.",
   },
-  {
-    mode: "partial",
-    key: "partialEnabled",
-    label: "Advance + COD",
-    icon: <HandCoins className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />,
-    needsGateway: true,
-    tip: "A percentage is paid online now and the balance to the courier. The advance is what commits a made-to-order piece to production. The per-product percentage is set in the product editor. Needs Razorpay on.",
-  },
-  {
-    mode: "direct",
-    key: "directEnabled",
-    label: "Customised order — pay to owner",
-    icon: <BadgeIndianRupee className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />,
-    needsGateway: false,
-    tip: "No online payment: the order is placed as a request and you arrange payment yourself. This is also the fallback checkout drops to when nothing else is available, so turning it off does not stop orders — it only removes the option from the list.",
-  },
 ];
 
 export function PaymentsSection({ f, set, isDirty, facts }: SectionProps) {
   const gatewayReady = f.razorpayEnabled && facts.razorpayConfigured;
 
   /** Mirrors `methodAvailability()` in actions/orders.ts. */
-  const effective: Record<PaymentMode, boolean> = {
+  const effective: Record<string, boolean> = {
     prepaid: f.prepaidEnabled && gatewayReady,
     partial: f.partialEnabled && gatewayReady,
     cod: f.codEnabled,
-    direct: f.directEnabled,
   };
   const liveCount = METHOD_META.filter((m) => effective[m.mode]).length;
-  /** The one combination the server refuses — see `updateSettings`. */
+  /** The one combination the save refuses — see `settings-form.tsx`. */
   const allOff = METHOD_META.every((m) => !f[m.key]);
+
+  const codFee = Number(f.codFeeAmount) || 0;
+  const partialFee = Number(f.partialFeeAmount) || 0;
+  const threshold = Number(f.freeShippingThreshold);
+  const thresholdSet = f.freeShippingThreshold.trim() !== "" && threshold > 0;
 
   return (
     <div className="space-y-4">
       {/* ---- Weekly: which methods are offered ---- */}
       <Card
-        title="Checkout methods"
+        title="How customers can pay"
         tip="Three things have to agree before a method is offered: this switch, the gateway (for the two online methods), and the product's own allowed methods. A method is shown only where all three say yes — which is why a switch here can remove an option that every product in the catalogue allows."
         aside={
           <Badge tone={liveCount === 0 ? "danger" : liveCount === 1 ? "warn" : "neutral"}>
@@ -721,23 +750,21 @@ export function PaymentsSection({ f, set, isDirty, facts }: SectionProps) {
         {/*
           Two different failures, and they are not the same rule.
 
-          All four switches off is refused by the server, so say so. Nothing
-          *live* is a state the server accepts — four switches on with the
-          gateway off leaves prepaid and partial hidden — and it deserves a
-          warning rather than a block, because it is a legitimate way to run
-          a made-to-order store.
+          All three switches off is refused on save, so say so. Nothing *live*
+          is a state the save accepts — three switches on with the gateway off
+          leaves only cash — and it deserves a warning rather than a block.
         */}
         {allOff ? (
           <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5">
             <p className="flex items-start gap-1.5 text-xs font-medium text-danger">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-              <span>All four methods are off — this will not save.</span>
+              <span>All three methods are off — this will not save.</span>
             </p>
             <p className="mt-1 pl-5 text-xs leading-relaxed text-muted-foreground">
-              Turning everything off does not close checkout: it falls back to
-              Customised order and every shopper places a pay-the-owner request
-              instead. The server refuses the save rather than let that happen
-              quietly.
+              There is no fourth option to fall back to. Checkout would have
+              nothing to offer, every order would be refused, and the shop would
+              look broken rather than closed. Leave at least one on, or take the
+              products offline.
             </p>
           </div>
         ) : (
@@ -749,8 +776,8 @@ export function PaymentsSection({ f, set, isDirty, facts }: SectionProps) {
               </p>
               <p className="mt-1 pl-5 text-xs leading-relaxed text-muted-foreground">
                 The only methods still on need Razorpay, and Razorpay is
-                {facts.razorpayConfigured ? " off" : " not configured"}. Every
-                order will be placed as a Customised order until that changes.
+                {facts.razorpayConfigured ? " off" : " not configured"} — see the
+                Integrations tab. Until that changes, nobody can check out.
               </p>
             </div>
           )
@@ -762,57 +789,86 @@ export function PaymentsSection({ f, set, isDirty, facts }: SectionProps) {
             product that lists none is treated as Prepaid + COD. Checkout offers
             the methods that <b>every</b> item in the basket allows, then hides
             any that are off here — so one item allowing only Prepaid removes
-            COD from a basket of four. If that leaves nothing, the order becomes
-            a Customised order. The counts above are per product, not per
-            basket, so they are the ceiling rather than the promise.
+            COD from a basket of four. If that leaves nothing, checkout says so
+            and the order cannot be placed. The counts above are per product, not
+            per basket, so they are the ceiling rather than the promise.
           </p>
         </ExpandableText>
       </Card>
 
-      {/* ---- Set once: the gateway ---- */}
-      <SetOnce
-        label="Razorpay gateway"
-        summary={gatewayReady ? "Live" : facts.razorpayConfigured ? "Off" : "No keys"}
-        tip="The master switch for both online methods. With it off, Prepaid and Advance + COD disappear from checkout no matter what their own switches say."
-        dirty={isDirty("razorpayEnabled")}
+      {/* ---- Weekly: what checkout adds to the basket ---- */}
+      <Card
+        title="What checkout adds"
+        tip="Two charges that move the total after the products are priced. The cash-handling fees add, the free-shipping threshold takes away. Both are shown to the customer as their own line — a total that moves with no word for why is what makes people abandon a basket."
+        aside={
+          <Badge tone={codFee > 0 || partialFee > 0 ? "accent" : "neutral"}>
+            {codFee > 0 || partialFee > 0 ? "Fees on" : "Absorbed"}
+          </Badge>
+        }
       >
-        <SwitchRow
-          label="Accept online payments"
-          checked={f.razorpayEnabled}
-          onChange={(v) => set("razorpayEnabled", v)}
-          detail={
-            facts.razorpayConfigured
-              ? f.razorpayEnabled
-                ? "Customers can pay you online right now."
-                : "Online methods are hidden at checkout."
-              : "No Razorpay keys in this deployment — stays hidden either way."
+        <div className="grid gap-4 sm:grid-cols-2">
+          <TextField
+            label="Cash on delivery fee"
+            type="number"
+            inputMode="numeric"
+            placeholder="0"
+            value={f.codFeeAmount}
+            dirty={isDirty("codFeeAmount")}
+            onChange={(v) => set("codFeeAmount", v)}
+            tip="Added to a cash-on-delivery order and collected at the door with the rest. NimbusPost charges you for collecting cash, so this is how you pass that on. 0 means you absorb it."
+            hint={
+              codFee > 0
+                ? `${formatINR(codFee)} added to every COD order.`
+                : "You absorb the collection charge."
+            }
+          />
+          <TextField
+            label="Part-payment fee"
+            type="number"
+            inputMode="numeric"
+            placeholder="0"
+            value={f.partialFeeAmount}
+            dirty={isDirty("partialFeeAmount")}
+            onChange={(v) => set("partialFeeAmount", v)}
+            tip="Added to a part-paid order. There is still a cash leg at the door, so there is still a collection charge — usually smaller than a full COD one, because less cash is being handled. 0 means you absorb it."
+            hint={
+              partialFee > 0
+                ? `${formatINR(partialFee)} added, collected with the balance.`
+                : "You absorb the collection charge."
+            }
+          />
+        </div>
+
+        <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+          Paying online in full never carries a fee — there is no cash to
+          collect. Whatever is charged is frozen onto the order, so changing
+          these numbers never rewrites what a past customer paid, and it is{" "}
+          <b>not refunded</b> on a return: the courier&apos;s charge was paid
+          whatever happened to the goods.
+        </p>
+
+        <TextField
+          label="Free shipping above"
+          type="number"
+          inputMode="numeric"
+          placeholder="Leave empty for no threshold"
+          value={f.freeShippingThreshold}
+          dirty={isDirty("freeShippingThreshold")}
+          onChange={(v) => set("freeShippingThreshold", v)}
+          tip="Each product carries its own shipping rule — Free, a fixed fee, or live NimbusPost rates — set in the product editor. This threshold sits on top of all of them: once the basket subtotal reaches it, shipping is zero whatever the products say. It does not touch the cash-handling fees above."
+          hint={
+            thresholdSet
+              ? `Baskets of ${formatINR(threshold)} or more ship free.`
+              : "No threshold — every basket pays whatever its products charge."
           }
-          className={isDirty("razorpayEnabled") ? "border-accent" : undefined}
-          tip="The master switch for both online methods: with it off, Prepaid and Advance + COD disappear from checkout no matter what their own switches say. Turning it on does not open a test mode — the keys in the deployment are used as they are."
         />
-
-        {!facts.razorpayConfigured && (
-          <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-            No <code className="font-mono text-[11px]">RAZORPAY_KEY_ID</code> /{" "}
-            <code className="font-mono text-[11px]">RAZORPAY_KEY_SECRET</code> is
-            set, so online methods stay hidden even with this switch on.
-          </p>
-        )}
-
-        {f.razorpayEnabled && facts.razorpayConfigured && (
-          <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5">
-            <p className="flex items-start gap-1.5 text-xs font-medium text-danger">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-              <span>Real money can move while this is on.</span>
-            </p>
-            <p className="mt-1 pl-5 text-xs leading-relaxed text-muted-foreground">
-              Checkout uses whichever keys the deployment holds. If they are
-              live keys, a customer paying is a real charge and a real refund to
-              undo. Leave this off while you are demonstrating the store.
-            </p>
-          </div>
-        )}
-      </SetOnce>
+        <Link
+          href="/admin/products"
+          className="inline-flex min-h-8 items-center text-[11px] font-medium uppercase tracking-wider text-accent transition-colors hover:text-foreground"
+        >
+          Per-product shipping rules
+        </Link>
+      </Card>
 
       {/* ---- Fixed in code ---- */}
       <ManagedElsewhere
@@ -835,52 +891,88 @@ export function PaymentsSection({ f, set, isDirty, facts }: SectionProps) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  4. Shipping & fulfilment                                           */
+/*  4. Integrations — the two outside services                         */
 /* ------------------------------------------------------------------ */
 
-export function ShippingSection({ f, set, isDirty, facts }: SectionProps) {
-  const threshold = Number(f.freeShippingThreshold);
-  const thresholdSet = f.freeShippingThreshold.trim() !== "" && threshold > 0;
+/**
+ * Razorpay and NimbusPost in one place.
+ *
+ * They were in two: the gateway was folded into Payments and the courier had a
+ * tab of its own called "Shipping" that held nothing else worth a tab. But they
+ * are the same kind of thing and they fail the same way — a master switch in
+ * the database, a key pair in the environment, and a store that looks fine
+ * until the moment it needs the service. Asking "is the courier connected?" and
+ * "is the gateway connected?" should not be two different errands.
+ *
+ * ## Secrets are never rendered
+ *
+ * The keys are environment variables, and this screen shows only **whether**
+ * each pair is present — `isRazorpayConfigured()` / `isNimbusPostConfigured()`
+ * return a boolean and nothing else crosses to the browser. There is
+ * deliberately no input to edit them: a value that can be typed into a page can
+ * be read back out of it, and a rotated key belongs in the deployment's
+ * environment, where it is already encrypted at rest.
+ */
+export function IntegrationsSection({ f, set, isDirty, facts }: SectionProps) {
+  const gatewayLive = f.razorpayEnabled && facts.razorpayConfigured;
+  const courierLive = f.nimbusEnabled && facts.nimbusConfigured;
 
   return (
     <div className="space-y-4">
-      {/* ---- Weekly: the one number that changes for a promotion ---- */}
       <Card
-        title="Shipping charges"
-        tip="Each product carries its own shipping rule — Free, a fixed fee, or live NimbusPost rates — set in the product editor under Shipping settings & parcel size. This threshold sits on top of all of them: once the basket subtotal reaches it, shipping is zero whatever the products say."
+        title="Razorpay — online payments"
+        tip="The master switch for both online methods. With it off, paying online in full and part-paying both disappear from checkout no matter what their own switches say. Turning it on does not open a test mode — the keys the deployment holds are used as they are."
         aside={
-          <Link
-            href="/admin/products"
-            className="inline-flex min-h-8 items-center text-[11px] font-medium uppercase tracking-wider text-accent transition-colors hover:text-foreground"
-          >
-            Per-product rules
-          </Link>
+          <Badge tone={gatewayLive ? "accent" : "neutral"}>
+            {gatewayLive ? "Live" : facts.razorpayConfigured ? "Off" : "No keys"}
+          </Badge>
         }
       >
-        <TextField
-          label="Free shipping above"
-          type="number"
-          inputMode="numeric"
-          placeholder="Leave empty for no threshold"
-          value={f.freeShippingThreshold}
-          dirty={isDirty("freeShippingThreshold")}
-          onChange={(v) => set("freeShippingThreshold", v)}
-          hint={
-            thresholdSet
-              ? `Baskets of ${formatINR(threshold)} or more ship free.`
-              : "No threshold — every basket pays whatever its products charge."
+        <SwitchRow
+          label="Accept online payments"
+          icon={<CreditCard className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />}
+          checked={f.razorpayEnabled}
+          onChange={(v) => set("razorpayEnabled", v)}
+          className={isDirty("razorpayEnabled") ? "border-accent" : undefined}
+          detail={
+            facts.razorpayConfigured
+              ? f.razorpayEnabled
+                ? "Customers can pay you online right now."
+                : "Online methods are hidden at checkout."
+              : "No Razorpay keys in this deployment — stays hidden either way."
           }
+          tip="Switching this on makes the two online methods available; whether each is actually offered is still its own switch on the Payments tab."
         />
+
+        <KeyStatus
+          configured={facts.razorpayConfigured}
+          names={["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"]}
+          what="online payments"
+        />
+
+        {gatewayLive && (
+          <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5">
+            <p className="flex items-start gap-1.5 text-xs font-medium text-danger">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              <span>Real money can move while this is on.</span>
+            </p>
+            <p className="mt-1 pl-5 text-xs leading-relaxed text-muted-foreground">
+              Checkout uses whichever keys the deployment holds. If they are live
+              keys, a customer paying is a real charge and a real refund to undo.
+              Leave this off while you are demonstrating the store.
+            </p>
+          </div>
+        )}
       </Card>
 
-      {/* ---- Set once: the courier integration ---- */}
-      <SetOnce
-        label="NimbusPost courier"
-        summary={
-          f.nimbusEnabled && facts.nimbusConfigured ? "Connected" : "Off"
+      <Card
+        title="NimbusPost — courier"
+        tip="The connection itself: with it off, no order and no return pickup can reach the courier at all. Whether a confirmed order is booked automatically or waits as a free draft is a separate decision, and it is on the Orders tab."
+        aside={
+          <Badge tone={courierLive ? "accent" : "neutral"}>
+            {courierLive ? "Connected" : facts.nimbusConfigured ? "Off" : "No keys"}
+          </Badge>
         }
-        tip="The connection itself: with it off, no order can reach the courier at all. Whether a confirmed order is booked automatically or waits as a free draft is a separate decision, and it is on the Orders tab."
-        dirty={isDirty("nimbusEnabled")}
       >
         <SwitchRow
           label="Automated shipping"
@@ -897,14 +989,93 @@ export function ShippingSection({ f, set, isDirty, facts }: SectionProps) {
           }
           tip="Switching this on does not book anything by itself. Confirmed orders are staged as unbooked drafts — free, no courier, no AWB — and a human presses Ship now. Whether that review gate applies is set on the Orders tab."
         />
-        {!facts.nimbusConfigured && (
-          <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-            No <code className="font-mono text-[11px]">NIMBUSPOST_API_KEY</code> /{" "}
-            <code className="font-mono text-[11px]">NIMBUSPOST_API_SECRET</code>{" "}
-            is set, so every dispatch call is skipped regardless of this switch.
-          </p>
+
+        <KeyStatus
+          configured={facts.nimbusConfigured}
+          names={["NIMBUSPOST_API_KEY", "NIMBUSPOST_API_SECRET"]}
+          what="every dispatch call"
+        />
+
+        {/* The warehouse name is not a secret — it is a label in the NimbusPost
+            dashboard — and it is the single most common reason a booking goes
+            to the wrong pickup address, so it is worth stating. */}
+        <dl className="space-y-1.5 rounded-lg border border-border bg-muted/40 p-3">
+          <ReadRow
+            label="Pickup warehouse"
+            value={facts.nimbusWarehouse || "Not set — the primary one is used"}
+            tip="NIMBUSPOST_WAREHOUSE_NAME, matched against the warehouses on your NimbusPost account by name, display name or code. A name that matches nothing falls back to your primary warehouse with a warning rather than failing the booking."
+          />
+          <ReadRow
+            label="Set in"
+            value="Deployment environment"
+            tone="muted"
+            tip="Like the key pair, this is an environment variable rather than a setting — changing it is a deployment change, not a save on this screen."
+          />
+        </dl>
+      </Card>
+
+      <p className="rounded-2xl border border-dashed border-border bg-muted/20 p-4 text-xs leading-relaxed text-muted-foreground">
+        <b className="text-foreground">Keys are never shown here.</b> Both key
+        pairs live in the deployment&apos;s environment variables, and this
+        screen reads only whether they are present — the values never reach the
+        browser and there is no field to type one into. To rotate a key, change
+        it where it is set and redeploy; nothing on this page needs to change.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Whether a key pair is configured — and never what it is.
+ *
+ * Deliberately binary. A masked value ("rzp_live_••••3f2a") looks more helpful
+ * and is worse: the prefix alone says which account and which mode, it invites
+ * the question "can I edit it here?", and it is one careless change away from
+ * being unmasked. Present or absent is the whole question this screen needs to
+ * answer.
+ */
+function KeyStatus({
+  configured,
+  names,
+  what,
+}: {
+  configured: boolean;
+  names: [string, string];
+  what: string;
+}) {
+  return (
+    <div
+      className={`flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border px-3 py-2 text-xs ${
+        configured ? "border-border bg-muted/40" : "border-orange-500/40 bg-orange-500/10"
+      }`}
+    >
+      {configured ? (
+        <KeyRound className="h-3.5 w-3.5 shrink-0 text-success" aria-hidden />
+      ) : (
+        <AlertTriangle
+          className="h-3.5 w-3.5 shrink-0 text-orange-600 dark:text-orange-400"
+          aria-hidden
+        />
+      )}
+      <span className="font-medium">
+        {configured ? "Key pair configured" : "No key pair"}
+      </span>
+      <span className="min-w-0 text-muted-foreground">
+        {configured ? (
+          <>
+            Set as{" "}
+            <code className="font-mono text-[11px]">{names[0]}</code> and{" "}
+            <code className="font-mono text-[11px]">{names[1]}</code> — values
+            are not readable from this screen.
+          </>
+        ) : (
+          <>
+            Set <code className="font-mono text-[11px]">{names[0]}</code> and{" "}
+            <code className="font-mono text-[11px]">{names[1]}</code> in the
+            deployment, or {what} is skipped whatever the switch says.
+          </>
         )}
-      </SetOnce>
+      </span>
     </div>
   );
 }

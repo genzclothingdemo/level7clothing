@@ -45,6 +45,21 @@ function authorised(req: NextRequest): boolean {
 export async function GET(req: NextRequest) {
   if (!authorised(req)) {
     const configured = Boolean(process.env.CRON_SECRET?.trim());
+    // Logged, not just returned. A cron that 403s has nobody to tell: Vercel
+    // records the response and moves on, so "the automatic sync never ran
+    // because the secret was never set" is invisible until somebody wonders
+    // why tracking is a day behind. This is the line that says it out loud.
+    if (configured) {
+      console.warn("[nimbus-sync] refused — the caller did not present CRON_SECRET.");
+    } else {
+      console.error(
+        "[nimbus-sync] AUTOMATIC SYNC IS OFF — CRON_SECRET is not set on this deployment, " +
+          "so every scheduled run is refused. Set it in Vercel → Settings → Environment " +
+          "Variables (any long random string); Vercel then sends it as a Bearer token on " +
+          "each cron call. Until then, tracking only moves on a NimbusPost webhook or when " +
+          "someone opens the order in the admin."
+      );
+    }
     return NextResponse.json(
       {
         error: configured

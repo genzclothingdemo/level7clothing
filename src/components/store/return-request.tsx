@@ -21,13 +21,20 @@ import { useSettings } from "@/context/settings";
 import { InfoTip } from "@/components/store/info-tip";
 import { ExpandableText } from "@/components/store/expandable-text";
 import {
+  REFUND_DESTINATION_LABEL,
+  RETURN_OUTCOMES,
+  RETURN_OUTCOME_BLURB,
+  RETURN_OUTCOME_LABEL,
   RETURN_STATUS_COLOR,
   RETURN_STATUS_LABEL,
   computeRefund,
   normaliseUpiId,
+  outcomeOfRefundMethod,
   refundPreviewLine,
   returnReasonLabel,
   type RefundBreakdown,
+  type RefundDestination,
+  type ReturnOutcome,
   type ReturnStatus,
 } from "@/lib/returns";
 
@@ -66,6 +73,8 @@ export type ExistingRequest = {
   reason: string;
   adminNote: string | null;
   createdAt: string;
+  /** What the customer asked for. Known from the moment the request is raised. */
+  outcome: ReturnOutcome;
   /** Null until a decision has put a figure on the request. */
   refund: ExistingRefund | null;
   /**
@@ -125,7 +134,28 @@ export function ReturnRequest({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
-  const [form, setForm] = useState({ reason: "", note: "", quantity: 1 });
+  /**
+   * `outcome` is what the customer wants to happen, and it is deliberately part
+   * of the request rather than something the store decides afterwards: someone
+   * who needs a bigger size is not asking for their money back, and the old
+   * form gave them no way to say so.
+   *
+   * `destination` only matters for a refund, and only when the order supports
+   * more than one — see `policy.refund.destinations`.
+   */
+  const [form, setForm] = useState<{
+    reason: string;
+    note: string;
+    quantity: number;
+    outcome: ReturnOutcome;
+    destination: RefundDestination | null;
+  }>({
+    reason: "",
+    note: "",
+    quantity: 1,
+    outcome: "refund",
+    destination: null,
+  });
 
   // Read the live policy once per order. Wrapped in a transition, which is how
   // Next documents calling a Server Action from an effect.
@@ -168,10 +198,22 @@ export function ReturnRequest({
     return computeRefund({
       order: policy.refund.order,
       lines: [{ unitPrice: line.price, quantity }],
-      settings: policy.refund.settings,
       reason,
+      outcome: form.outcome,
+      destination: destination ?? undefined,
     });
   }
+
+  /**
+   * Where a refund could go for this order. A cash-on-delivery order has no
+   * card to send money back to, so it gets UPI alone — **one option, not two
+   * with one greyed out**, which is the rule the rest of this feature follows.
+   */
+  const destinations = policy?.refund?.destinations ?? [];
+  const destination: RefundDestination | null =
+    form.destination && destinations.includes(form.destination)
+      ? form.destination
+      : (destinations[0] ?? null);
 
   /** Lines that can still be requested — nothing already in flight for them. */
   const inFlight = (name: string) =>
@@ -193,19 +235,34 @@ export function ReturnRequest({
       setError("Please choose a reason.");
       return;
     }
+    if (form.outcome === "exchange" && !form.note.trim()) {
+      // A size exchange with no size is a support call waiting to happen.
+      setError("Tell us which size you need.");
+      return;
+    }
     setBusy(true);
     const res = await requestReturn({
       orderNumber,
       itemIndex: line.index,
       quantity: form.quantity,
       reason: form.reason,
+      outcome: form.outcome,
+      // Only meaningful for a refund; the action ignores it otherwise and
+      // re-derives it against the order either way.
+      refundDestination: destination ?? undefined,
       customerNote: form.note,
     });
     setBusy(false);
     if (res.ok) {
       setDone(res.message);
       setOpenFor(null);
-      setForm({ reason: "", note: "", quantity: 1 });
+      setForm({
+        reason: "",
+        note: "",
+        quantity: 1,
+        outcome: "refund",
+        destination: null,
+      });
     } else {
       setError(res.error);
       // The server just re-decided eligibility — pick up its verdict so the UI
@@ -267,6 +324,17 @@ export function ReturnRequest({
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
                 {returnReasonLabel(e.reason)}
+                {/* Stated from the start, not only once a decision lands: a
+                    customer who asked for a bigger size and sees nothing but a
+                    status word writes in to check we understood. */}
+                {e.outcome !== "refund" && (
+                  <>
+                    {" · "}
+                    {e.outcome === "replace"
+                      ? "replacement requested"
+                      : "size exchange requested"}
+                  </>
+                )}
               </p>
               {e.adminNote && (
                 <p className="mt-1.5 rounded-lg bg-background px-3 py-2 text-xs">
@@ -353,7 +421,13 @@ export function ReturnRequest({
                         type="button"
                         onClick={() => {
                           setOpenFor(line.index);
-                          setForm({ reason: "", note: "", quantity: 1 });
+                          setForm({
+                            reason: "",
+                            note: "",
+                            quantity: 1,
+                            outcome: "refund",
+                            destination: null,
+                          });
                           setError(null);
                         }}
                         className="inline-flex min-h-11 shrink-0 cursor-pointer items-center rounded-lg border border-border px-3 text-xs font-medium uppercase tracking-wide transition-colors hover:bg-muted"
@@ -417,10 +491,94 @@ export function ReturnRequest({
                             </label>
                           )}
 
+                          {/* ── What should happen ──────────────────────────
+                              Asked outright, because it is the question the
+                              customer actually came to answer. Two of the three
+                              answers move no money at all, which the blurb
+                              under each one says before they pick. */}
+                          <fieldset className="block">
+                            <legend className="label">
+                              What would you like us to do? *
+                            </legend>
+                            <div className="mt-1 space-y-1.5">
+                              {RETURN_OUTCOMES.map((o) => (
+                                <label
+                                  key={o}
+                                  className={`flex min-h-11 cursor-pointer items-start gap-2 rounded-lg border p-2.5 transition-colors ${
+                                    form.outcome === o
+                                      ? "border-foreground bg-muted/40"
+                                      : "border-border"
+                                  }`}
+                                >
+                                  <input
+                                    type="radio"
+                                    name={`return-outcome-${line.index}`}
+                                    checked={form.outcome === o}
+                                    onChange={() =>
+                                      setForm((p) => ({ ...p, outcome: o }))
+                                    }
+                                    className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]"
+                                  />
+                                  <span className="min-w-0">
+                                    <span className="block text-sm font-medium leading-tight">
+                                      {RETURN_OUTCOME_LABEL[o]}
+                                    </span>
+                                    <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+                                      {RETURN_OUTCOME_BLURB[o]}
+                                    </span>
+                                  </span>
+                                </label>
+                              ))}
+                            </div>
+                          </fieldset>
+
+                          {/* ── Where the money goes ────────────────────────
+                              Only for a refund, and only when there is a real
+                              choice. A cash-on-delivery order has nothing to
+                              refund a card to, so it gets one sentence instead
+                              of a control with an option disabled. */}
+                          {form.outcome === "refund" && destinations.length > 1 && (
+                            <fieldset className="block">
+                              <legend className="label">Send the refund *</legend>
+                              <div className="mt-1 flex flex-wrap gap-2">
+                                {destinations.map((d) => (
+                                  <label
+                                    key={d}
+                                    className={`inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg border px-3 text-sm transition-colors ${
+                                      destination === d
+                                        ? "border-foreground bg-muted/40"
+                                        : "border-border"
+                                    }`}
+                                  >
+                                    <input
+                                      type="radio"
+                                      name={`refund-destination-${line.index}`}
+                                      checked={destination === d}
+                                      onChange={() =>
+                                        setForm((p) => ({ ...p, destination: d }))
+                                      }
+                                      className="h-4 w-4 accent-[var(--accent)]"
+                                    />
+                                    {REFUND_DESTINATION_LABEL[d]}
+                                  </label>
+                                ))}
+                              </div>
+                            </fieldset>
+                          )}
+                          {form.outcome === "refund" &&
+                            destinations.length === 1 &&
+                            destination === "upi" && (
+                              <p className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                                You paid the courier in cash, so there is no card
+                                to send the money back to — we&apos;ll refund by
+                                UPI and ask for your UPI ID once this is
+                                approved.
+                              </p>
+                            )}
+
                           {/* What they get back, before they commit to it.
                               Withheld until a reason is chosen: the figure
-                              depends on it (damaged and wrong-item returns can
-                              waive the fee), so quoting one against a blank
+                              depends on it, so quoting one against a blank
                               reason shows a number that is about to change. */}
                           {form.reason ? (
                             <RefundPreview
@@ -430,12 +588,16 @@ export function ReturnRequest({
                           ) : (
                             <p className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
                               Pick a reason and we&apos;ll show you exactly what
-                              comes back.
+                              happens next.
                             </p>
                           )}
 
                           <label className="block">
-                            <span className="label">Anything else we should know?</span>
+                            <span className="label">
+                              {form.outcome === "exchange"
+                                ? "Which size do you need? *"
+                                : "Anything else we should know?"}
+                            </span>
                             <textarea
                               rows={3}
                               value={form.note}
@@ -443,7 +605,11 @@ export function ReturnRequest({
                                 setForm((p) => ({ ...p, note: e.target.value }))
                               }
                               className="input resize-none"
-                              placeholder="Tell us what happened — it helps us decide faster."
+                              placeholder={
+                                form.outcome === "exchange"
+                                  ? "e.g. send an L instead of an M"
+                                  : "Tell us what happened — it helps us decide faster."
+                              }
                             />
                           </label>
 
@@ -618,6 +784,12 @@ function RefundStatus({
 
   const open = ["approved", "picked_up", "received"].includes(request.status);
   const needsUpi = open && refund.method === "upi" && refund.net > 0 && !saved;
+  // A replacement or an exchange is not a ₹0 refund, and must not read like
+  // one — "no refund is due" on a request where a parcel is on its way back to
+  // the customer is exactly the message that generates a complaint. Read off
+  // the decided method rather than `request.outcome`, so a return the store
+  // settled differently from the ask says what was actually agreed.
+  const outcome = outcomeOfRefundMethod(refund.method);
 
   async function save() {
     setError(null);
@@ -658,10 +830,19 @@ function RefundStatus({
             </p>
           )}
         </>
+      ) : outcome !== "refund" ? (
+        <p className="text-muted-foreground">
+          {outcome === "replace"
+            ? "A replacement will be sent once we have the item back."
+            : "The size you asked for will be sent once we have the item back."}{" "}
+          No money changes hands.
+        </p>
       ) : refund.net > 0 ? (
         <p className="text-muted-foreground">
           <b className="text-foreground">{formatINR(refund.net)}</b> will be
           refunded once we have the item back
+          {/* Only ever non-zero on a request decided under the old fee policy —
+              kept so history still reads as it was agreed. */}
           {refund.fee ? ` — ${formatINR(refund.fee)} return fee applies` : ""}.
         </p>
       ) : (

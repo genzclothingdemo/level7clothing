@@ -29,7 +29,11 @@ export const DEFAULT_SETTINGS: SettingsDTO = {
   codEnabled: true,
   prepaidEnabled: true,
   partialEnabled: true,
-  directEnabled: true,
+  // DEAD. "Direct" ("no online payment — arrange with the owner") was withdrawn
+  // from checkout; the store offers exactly three modes. Kept on the DTO only
+  // because it is on the model, and defaulted to `false` to match the schema —
+  // nothing in checkout reads it any more.
+  directEnabled: false,
   razorpayEnabled: false,
   nimbusEnabled: false,
   announcement: "Join the club — exclusive deals and early access to new drops",
@@ -53,6 +57,39 @@ export const DEFAULT_SETTINGS: SettingsDTO = {
   defaultReturnable: true,
   returnWindowDays: 7,
 };
+
+/**
+ * The two cash-handling fees, in whole rupees.
+ *
+ * A separate reader rather than two more fields on `SettingsDTO`, for one
+ * reason: the DTO is the *storefront branding* shape, handed to every page and
+ * mirrored into a client context, and these two numbers are only ever wanted at
+ * checkout. Widening the DTO would send them to every render that never uses
+ * them and would put a money rule in the same bag as the hero copy.
+ *
+ * Wrapped in `cache()` like `getSettings`, so a checkout that asks for both
+ * still costs one round trip each per request rather than one per call.
+ *
+ * `0` means "absorb it", which is the schema default and the shipped answer.
+ * A failed read returns zeroes: inventing a charge the owner never configured
+ * is the one wrong answer here.
+ */
+export const getPaymentFees = cache(
+  async (): Promise<{ codFeeAmount: number; partialFeeAmount: number }> => {
+    try {
+      const row = await prisma.siteSettings.findUnique({
+        where: { id: "main" },
+        select: { codFeeAmount: true, partialFeeAmount: true },
+      });
+      return {
+        codFeeAmount: Math.max(0, row?.codFeeAmount ?? 0),
+        partialFeeAmount: Math.max(0, row?.partialFeeAmount ?? 0),
+      };
+    } catch {
+      return { codFeeAmount: 0, partialFeeAmount: 0 };
+    }
+  }
+);
 
 /**
  * Resolve the product page's info blocks: a product's own copy wins, otherwise

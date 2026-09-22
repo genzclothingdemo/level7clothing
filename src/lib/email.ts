@@ -102,6 +102,13 @@ type OrderLike = {
   }[];
   subtotal: number;
   shipping: number;
+  /**
+   * Cash-handling charge, frozen on `Order.paymentFee`. Optional so existing
+   * callers compile, and omitted from the mail when it is 0 — but when a fee
+   * IS charged it must appear, or subtotal + shipping will not add up to the
+   * total in the customer's own receipt.
+   */
+  paymentFee?: number;
   total: number;
   paymentMethod: string;
   note?: string | null;
@@ -124,6 +131,7 @@ function totals(o: OrderLike) {
   return `<table style="width:100%;border-collapse:collapse;font-size:14px">
     <tr><td style="padding:4px 0;color:#777">Subtotal</td><td style="padding:4px 0;text-align:right">${formatINR(o.subtotal)}</td></tr>
     <tr><td style="padding:4px 0;color:#777">Shipping</td><td style="padding:4px 0;text-align:right">${o.shipping ? formatINR(o.shipping) : "Free"}</td></tr>
+    ${o.paymentFee ? `<tr><td style="padding:4px 0;color:#777">Cash handling</td><td style="padding:4px 0;text-align:right">${formatINR(o.paymentFee)}</td></tr>` : ""}
     <tr><td style="padding:8px 0;font-weight:700;font-size:16px">Total</td><td style="padding:8px 0;text-align:right;font-weight:700;font-size:16px">${formatINR(o.total)}</td></tr>
   </table>`;
 }
@@ -228,6 +236,53 @@ export async function sendOrderStatusEmail(
     subject: `Update on your ${settings.brandName} order ${order.orderNumber}`,
     html: shell(settings.brandName, "Order update", body),
   });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Automation                                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The one send used by the automation engine (`lib/automation.ts`).
+ *
+ * It is a thin wrapper over the same private `send()` and `shell()` as every
+ * other email in this file — deliberately, because a second mail path is how a
+ * store ends up with two "from" addresses, two failure logs and one of them
+ * silently unverified in Resend.
+ *
+ * The body arrives as **plain text** an admin typed into the template editor,
+ * with `{{token}}`s already substituted. It is escaped and converted to
+ * paragraphs here rather than by the caller, so no automation template can
+ * inject markup into the email shell — a customer's own name flows through
+ * these templates, and a name is attacker-controlled text.
+ */
+export async function sendAutomationEmail(
+  settings: SettingsDTO,
+  msg: { to: string | string[]; subject: string; bodyText: string; title?: string }
+) {
+  return send({
+    to: msg.to,
+    // A newline in a subject is a header-injection primitive, and Resend will
+    // happily forward one. Flatten it.
+    subject: msg.subject.replace(/[\r\n]+/g, " ").trim(),
+    html: shell(settings.brandName, msg.title ?? "Automated message", textToHtml(msg.bodyText)),
+  });
+}
+
+/** Escape first, then structure — never the other way round. */
+function textToHtml(text: string): string {
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+  return escaped
+    .split(/\n{2,}/)
+    .map(
+      (para) =>
+        `<p style="font-size:14px;line-height:1.6;color:#333;margin:0 0 14px">${para.replace(/\n/g, "<br>")}</p>`
+    )
+    .join("");
 }
 
 /** Fired when the contact form is submitted. */

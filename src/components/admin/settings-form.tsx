@@ -20,17 +20,19 @@
  * the server component, so switching tabs costs nothing and — the real point —
  * cannot remount the form and drop an unsaved edit.
  *
- * ## One save bar, two writers
+ * ## One save bar, three writers
  *
- * The order-pipeline columns moved in from `/admin/orders`, and they keep their
- * own scoped action. So a save can dispatch to two places, and it dispatches
- * **only what is dirty**: nothing is round-tripped "unchanged" through an
- * action that does not own it, which is the shape of the `defaultReturnsInfo`
- * lost update CLAUDE.md records. If one half fails the other is still rebased
- * on what the database took, and the toast names which half did not land —
- * "saved" over a half-written save is the one outcome worth avoiding.
+ * The order-pipeline columns moved in from `/admin/orders` and keep their own
+ * scoped action; the two cash-handling fees have a third
+ * (`updatePaymentFees`, colocated with this route). So a save can dispatch to
+ * three places, and it dispatches **only what is dirty**: nothing is
+ * round-tripped "unchanged" through an action that does not own it, which is
+ * the shape of the `defaultReturnsInfo` lost update CLAUDE.md records. If one
+ * group fails the others are still rebased on what the database took, and the
+ * toast names which did not land — "saved" over a half-written save is the one
+ * outcome worth avoiding.
  *
- * The return policy is a third writer and is deliberately NOT here: it is
+ * The return policy is a fourth writer and is deliberately NOT here: it is
  * mounted as `ReturnPolicyCard`, which carries its own draft and its own Save.
  */
 
@@ -40,6 +42,7 @@ import { toast } from "sonner";
 import { updateOrderPipelineSettings, updateSettings } from "@/app/actions/admin";
 import { dispatchModeOf } from "@/lib/orders-pipeline";
 import { InfoTip } from "@/components/store/info-tip";
+import { updatePaymentFees } from "@/app/admin/(panel)/settings/actions";
 import {
   DEFAULT_TAB,
   FIELD_META,
@@ -48,6 +51,7 @@ import {
   SettingsTabs,
   changedKeys,
   countByTab,
+  isFeeKey,
   isPipelineKey,
   isTabKey,
   tabMeta,
@@ -57,10 +61,10 @@ import {
 } from "@/components/admin/settings-ui";
 import {
   EmailSection,
+  IntegrationsSection,
   OrdersSection,
   PaymentsSection,
   ReturnsSection,
-  ShippingSection,
   StoreSection,
   StorefrontSection,
   type SectionProps,
@@ -71,7 +75,7 @@ const SECTIONS: Record<TabKey, (p: SectionProps) => React.ReactElement> = {
   store: StoreSection,
   orders: OrdersSection,
   payments: PaymentsSection,
-  shipping: ShippingSection,
+  integrations: IntegrationsSection,
   returns: ReturnsSection,
   storefront: StorefrontSection,
   email: EmailSection,
@@ -153,13 +157,33 @@ export function SettingsForm({
 
   async function save() {
     if (dirty.length === 0 || saving) return;
+
+    /**
+     * The one combination checkout cannot survive, refused before anything is
+     * written.
+     *
+     * With "Direct" withdrawn there is no fourth mode to fall back to, so all
+     * three off does not mean "pay the owner instead" — it means checkout has
+     * nothing to offer and every order is refused. The server's own guard still
+     * exists behind this, but it is phrased around the old four-method world;
+     * this is the message that names what is actually about to happen.
+     */
+    if (!draft.codEnabled && !draft.prepaidEnabled && !draft.partialEnabled) {
+      toast.error(
+        "Leave at least one payment method on. With all three off, checkout has nothing to offer and every order is refused.",
+        { duration: 10000 }
+      );
+      return;
+    }
+
     setSaving(true);
 
     // Split by owner. A group with nothing dirty is not sent at all, so the
     // action that owns those columns is not even called — nothing is ever
     // round-tripped "unchanged" through a writer that does not own it.
     const pipelineDirty = dirty.some(isPipelineKey);
-    const settingsDirty = dirty.some((k) => !isPipelineKey(k));
+    const feesDirty = dirty.some(isFeeKey);
+    const settingsDirty = dirty.some((k) => !isPipelineKey(k) && !isFeeKey(k));
 
     // Starts as the last-known-good baseline. Each group that lands overwrites
     // its own slice, so a group that fails is simply left at its old value and
@@ -199,6 +223,27 @@ export function SettingsForm({
       }
     }
 
+    if (feesDirty) {
+      // Its own action, its own two columns. `updateSettings` does not accept
+      // them and Zod would strip them without a word, so routing matters here
+      // as much as it does for the pipeline group.
+      const res = await updatePaymentFees({
+        codFeeAmount: draft.codFeeAmount.trim() ? Number(draft.codFeeAmount) : 0,
+        partialFeeAmount: draft.partialFeeAmount.trim()
+          ? Number(draft.partialFeeAmount)
+          : 0,
+      });
+      if (res.ok) {
+        next = {
+          ...next,
+          codFeeAmount: String(res.settings.codFeeAmount),
+          partialFeeAmount: String(res.settings.partialFeeAmount),
+        };
+      } else {
+        failures.push(res.error || "Payment fees could not be saved");
+      }
+    }
+
     if (!settingsDirty) {
       finish(next, failures);
       return;
@@ -225,7 +270,15 @@ export function SettingsForm({
       codEnabled: draft.codEnabled,
       prepaidEnabled: draft.prepaidEnabled,
       partialEnabled: draft.partialEnabled,
-      directEnabled: draft.directEnabled,
+      // DEAD, and pinned false rather than dropped.
+      //
+      // `settingsSchema` still declares `directEnabled` with `.default(true)`,
+      // so omitting it would write `true` on every save — reviving a column the
+      // whole change exists to retire. Sending `false` retires it in the
+      // database too, and has a second, useful effect: the server's existing
+      // "all four methods off" guard now fires exactly when all *three* real
+      // ones are off, which is the rule we want.
+      directEnabled: false,
       razorpayEnabled: draft.razorpayEnabled,
       nimbusEnabled: draft.nimbusEnabled,
       defaultMaterialsCare: draft.defaultMaterialsCare,
@@ -260,7 +313,6 @@ export function SettingsForm({
         codEnabled: s.codEnabled,
         prepaidEnabled: s.prepaidEnabled,
         partialEnabled: s.partialEnabled,
-        directEnabled: s.directEnabled,
         razorpayEnabled: s.razorpayEnabled,
         nimbusEnabled: s.nimbusEnabled,
         defaultMaterialsCare: s.defaultMaterialsCare,

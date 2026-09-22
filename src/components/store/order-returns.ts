@@ -21,6 +21,7 @@
 import {
   formatReturnDate,
   isReturnStatus,
+  outcomeOfRefundMethod,
   resolveReturnPolicy,
   returnWindow,
 } from "@/lib/returns";
@@ -143,6 +144,11 @@ export function buildOrderReturns(input: {
     reason: r.reason,
     adminNote: r.adminNote,
     createdAt: r.createdAt.toISOString(),
+    // What the customer asked for, carried separately from `refund` because
+    // `refund` is null until a decision puts a figure on the request — and a
+    // customer waiting on a size exchange should be able to see that is what
+    // they asked for, not just "Awaiting review".
+    outcome: outcomeOfRefundMethod(r.refundMethod),
     // Only the booked leg is passed on. A draft id is an internal NimbusPost
     // reference the customer can do nothing with, and showing one would read as
     // a tracking number that doesn't work.

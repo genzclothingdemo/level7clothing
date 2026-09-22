@@ -29,7 +29,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Eye, EyeOff, Star, Trash2 } from "lucide-react";
+import { ExternalLink, Eye, EyeOff, Star, Trash2 } from "lucide-react";
 import { bulkProductAction, type ProductBulkAction } from "@/app/actions/admin";
 import { ProductRowActions } from "@/components/admin/product-row-actions";
 import { CopyableId } from "@/components/admin/copy-id";
@@ -46,6 +46,8 @@ import { cn } from "@/lib/utils";
 export type ProductRow = {
   id: string;
   name: string;
+  /** Storefront slug, for the "view live" link. */
+  slug: string;
   image: string | null;
   category: string;
   subcategoryName: string | null;
@@ -241,7 +243,34 @@ export function ProductsTable({ rows }: { rows: ProductRow[] }) {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      <ProductRowActions id={p.id} isActive={p.isActive} />
+                      <div className="flex items-center justify-end gap-1">
+                        {/* View on the storefront. A hidden product has no live
+                            page (the route calls notFound() on !isActive), so
+                            there is nothing to link to — the slot is held open
+                            rather than linked, which keeps the four icons in
+                            the same column on every row. */}
+                        {p.isActive ? (
+                          <a
+                            href={`/product/${p.slug}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title={`View ${p.name} on the storefront`}
+                            aria-label={`View ${p.name} on the storefront — opens in a new tab`}
+                            className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                          </a>
+                        ) : (
+                          <span
+                            className="grid h-9 w-9 place-items-center text-muted-foreground/30"
+                            title="Hidden from the shop — no live page"
+                            aria-hidden
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                          </span>
+                        )}
+                        <ProductRowActions id={p.id} isActive={p.isActive} />
+                      </div>
                     </td>
                   </tr>
                 );

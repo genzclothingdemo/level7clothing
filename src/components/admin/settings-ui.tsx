@@ -78,11 +78,19 @@ export type SettingsDraft = {
   codEnabled: boolean;
   prepaidEnabled: boolean;
   partialEnabled: boolean;
-  directEnabled: boolean;
   razorpayEnabled: boolean;
   nimbusEnabled: boolean;
   defaultMaterialsCare: string;
   defaultShippingInfo: string;
+
+  /* ---- Cash-handling fees. Written by `updatePaymentFees`. ---- */
+  /**
+   * Whole rupees, held as strings for the same reason as
+   * `freeShippingThreshold`: an emptied number input is `""`, not `0`, and a
+   * draft that snaps back to 0 under the caret cannot be typed into.
+   */
+  codFeeAmount: string;
+  partialFeeAmount: string;
 
   /* ---- Order pipeline. Written by `updateOrderPipelineSettings`. ---- */
   orderConfirmMode: OrderConfirmMode;
@@ -135,6 +143,24 @@ export function isPipelineKey(k: DraftKey): k is PipelineKey {
   return PIPELINE_KEY_SET.has(k);
 }
 
+/**
+ * The two keys owned by `updatePaymentFees`, for exactly the same reason: a
+ * writer only ever receives the columns it owns, and `settingsSchema` would
+ * strip these two without a word.
+ */
+export const FEE_KEYS = [
+  "codFeeAmount",
+  "partialFeeAmount",
+] as const satisfies readonly DraftKey[];
+
+export type FeeKey = (typeof FEE_KEYS)[number];
+
+const FEE_KEY_SET: ReadonlySet<string> = new Set(FEE_KEYS);
+
+export function isFeeKey(k: DraftKey): k is FeeKey {
+  return FEE_KEY_SET.has(k);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Tabs                                                               */
 /* ------------------------------------------------------------------ */
@@ -183,14 +209,15 @@ export const FIELD_META: Record<DraftKey, { label: string; tab: TabKey }> = {
   dispatchOnConfirm: { label: "What confirming does", tab: "orders" },
   autoShipCourier: { label: "Courier preference", tab: "orders" },
 
-  codEnabled: { label: "Cash on Delivery", tab: "payments" },
-  prepaidEnabled: { label: "Prepaid", tab: "payments" },
-  partialEnabled: { label: "Advance + COD", tab: "payments" },
-  directEnabled: { label: "Customised order", tab: "payments" },
-  razorpayEnabled: { label: "Razorpay online payments", tab: "payments" },
+  codEnabled: { label: "Cash on delivery", tab: "payments" },
+  prepaidEnabled: { label: "Pay online in full", tab: "payments" },
+  partialEnabled: { label: "Part now, rest on delivery", tab: "payments" },
+  codFeeAmount: { label: "Cash on delivery fee", tab: "payments" },
+  partialFeeAmount: { label: "Part-payment fee", tab: "payments" },
+  freeShippingThreshold: { label: "Free shipping above", tab: "payments" },
 
-  freeShippingThreshold: { label: "Free shipping above", tab: "shipping" },
-  nimbusEnabled: { label: "NimbusPost shipping", tab: "shipping" },
+  razorpayEnabled: { label: "Razorpay online payments", tab: "integrations" },
+  nimbusEnabled: { label: "NimbusPost shipping", tab: "integrations" },
 
   heroHeadline: { label: "Hero headline", tab: "storefront" },
   heroSubtext: { label: "Hero subtext", tab: "storefront" },

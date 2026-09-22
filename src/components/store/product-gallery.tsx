@@ -161,10 +161,16 @@ export function ProductGallery({
       </div>
 
       {/* Thumbnail strip — a scrolling row rather than a 6-up grid, so a variant
-          with 12 photos doesn't turn into two cramped rows of 40px squares. */}
+          with 12 photos doesn't turn into two cramped rows of 40px squares.
+
+          `flex` wrapper + `min-w-0 flex-1` scroller, same as the variant picker:
+          `overflow-x-auto` scrolls the strip but does not stop its min-content
+          width (photos × 68px + gaps + padding) from sizing an intrinsically
+          sized ancestor. Zeroing a flex item's automatic minimum is what keeps
+          the overflow inside this box instead of widening the page. */}
       {activeImages.length > 1 && (
-        <div className="-mx-5 sm:mx-0">
-          <div className="no-scrollbar flex gap-2 overflow-x-auto px-5 pb-1 sm:px-0">
+        <div className="-mx-5 flex sm:mx-0">
+          <div className="no-scrollbar flex min-w-0 flex-1 gap-2 overflow-x-auto px-5 pb-1 sm:px-0">
           {activeImages.map((url, i) => {
             const thumbIsVideo = url.match(/\.(mp4|webm|mov)$/i);
             return (

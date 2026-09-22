@@ -9,26 +9,38 @@
  * Sections, in the order an admin works through them:
  *
  *   0. Image Controller  — which option's values swap the gallery (Design,
- *                          Colour, Finish, …). Nothing below is hardcoded to a
- *                          particular attribute or photo naming scheme.
+ *                          Colour, Finish…), or **None**. Nothing below is
+ *                          hardcoded to a particular attribute or naming scheme.
  *   1. Variant Previews  — exactly ONE thumbnail per value; this is the image on
  *                          the storefront's variant picker cards.
  *   2. Variant Galleries — per-value galleries (accordion, photo counts on the
- *                          header), each with an editable "Final gallery"
- *                          preview of what the customer will actually swipe.
- *   3. Common Gallery    — photos shown for every value (packaging, dimensions,
- *                          care card — whatever the product needs).
+ *                          header).
+ *   3. Common Gallery    — photos shown for every value (packaging, size chart,
+ *                          care card — whatever the whole product shares).
  *
- * Products with NO options skip 0–2 entirely and manage one flat gallery.
+ * With **None**, or with no options at all, 1–3 collapse into one flat gallery.
  *
- * Order rule: the Final gallery for a value = that value's photos (in the
- * admin's drag order) THEN the common photos (in their drag order). Common
- * photos are never interleaved into the middle of the variant photos — reorder
- * happens WITHIN each group. Persisted via ProductImage.sortOrder (see
- * syncProductImages).
+ * ── One gallery edits one thing ──
  *
- * Bidirectional editing: the Final gallery is fully interactive — delete or
- * reorder there and the source (variant gallery OR common gallery) updates.
+ * Each value's section edits and orders ONLY that value's photos. Common photos
+ * are edited and ordered ONLY in the Common Gallery. There used to be a merged
+ * "Final gallery" strip under every value showing its photos *plus* the common
+ * ones tagged `common`, editable from there — and it read as though the common
+ * shots belonged to that value, which is exactly the complaint it caused
+ * ("agar red variant me photo add kare to woh yaha reflect nahi hone chahiye").
+ * It is gone. The merge is a storefront concern, and it happens once, in
+ * `galleryForSelection`.
+ *
+ * Order contract the storefront honours: picking Red shows Red's photos in
+ * Red's order, then the common photos in the common order. Never interleaved,
+ * and each order is changed in exactly one place. Persisted via
+ * `ProductImage.sortOrder` — see `syncProductImages`.
+ *
+ * ── Spacing ──
+ *
+ * One scale, the same one form-kit documents: block padding `p-3`, `space-y-3`
+ * inside a block, `space-y-4` between them, 44px (`min-h-11`) on every real
+ * control. Explanation goes behind an `InfoTip`, never into a paragraph.
  */
 
 import { useState } from "react";
@@ -45,6 +57,7 @@ import {
 } from "lucide-react";
 import { PhotoPicker } from "@/components/admin/photo-picker";
 import { InfoTip } from "@/components/store/info-tip";
+import { IMAGE_CONTROLLER_NONE } from "@/lib/variants";
 import { cn } from "@/lib/utils";
 import type { ProductOption } from "@/lib/types";
 
@@ -62,7 +75,11 @@ export type VisualGalleryState = {
 
 type Props = {
   options: ProductOption[];
-  /** Which option is the visual (gallery-driving) one. Defaults to first option. */
+  /**
+   * Which option is the visual (gallery-driving) one. `IMAGE_CONTROLLER_NONE`
+   * is the admin's explicit "photos don't vary" answer; "" means unset, which
+   * defaults to the first option.
+   */
   visualOptionName?: string;
   /** Lets the Image Controller live inside this tab rather than above it. */
   onVisualOptionChange?: (name: string) => void;
@@ -123,17 +140,28 @@ export function VariantMediaTab({
     }))
     .filter((o) => o.name && o.values.length > 0);
 
-  const visualOption =
-    optionMatrix.find(
-      (o) =>
-        visualOptionName &&
-        o.name.toLowerCase() === visualOptionName.trim().toLowerCase()
-    ) ?? optionMatrix[0];
+  // "None" is a real, persisted answer — not the absence of one. It has to
+  // survive here rather than collapsing into the `?? optionMatrix[0]` default,
+  // which is the whole reason the sentinel is passed in.
+  const noneSelected = visualOptionName === IMAGE_CONTROLLER_NONE;
+
+  const visualOption = noneSelected
+    ? undefined
+    : (optionMatrix.find(
+        (o) =>
+          visualOptionName &&
+          o.name.toLowerCase() === visualOptionName.trim().toLowerCase()
+      ) ?? optionMatrix[0]);
 
   const visualValues = visualOption?.values ?? [];
   // Human label for the image-driving option, used in the section copy.
   const visualName = visualOption?.name || "variant";
   const isActive = (val: string) => !activeValues || activeValues.includes(val);
+
+  // One flat gallery: either nothing varies the photos (None) or there are no
+  // options to vary them by. Same screen, same data — the common gallery IS the
+  // product gallery in both cases.
+  const flat = visualValues.length === 0;
 
   // Track which accordion sections are open
   const [openSections, setOpenSections] = useState<Set<string>>(() =>
@@ -141,7 +169,6 @@ export function VariantMediaTab({
   );
 
   // Which image is being dragged: { scope: variantValue | COMMON_SCOPE, index }.
-  // `index` is LOCAL to the source array (not the combined Final index).
   const [drag, setDrag] = useState<{ scope: string; index: number } | null>(null);
 
   function toggleSection(val: string) {
@@ -209,9 +236,10 @@ export function VariantMediaTab({
   }
 
   // ---- Drag-and-drop reordering ----
-  // Drops only apply within the same scope — dragging a common photo onto a
-  // variant slot (or vice versa) is a no-op so the "variant photos first, then
-  // common" rule is preserved.
+  // Drops only apply within the same scope. Since each gallery is now edited on
+  // its own, a drag can't even start in one scope and land in another — but the
+  // guard stays, because a stale `drag` from a section the admin has since
+  // collapsed would otherwise reorder the wrong list.
   function onDropInGallery(variantValue: string, target: number) {
     if (drag && drag.scope === variantValue) {
       setGallery(variantValue, reorder(state.galleries[variantValue] ?? [], drag.index, target));
@@ -235,54 +263,108 @@ export function VariantMediaTab({
     return p && !(state.galleries[v] ?? []).includes(p);
   });
 
-  // ── Products with no options: one flat gallery, nothing else ──
-  if (visualValues.length === 0) {
+  // Galleries filed under a value that no option offers any more — either the
+  // admin switched the controller or answered None. They are dropped on save,
+  // so say so before the save rather than after it.
+  const orphanedValues = flat
+    ? Object.entries(state.galleries)
+        .filter(([, imgs]) => imgs.length > 0)
+        .map(([val]) => val)
+    : [];
+
+  const controller = optionMatrix.length > 0 && onVisualOptionChange && (
+    <Block>
+      <SectionHeader
+        title="Image Controller"
+        tip={
+          <>
+            Which option&apos;s values swap the photos. Combinations differing
+            only by the other options reuse the same gallery, so you shoot once
+            per value rather than once per combination — Colour is almost always
+            the right answer, Size almost never. Pick <b>None</b> when the photos
+            are the same whatever the customer chooses; the product then has one
+            gallery and every option is offered as plain buttons.
+          </>
+        }
+        aside={
+          <span className="text-xs text-muted-foreground">
+            {flat ? "One gallery for the whole product" : `${visualValues.length} galleries`}
+          </span>
+        }
+      />
+      <select
+        value={noneSelected ? IMAGE_CONTROLLER_NONE : visualName}
+        onChange={(e) => onVisualOptionChange(e.target.value)}
+        aria-label="Option that controls the galleries"
+        className="input max-w-sm"
+      >
+        <option value={IMAGE_CONTROLLER_NONE}>
+          None — photos don&apos;t vary by option
+        </option>
+        {optionMatrix.map((o) => (
+          <option key={o.name} value={o.name}>
+            {o.name} — {o.values.length} value{o.values.length === 1 ? "" : "s"}
+          </option>
+        ))}
+      </select>
+      {orphanedValues.length > 0 && (
+        <Notice tone="warn">
+          Photos are still filed under <b>{orphanedValues.join(", ")}</b>. With
+          no controller they have nowhere to go, and saving drops them — move
+          anything you want to keep into the gallery below first.
+        </Notice>
+      )}
+    </Block>
+  );
+
+  // ── One flat gallery: None, or a product with no options ──
+  if (flat) {
     return (
-      <div className="space-y-3">
-        <SectionHeader
-          title="Product Gallery"
-          tip="This product has no options, so it has one gallery. The first photo is the cover shown on listing cards, in search results and on social previews. Drag to reorder."
-          aside={
-            <span className="text-xs text-muted-foreground">
-              {countLabel(state.common.length)}
-            </span>
-          }
-        />
-        <GalleryGrid
-          images={state.common}
-          scope={COMMON_SCOPE}
-          drag={drag}
-          setDrag={setDrag}
-          onDrop={onDropInCommon}
-          onRemove={removeFromCommon}
-          firstIsCover
-        />
-        <div className="flex flex-wrap items-center gap-2">
-          <PhotoPicker
+      <div className="space-y-4">
+        {controller}
+        <Block>
+          <SectionHeader
+            title="Product Gallery"
+            tip="Every photo this product has, in the order the customer swipes them. The first is the cover shown on listing cards, in search results and on social previews. Drag to reorder."
+            aside={
+              <span className="text-xs text-muted-foreground">
+                {countLabel(state.common.length)}
+              </span>
+            }
+          />
+          <GalleryActions
             selected={state.common}
             onChange={setCommon}
             preferCategory={productCategory}
             preferSubcategory={productSubcategory}
             preferVariantValue=""
-            label={pickerLabel(state.common.length)}
+            onUploadFiles={onUploadFiles}
+            onUploaded={(urls) => appendTo(COMMON_SCOPE, urls)}
           />
-          {onUploadFiles && (
-            <UploadButton
-              onFiles={async (files) => appendTo(COMMON_SCOPE, await onUploadFiles(files))}
+          {state.common.length > 0 ? (
+            <GalleryGrid
+              images={state.common}
+              scope={COMMON_SCOPE}
+              drag={drag}
+              setDrag={setDrag}
+              onDrop={onDropInCommon}
+              onRemove={removeFromCommon}
+              firstIsCover
             />
+          ) : (
+            <Notice tone="warn">
+              This product has no photos yet. Add at least one before saving.
+            </Notice>
           )}
-        </div>
-        {state.common.length === 0 && (
-          <Notice tone="warn">
-            This product has no photos yet. Add at least one before saving.
-          </Notice>
-        )}
+        </Block>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
+      {controller}
+
       {/* ── Readiness summary ── */}
       {needsPhotos.length === 0 && previewNotInGallery.length === 0 ? (
         <Notice tone="ok">
@@ -306,7 +388,7 @@ export function VariantMediaTab({
               <button
                 type="button"
                 onClick={() => previewNotInGallery.forEach(addPreviewToGallery)}
-                className="font-medium underline underline-offset-2"
+                className="cursor-pointer font-medium underline underline-offset-2"
               >
                 Add each preview to its gallery
               </button>
@@ -315,35 +397,13 @@ export function VariantMediaTab({
         </div>
       )}
 
-      {/* ── Section 0: Image Controller ── */}
-      {optionMatrix.length > 1 && onVisualOptionChange && (
-        <div className="space-y-3">
-          <SectionHeader
-            title="Image Controller"
-            tip="Which option's values swap the photos. Combinations that differ only by the other options reuse the same gallery, so you shoot once per value rather than once per combination — Colour is almost always the right answer, Size almost never."
-          />
-          <select
-            value={visualName}
-            onChange={(e) => onVisualOptionChange(e.target.value)}
-            aria-label="Option that controls the galleries"
-            className="input max-w-xs"
-          >
-            {optionMatrix.map((o) => (
-              <option key={o.name} value={o.name}>
-                {o.name} — {o.values.length} value{o.values.length === 1 ? "" : "s"}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-
       {/* ── Section 1: Variant Previews (manually chosen per value) ── */}
-      <div className="space-y-3">
+      <Block>
         <SectionHeader
           title="Variant Previews"
           tip={`One image per ${visualName} — the thumbnail on the storefront's picker cards. Leave it unset and that value's first gallery photo is used instead, which is usually what you want.`}
         />
-        <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
           {visualValues.map((val) => {
             const manual = state.previews[val] ?? null;
             const gallery = state.galleries[val] ?? [];
@@ -356,7 +416,7 @@ export function VariantMediaTab({
               <div
                 key={val}
                 className={cn(
-                  "min-w-0 rounded-lg border p-2",
+                  "min-w-0 space-y-2 rounded-lg border p-2",
                   effective ? "border-border" : "border-danger/50 bg-danger/5"
                 )}
               >
@@ -367,21 +427,21 @@ export function VariantMediaTab({
                         src={decodeURI(effective)}
                         alt={val}
                         fill
-                        sizes="96px"
+                        sizes="120px"
                         className="object-cover"
                       />
                       {manual ? (
                         <button
                           type="button"
                           onClick={() => setPreview(val, null)}
-                          className="absolute right-0.5 top-0.5 grid h-5 w-5 place-items-center rounded-lg bg-black/70 text-white hover:bg-danger"
-                          aria-label="Clear preview"
+                          className="absolute right-1 top-1 grid h-7 w-7 cursor-pointer place-items-center rounded-lg bg-black/70 text-white transition-colors hover:bg-danger"
+                          aria-label={`Clear the chosen preview for ${val}`}
                           title="Clear manual preview"
                         >
-                          <X className="h-3 w-3" />
+                          <X className="h-3.5 w-3.5" />
                         </button>
                       ) : (
-                        <span className="absolute inset-x-0 bottom-0 bg-black/60 text-center text-[8px] leading-tight text-white">
+                        <span className="absolute inset-x-0 bottom-0 bg-black/60 py-0.5 text-center text-[9px] leading-tight text-white">
                           auto
                         </span>
                       )}
@@ -393,14 +453,16 @@ export function VariantMediaTab({
                   )}
                 </div>
 
-                <p className="mt-1.5 truncate text-center text-[11px] font-medium" title={val}>
-                  {val}
-                </p>
-                <p className="text-center text-[10px] text-muted-foreground">
-                  {inactive ? "inactive" : countLabel(gallery.length)}
-                </p>
+                <div className="min-w-0">
+                  <p className="truncate text-center text-xs font-medium" title={val}>
+                    {val}
+                  </p>
+                  <p className="text-center text-[11px] text-muted-foreground">
+                    {inactive ? "inactive" : countLabel(gallery.length)}
+                  </p>
+                </div>
 
-                <div className="mt-1.5 [&_button]:w-full [&_button]:justify-center">
+                <div className="[&_button]:w-full [&_button]:justify-center [&_button]:px-2">
                   <PhotoPicker
                     selected={manual ? [manual] : []}
                     onChange={([url]) => setPreview(val, url ?? null)}
@@ -415,13 +477,27 @@ export function VariantMediaTab({
             );
           })}
         </div>
-      </div>
+      </Block>
 
       {/* ── Section 2: Variant Galleries ── */}
-      <div className="space-y-3">
+      <Block>
         <SectionHeader
           title={`${visualName} Galleries`}
-          tip={`The photos shown once a customer picks each ${visualName}. Any number per value — some may have three, others eight. "Final gallery" is the combined list they actually swipe through: this value's photos first, then the common ones.`}
+          tip={
+            <>
+              The photos shown once a customer picks each {visualName}, in the
+              order you drag them into. Each section holds <b>only</b> that
+              value&apos;s own photos — nothing shared. Anything the whole
+              product shares goes in the Common Gallery below and is appended
+              after these on the storefront, never mixed into them.
+            </>
+          }
+          aside={
+            <span className="text-xs text-muted-foreground">
+              {visualValues.length} {visualName.toLowerCase()}
+              {visualValues.length === 1 ? "" : "s"}
+            </span>
+          }
         />
         <div className="space-y-2">
           {visualValues.map((val) => {
@@ -430,10 +506,6 @@ export function VariantMediaTab({
             const inactive = !isActive(val);
             const manual = state.previews[val];
             const previewMissing = !!manual && !gallery.includes(manual);
-            // Default (and only) order: this value's gallery first, then the
-            // common gallery. Reorder within each group by dragging; common
-            // photos are never interleaved into the middle of the variant photos.
-            const finalGallery = [...gallery, ...state.common];
 
             return (
               <div key={val} className="overflow-hidden rounded-lg border border-border">
@@ -460,6 +532,9 @@ export function VariantMediaTab({
                   {gallery.length === 0 && !inactive && (
                     <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-danger" />
                   )}
+                  {/* This value's own photos, and nothing else. It used to read
+                      "2 / 7", where the 7 counted the common photos too — the
+                      number that made them look like they belonged here. */}
                   <span
                     className={cn(
                       "shrink-0 rounded-md px-2 py-0.5 text-xs tabular-nums",
@@ -467,96 +542,47 @@ export function VariantMediaTab({
                         ? "bg-danger/10 text-danger"
                         : "bg-muted text-muted-foreground"
                     )}
-                    title={`${countLabel(gallery.length)} of its own, ${finalGallery.length} in the final gallery`}
+                    title={`${countLabel(gallery.length)} of its own`}
                   >
-                    {gallery.length} / {finalGallery.length}
+                    {gallery.length}
                   </span>
                 </button>
 
                 {isOpen && (
                   <div className="space-y-3 border-t border-border p-3">
-                    {/* Actions row */}
                     <div className="flex flex-wrap items-center gap-2">
-                      <PhotoPicker
+                      <GalleryActions
                         selected={gallery}
                         onChange={(imgs) => setGallery(val, imgs)}
                         preferCategory={productCategory}
                         preferVariantValue={val}
                         preferSubcategory={productSubcategory}
-                        label={pickerLabel(gallery.length)}
+                        onUploadFiles={onUploadFiles}
+                        onUploaded={(urls) => appendTo(val, urls)}
                       />
-                      {onUploadFiles && (
-                        <UploadButton
-                          onFiles={async (files) => appendTo(val, await onUploadFiles(files))}
-                        />
-                      )}
                       {previewMissing && (
                         <button
                           type="button"
                           onClick={() => addPreviewToGallery(val)}
-                          className="inline-flex min-h-9 cursor-pointer items-center rounded-lg border border-danger/40 bg-danger/5 px-3 text-[11px] font-medium uppercase tracking-widest text-danger transition-colors hover:bg-danger/10"
+                          className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-danger/40 bg-danger/5 px-3 text-[11px] font-medium uppercase tracking-widest text-danger transition-colors hover:bg-danger/10"
                         >
                           Use preview in gallery
                         </button>
                       )}
                     </div>
 
-                    {/* Variant-only gallery grid (drag to reorder, click X to remove).
-                        Editing here reflects in the Final gallery below. */}
                     {gallery.length > 0 ? (
-                      <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-7">
-                        {gallery.map((img, i) => (
-                          <div
-                            key={img}
-                            draggable
-                            onDragStart={() => setDrag({ scope: val, index: i })}
-                            onDragOver={(e) => e.preventDefault()}
-                            onDrop={() => onDropInGallery(val, i)}
-                            onDragEnd={() => setDrag(null)}
-                            className={`group relative aspect-square cursor-move overflow-hidden rounded-lg border bg-muted transition-all ${
-                              drag?.scope === val && drag.index === i
-                                ? "border-accent opacity-40 ring-2 ring-accent"
-                                : "border-border"
-                            }`}
-                          >
-                            <Image
-                              src={decodeURI(img)}
-                              alt={`${val} image ${i + 1}`}
-                              fill
-                              sizes="80px"
-                              className="pointer-events-none object-cover"
-                            />
-                            {/* Drag handle hint */}
-                            <span className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-lg bg-black/50 text-white opacity-0 transition-opacity group-hover:opacity-100">
-                              <GripVertical className="h-3 w-3" />
-                            </span>
-                            {/* Set as preview / preview badge (manual choice) */}
-                            {state.previews[val] !== img && (
-                              <button
-                                type="button"
-                                onClick={() => setPreview(val, img)}
-                                className="absolute inset-x-0 bottom-0 bg-black/60 py-0.5 text-center text-[9px] text-white opacity-0 transition-opacity group-hover:opacity-100"
-                                title="Set as preview"
-                              >
-                                Set preview
-                              </button>
-                            )}
-                            {state.previews[val] === img && (
-                              <span className="absolute left-1 top-1 rounded-full bg-accent px-1.5 py-0.5 text-[9px] font-semibold text-white">
-                                Preview
-                              </span>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => removeFromGallery(val, img)}
-                              className="absolute bottom-1 right-1 grid h-5 w-5 place-items-center rounded-lg bg-black/70 text-white opacity-0 transition-opacity hover:bg-danger group-hover:opacity-100"
-                              aria-label="Remove"
-                            >
-                              <X className="h-3 w-3" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
+                      <GalleryGrid
+                        images={gallery}
+                        scope={val}
+                        drag={drag}
+                        setDrag={setDrag}
+                        onDrop={(target) => onDropInGallery(val, target)}
+                        onRemove={(url) => removeFromGallery(val, url)}
+                        label={val}
+                        previewUrl={state.previews[val]}
+                        onSetPreview={(url) => setPreview(val, url)}
+                      />
                     ) : (
                       <Notice tone={inactive ? "info" : "warn"}>
                         {inactive
@@ -564,138 +590,68 @@ export function VariantMediaTab({
                           : `No photos for this ${visualName} yet — add some, or the picker card falls back to a common photo.`}
                       </Notice>
                     )}
-
-                    {/* Interactive "Final gallery" — variant gallery + common.
-                        Removing/reordering here writes back to the correct
-                        source (variant vs. common). */}
-                    <div>
-                      <p className="mb-1.5 flex items-center gap-1 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
-                        Final gallery ({finalGallery.length})
-                        <InfoTip term="Final gallery">
-                          Exactly what the customer swipes through for this{" "}
-                          {visualName}: its own photos in your order, then the
-                          common photos in theirs. Drag to reorder within a
-                          group, × to remove — either writes back to the gallery
-                          the photo came from.
-                        </InfoTip>
-                      </p>
-                      {finalGallery.length > 0 ? (
-                        <div className="flex flex-wrap gap-1.5">
-                          {finalGallery.map((img, i) => {
-                            const isCommon = i >= gallery.length;
-                            const scope = isCommon ? COMMON_SCOPE : val;
-                            const localIndex = isCommon ? i - gallery.length : i;
-                            const isDragging =
-                              drag?.scope === scope && drag.index === localIndex;
-                            return (
-                              <div
-                                key={`${img}-${i}`}
-                                draggable
-                                onDragStart={() => setDrag({ scope, index: localIndex })}
-                                onDragOver={(e) => e.preventDefault()}
-                                onDrop={() => {
-                                  if (isCommon) onDropInCommon(localIndex);
-                                  else onDropInGallery(val, localIndex);
-                                }}
-                                onDragEnd={() => setDrag(null)}
-                                className={`group relative h-14 w-14 cursor-move overflow-hidden rounded-md border bg-muted transition-all ${
-                                  isDragging
-                                    ? "border-accent opacity-40 ring-2 ring-accent"
-                                    : "border-border"
-                                }`}
-                                title={isCommon ? "Common image" : `${visualName} image`}
-                              >
-                                <Image
-                                  src={decodeURI(img)}
-                                  alt={`Final ${i + 1}`}
-                                  fill
-                                  sizes="56px"
-                                  className="pointer-events-none object-cover"
-                                />
-                                {isCommon && (
-                                  <span className="absolute inset-x-0 bottom-0 bg-black/60 text-center text-[7px] leading-tight text-white">
-                                    common
-                                  </span>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    if (isCommon) removeFromCommon(img);
-                                    else removeFromGallery(val, img);
-                                  }}
-                                  className="absolute right-0.5 top-0.5 grid h-4 w-4 place-items-center rounded-lg bg-black/70 text-white opacity-0 transition-opacity hover:bg-danger group-hover:opacity-100"
-                                  aria-label="Remove"
-                                >
-                                  <X className="h-2.5 w-2.5" />
-                                </button>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <p className="text-xs text-muted-foreground">
-                          Nothing yet — this {visualName} has no photos and there are
-                          no common photos.
-                        </p>
-                      )}
-                    </div>
                   </div>
                 )}
               </div>
             );
           })}
         </div>
-      </div>
+      </Block>
 
       {/* ── Section 3: Common Gallery ── */}
-      <div className="space-y-3">
+      <Block>
         <SectionHeader
           title="Common Gallery"
-          tip={`Photos appended to every ${visualName}'s gallery — packaging, a size chart, a care card, whatever the whole product shares. They always come after the ${visualName} photos, never interleaved.`}
+          tip={`Photos the whole product shares — packaging, a size chart, a care card. They are appended AFTER the chosen ${visualName}'s own photos on the storefront, never interleaved, and they are only ever added or reordered here.`}
           aside={
             <span className="text-xs text-muted-foreground">
-              {countLabel(state.common.length)} · added to all{" "}
-              {visualValues.length} {visualName} galleries
+              {countLabel(state.common.length)} · shown for every {visualName}
             </span>
           }
         />
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <PhotoPicker
-              selected={state.common}
-              onChange={setCommon}
-              preferCategory={productCategory}
-              preferSubcategory={productSubcategory}
-              preferVariantValue=""   // "" = common sentinel (no variant tag)
-              label={pickerLabel(state.common.length)}
-            />
-            {onUploadFiles && (
-              <UploadButton
-                onFiles={async (files) => appendTo(COMMON_SCOPE, await onUploadFiles(files))}
-              />
-            )}
-          </div>
-          {state.common.length > 0 ? (
-            <GalleryGrid
-              images={state.common}
-              scope={COMMON_SCOPE}
-              drag={drag}
-              setDrag={setDrag}
-              onDrop={onDropInCommon}
-              onRemove={removeFromCommon}
-            />
-          ) : (
-            <Notice tone="info">
-              Optional — leave empty if every photo is {visualName}-specific.
-            </Notice>
-          )}
-        </div>
-      </div>
+        <GalleryActions
+          selected={state.common}
+          onChange={setCommon}
+          preferCategory={productCategory}
+          preferSubcategory={productSubcategory}
+          preferVariantValue="" // "" = common sentinel (no variant tag)
+          onUploadFiles={onUploadFiles}
+          onUploaded={(urls) => appendTo(COMMON_SCOPE, urls)}
+        />
+        {state.common.length > 0 ? (
+          <GalleryGrid
+            images={state.common}
+            scope={COMMON_SCOPE}
+            drag={drag}
+            setDrag={setDrag}
+            onDrop={onDropInCommon}
+            onRemove={removeFromCommon}
+            label="Common"
+          />
+        ) : (
+          <Notice tone="info">
+            Optional — leave empty if every photo is {visualName}-specific.
+          </Notice>
+        )}
+      </Block>
     </div>
   );
 }
 
 // ---- Helper components ----
+
+/**
+ * One section. Every block in this tab has the same border, radius and padding
+ * so the tab reads as a rhythm rather than a pile — `p-3` / `space-y-3`, the
+ * scale form-kit documents.
+ */
+function Block({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="min-w-0 space-y-3 rounded-lg border border-border p-3">
+      {children}
+    </div>
+  );
+}
 
 /**
  * Section title + an `(i)`. The descriptions used to be two-line paragraphs
@@ -719,6 +675,45 @@ function SectionHeader({
         <InfoTip term={title}>{tip}</InfoTip>
       </h4>
       {aside}
+    </div>
+  );
+}
+
+/**
+ * The picker + upload pair that opens every gallery. One component so the two
+ * buttons keep the same height and gap wherever a gallery appears — they had
+ * drifted to 44px and 36px sitting next to each other.
+ */
+function GalleryActions({
+  selected,
+  onChange,
+  preferCategory,
+  preferSubcategory,
+  preferVariantValue,
+  onUploadFiles,
+  onUploaded,
+}: {
+  selected: string[];
+  onChange: (next: string[]) => void;
+  preferCategory?: string;
+  preferSubcategory?: string;
+  preferVariantValue?: string;
+  onUploadFiles?: (files: File[]) => Promise<string[]>;
+  onUploaded: (urls: string[]) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <PhotoPicker
+        selected={selected}
+        onChange={onChange}
+        preferCategory={preferCategory}
+        preferSubcategory={preferSubcategory}
+        preferVariantValue={preferVariantValue}
+        label={pickerLabel(selected.length)}
+      />
+      {onUploadFiles && (
+        <UploadButton onFiles={async (files) => onUploaded(await onUploadFiles(files))} />
+      )}
     </div>
   );
 }
@@ -750,15 +745,15 @@ function UploadButton({ onFiles }: { onFiles: (files: File[]) => Promise<void> }
   return (
     <label
       className={cn(
-        "inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-card px-3",
-        "text-[11px] font-medium uppercase tracking-widest transition-colors hover:bg-muted",
+        "inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-card px-4",
+        "text-sm transition-colors hover:bg-muted",
         busy && "pointer-events-none opacity-60"
       )}
     >
       {busy ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        <Loader2 className="h-4 w-4 animate-spin" />
       ) : (
-        <Upload className="h-3.5 w-3.5" />
+        <Upload className="h-4 w-4" />
       )}
       Upload
       <input
@@ -783,7 +778,12 @@ function UploadButton({ onFiles }: { onFiles: (files: File[]) => Promise<void> }
   );
 }
 
-/** Square, draggable photo grid — used by the common/flat galleries. */
+/**
+ * Square, draggable photo grid — the ONE grid every gallery uses, so a variant
+ * gallery and the common gallery cannot drift apart in size, spacing or
+ * controls. It edits exactly the list it is given: there is no second,
+ * read-only view of these photos anywhere.
+ */
 function GalleryGrid({
   images,
   scope,
@@ -792,6 +792,9 @@ function GalleryGrid({
   onDrop,
   onRemove,
   firstIsCover = false,
+  label,
+  previewUrl,
+  onSetPreview,
 }: {
   images: string[];
   scope: string;
@@ -800,6 +803,11 @@ function GalleryGrid({
   onDrop: (target: number) => void;
   onRemove: (url: string) => void;
   firstIsCover?: boolean;
+  /** Used in the alt text, so screen readers can tell two grids apart. */
+  label?: string;
+  /** The value's chosen preview, when this grid belongs to one. */
+  previewUrl?: string;
+  onSetPreview?: (url: string) => void;
 }) {
   if (images.length === 0) return null;
   return (
@@ -812,34 +820,50 @@ function GalleryGrid({
           onDragOver={(e) => e.preventDefault()}
           onDrop={() => onDrop(i)}
           onDragEnd={() => setDrag(null)}
-          className={`group relative aspect-square cursor-move overflow-hidden rounded-lg border bg-muted transition-all ${
+          className={cn(
+            "group relative aspect-square cursor-move overflow-hidden rounded-lg border bg-muted transition-all",
             drag?.scope === scope && drag.index === i
               ? "border-accent opacity-40 ring-2 ring-accent"
               : "border-border"
-          }`}
+          )}
         >
           <Image
             src={decodeURI(img)}
-            alt={`Image ${i + 1}`}
+            alt={`${label ? `${label} ` : ""}image ${i + 1}`}
             fill
-            sizes="80px"
+            sizes="96px"
             className="pointer-events-none object-cover"
           />
           {firstIsCover && i === 0 && (
-            <span className="absolute inset-x-0 bottom-0 bg-accent/90 text-center text-[9px] font-semibold text-white">
+            <span className="absolute inset-x-0 bottom-0 bg-accent/90 py-0.5 text-center text-[9px] font-semibold text-white">
               Cover
             </span>
           )}
-          <span className="absolute left-1 top-1 grid h-5 w-5 place-items-center rounded-lg bg-black/50 text-white opacity-0 transition-opacity group-hover:opacity-100">
-            <GripVertical className="h-3 w-3" />
+          <span className="absolute left-1 top-1 grid h-7 w-7 place-items-center rounded-lg bg-black/50 text-white opacity-0 transition-opacity group-hover:opacity-100">
+            <GripVertical className="h-3.5 w-3.5" />
           </span>
+          {onSetPreview && previewUrl === img && (
+            <span className="absolute inset-x-0 bottom-0 bg-accent/90 py-0.5 text-center text-[9px] font-semibold text-white">
+              Preview
+            </span>
+          )}
+          {onSetPreview && previewUrl !== img && (
+            <button
+              type="button"
+              onClick={() => onSetPreview(img)}
+              className="absolute inset-x-0 bottom-0 cursor-pointer bg-black/60 py-1 text-center text-[9px] text-white opacity-0 transition-opacity group-hover:opacity-100"
+              title="Use this as the picker thumbnail"
+            >
+              Set preview
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onRemove(img)}
-            className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-lg bg-black/70 text-white opacity-0 transition-opacity hover:bg-danger group-hover:opacity-100"
-            aria-label="Remove"
+            className="absolute right-1 top-1 grid h-7 w-7 cursor-pointer place-items-center rounded-lg bg-black/70 text-white opacity-0 transition-opacity hover:bg-danger group-hover:opacity-100"
+            aria-label={`Remove ${label ? `${label} ` : ""}image ${i + 1}`}
           >
-            <X className="h-3 w-3" />
+            <X className="h-3.5 w-3.5" />
           </button>
         </div>
       ))}

@@ -23,6 +23,7 @@ import {
   PackageX,
   UserRound,
   Megaphone,
+  Zap,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { logout } from "@/app/actions/auth";
@@ -66,6 +67,10 @@ const nav: {
   { href: "/admin/media", label: "Media Library", icon: Images },
   { href: "/admin/leads", label: "Interested customers", icon: Users },
   { href: "/admin/messages", label: "Inquiries", icon: MessageSquare },
+  // Last before Settings, because it is the screen you open to ask "what is
+  // this store doing without me?" — and half of that answer lives in Settings,
+  // which it links to rather than duplicating.
+  { href: "/admin/automation", label: "Automation", icon: Zap },
   { href: "/admin/settings", label: "Branding & settings", icon: Settings },
 ];
 

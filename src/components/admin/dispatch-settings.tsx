@@ -58,9 +58,10 @@ const MODE_TIP: Record<DispatchOnConfirm, React.ReactNode> = {
   off: (
     <>
       Confirming emails the customer and nothing else — NimbusPost is not
-      touched. Pick this if you pack in batches, or ship some orders yourself:
-      every order waits on the orders screen with <b>Ship now</b> and{" "}
-      <b>Send draft</b> next to it.
+      touched, and no courier is picked. Pick this if you pack in batches, or
+      ship some orders yourself: every order waits on the orders screen with{" "}
+      <b>Choose courier</b> next to it, which shows the live rates and then lets
+      you either stage a free draft or book the AWB with whichever one you pick.
     </>
   ),
   draft: (
@@ -197,18 +198,35 @@ export function DispatchFields({
         </span>
       </p>
 
-      {/* ---- Q2 — only when Q1 is "book" ---- */}
-      {dispatchOnConfirm === "book" && (
+      {/* ---- Q2 — whenever Q1 reaches the courier at all ----
+          This used to be `=== "book"`, which was right when only booking chose
+          a carrier. It is not any more: a `draft` confirmation now prices the
+          parcel and attaches the winning courier to the draft, so this setting
+          decides which one gets attached. Hiding it under `draft` would have
+          made a rule that is in force invisible — the exact failure the
+          comment above warns about, inverted. */}
+      {dispatchOnConfirm !== "off" && (
         <div className="rounded-lg border border-border bg-muted/30 p-2.5">
           <p className="mb-1.5 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-            Which courier to book
+            {dispatchOnConfirm === "book"
+              ? "Which courier to book"
+              : "Which courier to put on the draft"}
             <InfoTip term="Courier preference">
               Cheapest picks the lowest total charge to your wallet. Fastest
               picks the shortest quoted transit time, which usually costs more;
               a courier that quotes no delivery estimate is never treated as the
-              fast one. Pinning one carrier books that carrier — and falls back
+              fast one. Pinning one carrier uses that carrier — and falls back
               to the cheapest if it is not quoting for that parcel and pincode,
               rather than leaving the order unshipped.
+              {dispatchOnConfirm === "draft" && (
+                <>
+                  {" "}
+                  On <b>Stage a draft</b> this only <em>pre-picks</em>: the
+                  carrier and its price are attached to the draft so you can see
+                  what booking will cost, and nothing is allocated or charged
+                  until you press Book. You can change it on the order.
+                </>
+              )}
             </InfoTip>
           </p>
 
@@ -224,8 +242,8 @@ export function DispatchFields({
             <span className="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
               Or pin one courier
               <InfoTip term="Pinned courier">
-                The carrier&apos;s name exactly as NimbusPost quotes it on the
-                Ship now screen — for example <b>Xpressbees Air</b>. Leave it
+                The carrier&apos;s name exactly as NimbusPost quotes it under
+                Choose courier — for example <b>Xpressbees Air</b>. Leave it
                 empty to use cheapest or fastest instead.
               </InfoTip>
             </span>

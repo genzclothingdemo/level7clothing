@@ -23,7 +23,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { getAdminSession } from "@/lib/auth";
 import { PORTFOLIO_KINDS, isSafeHref, type PortfolioKind } from "@/lib/portfolio";
-import { resolveInstagramPost } from "@/lib/instagram-resolve";
+import { resolveSocialPost, type SocialProvider } from "@/lib/instagram-resolve";
 import { put } from "@vercel/blob";
 
 async function requireAdmin() {
@@ -375,15 +375,16 @@ export async function reorderPortfolio(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Instagram import                                                   */
+/*  Mirroring an Instagram post or a YouTube video                     */
 /* ------------------------------------------------------------------ */
 
-export type InstagramImportResult =
+export type SocialImportResult =
   | {
       success: true;
+      provider: SocialProvider;
       url: string;
       title: string | null;
-      /** A Blob address we own, or null when copying was not possible. */
+      /** A Blob address we own, the provider's own poster, or null. */
       imageUrl: string | null;
       embedHtml: string;
       /** Set when the post belongs to a different handle — worth showing. */
@@ -394,50 +395,74 @@ export type InstagramImportResult =
   | { success: false; error: string };
 
 /**
- * Paste an Instagram link, get back everything the form needs.
+ * Paste a link, get back everything the form needs to **mirror** it: the
+ * caption, a poster we can serve ourselves, and the iframe address the tile
+ * plays inline.
  *
- * **The thumbnail is copied, never linked.** `scontent.cdninstagram.com`
- * addresses carry a signed `oe=` expiry — measured at four days on the posts
- * this was built against — so storing one produces a portfolio that looks
- * right today and is broken images next week, silently. The bytes are fetched
- * once and put in Vercel Blob, and `imageUrl` holds an address we control.
+ * **The Instagram thumbnail is copied, never linked.**
+ * `scontent.cdninstagram.com` addresses carry a signed `oe=` expiry — measured
+ * at four days on the posts this was built against — so storing one produces a
+ * portfolio that looks right today and is broken images next week, silently.
+ * The bytes are fetched once and put in Vercel Blob, and `imageUrl` holds an
+ * address we control.
  *
- * Failure to copy is deliberately **not** fatal: the row is still worth
- * saving with a working permalink and embed, so the caller gets a warning and
- * the owner can attach a photo from the media library instead.
+ * **YouTube differs, and the difference is handled rather than flattened.**
+ * `i.ytimg.com` posters do not expire and that host is already in
+ * `next.config.ts`, so when the blob copy is impossible the poster address is
+ * stored as-is and the result is a working, optimised image — not a warning.
+ * Copying is still preferred: it takes one third party out of the render path.
+ *
+ * Failure to copy is deliberately **not** fatal for either provider: the row is
+ * still worth saving with a working permalink and embed.
  */
-export async function importInstagramPost(
+export async function importSocialPost(
   rawUrl: string
-): Promise<InstagramImportResult> {
+): Promise<SocialImportResult> {
   try {
     await requireAdmin();
 
-    const post = await resolveInstagramPost(rawUrl);
+    const post = await resolveSocialPost(rawUrl);
     if (!post) {
       return {
         success: false,
         error:
-          "Couldn't read that link. Check it is a public Instagram post or reel — private and deleted posts can't be read, and Instagram sometimes rate-limits. You can still save it as a plain link.",
+          "Couldn't read that link. It needs to be a public Instagram post or reel, or a YouTube video or short — private, deleted and age-restricted ones can't be read, and Instagram sometimes rate-limits. You can still save it as a plain link.",
       };
     }
 
     // `<iframe src>` is what `embedSrcFromHtml` parses back out; we store the
     // same shape the oEmbed API would have returned so there is one reader.
-    const embedHtml = `<iframe src="${post.embedUrl}" width="400" height="480" frameborder="0" scrolling="no" allowtransparency="true"></iframe>`;
+    const size =
+      post.provider === "youtube"
+        ? 'width="560" height="315"'
+        : 'width="400" height="480"';
+    const embedHtml = `<iframe src="${post.embedUrl}" ${size} frameborder="0" scrolling="no" allowtransparency="true"></iframe>`;
 
     let imageUrl: string | null = null;
     let warning: string | undefined;
 
     if (post.thumbnailUrl) {
-      const copied = await copyToBlob(post.thumbnailUrl, `instagram/${post.shortcode}`);
-      if (copied.ok) imageUrl = copied.url;
-      else warning = copied.error;
+      const copied = await copyToBlob(
+        post.thumbnailUrl,
+        `${post.provider}/${post.shortcode}`
+      );
+      if (copied.ok) {
+        imageUrl = copied.url;
+      } else if (post.thumbnailExpires) {
+        // Storing this address would look fine today and be a broken tile next
+        // week, so it is refused and the owner is told to pick a photo.
+        warning = copied.error;
+      } else {
+        // YouTube: the provider's own address is permanent and allow-listed.
+        imageUrl = post.thumbnailUrl;
+      }
     } else {
-      warning = "Instagram returned no preview image for this post.";
+      warning = "That post didn't return a preview image.";
     }
 
     return {
       success: true,
+      provider: post.provider,
       url: post.url,
       title: post.title,
       imageUrl,
@@ -472,13 +497,14 @@ async function copyToBlob(
   try {
     const res = await fetch(sourceUrl, { cache: "no-store" });
     if (!res.ok) {
-      return { ok: false, error: `Instagram returned ${res.status} for the preview image.` };
+      return { ok: false, error: `The preview image came back as ${res.status}.` };
     }
 
     const type = res.headers.get("content-type") ?? "";
     if (!type.startsWith("image/")) {
       return { ok: false, error: "That preview address didn't return an image." };
     }
+
 
     const buf = await res.arrayBuffer();
     const MAX = 8 * 1024 * 1024;
@@ -494,6 +520,6 @@ async function copyToBlob(
     });
     return { ok: true, url: blob.url };
   } catch {
-    return { ok: false, error: "Couldn't download the preview image from Instagram." };
+    return { ok: false, error: "Couldn't download the preview image." };
   }
 }

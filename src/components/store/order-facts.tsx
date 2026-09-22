@@ -283,6 +283,17 @@ export type OrderPaymentView = {
   shipping: number;
   discountTotal: number;
   couponCode: string | null;
+  /**
+   * What the store charged for handling cash on this order. Frozen at checkout
+   * onto `Order.paymentFee`, so it stays right after the setting changes.
+   *
+   * Shown as its own line whenever it is non-zero. It was invisible here while
+   * the setting was 0, which is exactly when an omission is cheapest to make
+   * and most expensive to find: the moment a fee is set, subtotal + shipping
+   * would stop adding up to the total and the customer would be reading an
+   * unexplained gap.
+   */
+  paymentFee: number;
   total: number;
   /** "COD" | "Razorpay" | "Partial" | "Direct" — free text on the row. */
   paymentMethod: string;
@@ -348,6 +359,16 @@ export function OrderPaymentFacts({
           label="Shipping"
           value={payment.shipping === 0 ? "Free" : formatINR(payment.shipping)}
         />
+        {payment.paymentFee > 0 && (
+          <MoneyRow
+            label={
+              payment.paymentMethod === "Partial"
+                ? "Cash handling (on the balance)"
+                : "Cash on delivery fee"
+            }
+            value={formatINR(payment.paymentFee)}
+          />
+        )}
         <div className="flex items-baseline justify-between gap-3 border-t border-border pt-1.5 font-medium">
           <dt>Total</dt>
           <dd className="tabular-nums">{formatINR(payment.total)}</dd>

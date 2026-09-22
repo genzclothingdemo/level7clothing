@@ -264,6 +264,7 @@ export default async function OrderPage({
             payment={{
               subtotal: order.subtotal,
               shipping: order.shipping,
+              paymentFee: order.paymentFee,
               discountTotal: order.discountTotal,
               couponCode: order.couponCode,
               total: order.total,

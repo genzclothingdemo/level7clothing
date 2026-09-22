@@ -106,6 +106,10 @@ model Order {
   items         Json // [{ productId, name, image, price, quantity }]
   subtotal      Int
   shipping      Int      @default(0)
+  // What was charged for handling cash on this order — the COD or partial fee
+  // from SiteSettings, frozen at checkout. Stored rather than recomputed
+  // because the setting can change and a past order must still add up.
+  paymentFee    Int      @default(0)
   total         Int
   paymentMethod String   @default("COD") // COD | Razorpay | Partial | Direct
   paymentStatus String   @default("pending") // pending | paid | partial | failed
@@ -319,7 +323,20 @@ model SiteSettings {
   codEnabled            Boolean  @default(true)  // Cash on Delivery
   prepaidEnabled        Boolean  @default(true)  // Prepaid (full online) — needs Razorpay
   partialEnabled        Boolean  @default(true)  // Advance + COD — needs Razorpay
-  directEnabled         Boolean  @default(true)  // Customised order (pay to owner)
+  // DEAD as of 2026-09-22. "Direct" meant "no online payment, arrange with the
+  // owner" and has been removed from checkout: the store now offers exactly
+  // three modes (COD, partial, prepaid) and two instruments (cash, Razorpay).
+  // The column stays so historical orders that recorded it still read back;
+  // nothing offers it and `resolveAllowedModes` must never return it.
+  directEnabled         Boolean  @default(false)
+  // ---- Cash handling fees ----
+  // Taking money at the door is not free: NimbusPost charges a COD collection
+  // fee, and a partly-paid order still has a cash leg. These let the store pass
+  // a nominal amount on, in whole rupees, added to the order total at checkout
+  // and recorded on `Order.paymentFee` so a past order can always be explained.
+  // 0 means "absorb it", which is the default.
+  codFeeAmount          Int      @default(0)
+  partialFeeAmount      Int      @default(0)
   announcement          String?  @default("Join the club — exclusive deals and early access to new drops")
   // ---- Product defaults ----
   // Store-wide copy for the product page's info accordion. Every product uses
@@ -724,4 +741,83 @@ model PortfolioItem {
   updatedAt   DateTime @updatedAt
 
   @@index([isActive, sortOrder])
+}
+
+// -------- Automation --------
+// Admin → Automation. One place that answers "what does this store do on its
+// own?", including the order-pipeline rules that live in Settings (linked to
+// from there rather than duplicated — see CLAUDE.md, one editor per setting).
+//
+// A rule is: when TRIGGER happens, and CONDITIONS match, after DELAY, do ACTION.
+// Only `email` exists today; `action` is a string rather than an enum so a
+// WhatsApp Business action can be added without a migration.
+
+model EmailTemplate {
+  id       String @id @default(cuid())
+  /** Stable handle for the ones the store ships with, e.g. "abandoned-cart". */
+  key      String @unique
+  name     String
+  subject  String
+  /** Body with {{token}} placeholders; the renderer decides what is available. */
+  body     String
+  /** True for templates the store ships with — editable, never deletable. */
+  isSystem Boolean @default(false)
+
+  rules     AutomationRule[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AutomationRule {
+  id          String @id @default(cuid())
+  name        String
+  /** "order.created", "order.status_changed", "cart.abandoned", … */
+  trigger     String
+  /** Narrowing, e.g. { "status": "shipped", "paymentMethod": "COD" }. */
+  conditions  Json    @default("{}")
+  action      String  @default("email")
+  templateId  String?
+  template    EmailTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  /** "customer" | "admin" | a literal address. */
+  recipient   String  @default("customer")
+  /** Minutes to wait. 0 fires inline; anything else is queued as a job. */
+  delayMinutes Int    @default(0)
+  isActive    Boolean @default(true)
+
+  lastRunAt DateTime?
+  runCount  Int       @default(0)
+
+  jobs      AutomationJob[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([trigger, isActive])
+}
+
+// One pending firing of a delayed rule. The cron drains this table, which is
+// what makes "24 hours after a cart is abandoned" possible on a serverless
+// host with no long-lived timers.
+model AutomationJob {
+  id     String @id @default(cuid())
+  ruleId String
+  rule   AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  runAt  DateTime
+  /** pending | sent | failed | cancelled */
+  status String   @default("pending")
+
+  /** What it is about: "order" | "lead" | "email", plus its id. */
+  subjectType String
+  subjectId   String
+  payload     Json   @default("{}")
+
+  error  String?
+  sentAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  // One pending job per rule per subject: an order whose status changes twice
+  // must not queue the same reminder twice.
+  @@unique([ruleId, subjectType, subjectId])
+  @@index([status, runAt])
 }

@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { DEFAULT_SETTINGS } from "@/lib/settings";
 import { isRazorpayConfigured } from "@/lib/razorpay";
 import { isNimbusPostConfigured } from "@/lib/nimbuspost";
-import { DEFAULT_REFUND_SETTINGS, normaliseReturnReasons } from "@/lib/returns";
+import { normaliseReturnReasons } from "@/lib/returns";
 import { dispatchModeOf, normalisePipelineSettings } from "@/lib/orders-pipeline";
 import { InfoTip } from "@/components/store/info-tip";
 import { SettingsForm } from "@/components/admin/settings-form";
@@ -13,12 +13,19 @@ import { SettingsForm } from "@/components/admin/settings-form";
 import { DEFAULT_TAB, isTabKey, type TabKey } from "@/lib/settings-tabs";
 import type { SettingsDraft } from "@/components/admin/settings-ui";
 import type { SettingsFacts } from "@/components/admin/settings-sections";
-import type { PaymentMode } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Settings" };
 
-const PAYMENT_MODES: PaymentMode[] = ["prepaid", "cod", "partial", "direct"];
+/**
+ * The three modes checkout can offer, for the catalogue coverage counts.
+ *
+ * "direct" is absent: it is no longer offered anywhere, so counting how many
+ * products allow it would put a number on this screen that describes nothing.
+ */
+const PAYMENT_MODES = ["prepaid", "cod", "partial"] as const;
+
+type CountedMode = (typeof PAYMENT_MODES)[number];
 
 /**
  * The settings row, read whole.
@@ -58,10 +65,7 @@ async function readCatalogue(): Promise<{
   catalogue: SettingsFacts["catalogue"];
   returnableSplit: { inherit: number; yes: number; no: number; total: number };
 }> {
-  const byMode = { prepaid: 0, cod: 0, partial: 0, direct: 0 } as Record<
-    PaymentMode,
-    number
-  >;
+  const byMode = { prepaid: 0, cod: 0, partial: 0 } as Record<CountedMode, number>;
   const empty = { inherit: 0, yes: 0, no: 0, total: 0 };
 
   const rows = await prisma.product
@@ -126,7 +130,11 @@ export default async function AdminSettings({
     codEnabled: row?.codEnabled ?? d.codEnabled,
     prepaidEnabled: row?.prepaidEnabled ?? d.prepaidEnabled,
     partialEnabled: row?.partialEnabled ?? d.partialEnabled,
-    directEnabled: row?.directEnabled ?? d.directEnabled,
+    // `directEnabled` is deliberately absent from the draft: the mode is gone
+    // from checkout, so there is nothing to edit. `settings-form` pins the
+    // column to `false` on every save.
+    codFeeAmount: String(row?.codFeeAmount ?? 0),
+    partialFeeAmount: String(row?.partialFeeAmount ?? 0),
     razorpayEnabled: row?.razorpayEnabled ?? d.razorpayEnabled,
     nimbusEnabled: row?.nimbusEnabled ?? d.nimbusEnabled,
     defaultMaterialsCare: row?.defaultMaterialsCare ?? d.defaultMaterialsCare,
@@ -145,8 +153,15 @@ export default async function AdminSettings({
   };
 
   const facts: SettingsFacts = {
+    // Booleans, never the values. Both helpers read `process.env` on the server
+    // and answer "is a key pair present?" — the keys themselves have no path to
+    // the browser, which is the strongest version of "never render a secret":
+    // there is nothing to render.
     razorpayConfigured: isRazorpayConfigured(),
     nimbusConfigured: isNimbusPostConfigured(),
+    // A warehouse label, not a credential — and the usual cause of a booking
+    // collecting from the wrong address, so it is worth stating plainly.
+    nimbusWarehouse: process.env.NIMBUSPOST_WAREHOUSE_NAME?.trim() ?? "",
     currency: row?.currency ?? d.currency,
     catalogue,
     // The return policy's starting values. `ReturnPolicyCard` owns the draft
@@ -158,15 +173,9 @@ export default async function AdminSettings({
       returnWindowDays: row?.returnWindowDays ?? d.returnWindowDays,
       returnReasons: normaliseReturnReasons(row?.returnReasons),
       returnPolicyNote: row?.returnPolicyNote ?? "",
-      refundFeePercent:
-        row?.refundFeePercent ?? DEFAULT_REFUND_SETTINGS.refundFeePercent,
-      refundFeeFlat: row?.refundFeeFlat ?? DEFAULT_REFUND_SETTINGS.refundFeeFlat,
-      partialAdvanceRefundable:
-        row?.partialAdvanceRefundable ??
-        DEFAULT_REFUND_SETTINGS.partialAdvanceRefundable,
-      waiveRefundFeeOnOurFault:
-        row?.waiveRefundFeeOnOurFault ??
-        DEFAULT_REFUND_SETTINGS.waiveRefundFeeOnOurFault,
+      // The four refund-fee columns are gone from the editable surface: a
+      // return is a full refund of the goods, fixed in `computeRefund`. Only
+      // the wording is still a setting.
       refundPolicyNote: row?.refundPolicyNote ?? "",
       defaultReturnsInfo: row?.defaultReturnsInfo ?? d.defaultReturnsInfo,
     },

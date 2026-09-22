@@ -237,8 +237,17 @@ export default async function ProductPage({
               Order is deliberate: the customer's first question is "which one do
               I want", so the option pickers sit directly under the price and the
               long-form copy (details, care, shipping, reviews) moves below the
-              fold into <ProductInfoSections />. */}
-          <div className="md:pt-2">
+              fold into <ProductInfoSections />.
+
+              `min-w-0` is load-bearing, not tidiness. A grid item's automatic
+              minimum size is its MIN-CONTENT width, and `overflow-x-auto` does
+              not stop min-content propagating out of a scroll container — so
+              the variant picker's five 84px `shrink-0` cards (+ gaps + px-5 =
+              500px) sized this column, not the track. At a 375px viewport the
+              document went to 500px wide: 125px of real overflow, the whole
+              page zoomed out, and the gallery and breadcrumb clipped at the
+              right edge. The gallery column opposite has always carried it. */}
+          <div className="min-w-0 md:pt-2">
             {/* Category */}
             <p className="text-[10px] uppercase tracking-widest text-muted-foreground sm:text-xs">
               {product.category}
@@ -336,9 +345,12 @@ export default async function ProductPage({
             Handpicked pieces that go beautifully together
           </p>
 
-          {/* Horizontal scroll carousel — snap on mobile, grid on desktop */}
-          <div className="-mx-5 mt-6 sm:mx-0">
-            <div className="no-scrollbar flex gap-4 overflow-x-auto px-5 pb-2 sm:px-0 md:grid md:grid-cols-4 md:gap-6 md:overflow-visible">
+          {/* Horizontal scroll carousel — snap on mobile, grid on desktop.
+              Same `flex` + `min-w-0 flex-1` rail pattern as the gallery strip
+              and the variant picker: the cards are `shrink-0`, so without a
+              zeroed automatic minimum their combined width leaks upwards. */}
+          <div className="-mx-5 mt-6 flex sm:mx-0">
+            <div className="no-scrollbar flex min-w-0 flex-1 gap-4 overflow-x-auto px-5 pb-2 sm:px-0 md:grid md:grid-cols-4 md:gap-6 md:overflow-visible">
               {related.map((p) => (
                 <div
                   key={p.id}

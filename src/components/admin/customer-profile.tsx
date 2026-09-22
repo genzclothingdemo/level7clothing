@@ -30,6 +30,7 @@ import {
 } from "@/lib/customers";
 import {
   AdminRef,
+  CustomerKindBadge,
   CustomerStatusBadge,
   MergeTip,
   Nothing,
@@ -96,6 +97,10 @@ export function CustomerHeader({
           where somebody goes when they doubt that these records are one
           person.
         */}
+        {/* Nothing for someone with an account; "Guest" plus its explanation
+            for someone without one, because this page is reachable from a
+            search that crossed both lists. */}
+        <CustomerKindBadge kind={customer.kind} withTip />
         <CustomerStatusBadge status={customer.status} withTip />
       </div>
 

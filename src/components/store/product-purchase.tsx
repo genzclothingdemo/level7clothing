@@ -169,6 +169,37 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
     };
   }, []);
 
+  /**
+   * How high the sticky buy bar has to sit to clear the mobile tab bar.
+   *
+   * It used to be the constant `bottom-[calc(3.75rem+var(--sa-bottom))]` — 60px
+   * against a tab bar that measures 58px, so the two chrome strips cleared each
+   * other by two pixels and read as one collided block. Worse, 3.75rem is a
+   * guess at a height that is *content*-derived (icon + label + padding): at a
+   * larger browser font, or in a language whose label wraps, the tab bar grows
+   * past 60px and the buy bar lands on top of "Home" and "Shop".
+   *
+   * So measure it. `null` until the effect runs (and on desktop, where the bar
+   * is `md:hidden` and the nav does not exist), which leaves the class-based
+   * fallback in place — including if the nav is ever renamed out from under
+   * this query. The nav carries `pb-safe`, so its measured height already
+   * includes the home-indicator inset; no `--sa-bottom` is added on top.
+   */
+  const [navHeight, setNavHeight] = useState<number | null>(null);
+  useEffect(() => {
+    const nav = document.querySelector<HTMLElement>(
+      'nav[aria-label="Mobile navigation"]'
+    );
+    if (!nav) return;
+    const measure = () => setNavHeight(nav.getBoundingClientRect().height);
+    measure();
+    // The nav is hidden while the keyboard is open, which makes it 0-high —
+    // and correctly drops the buy bar to the bottom edge.
+    const observer = new ResizeObserver(measure);
+    observer.observe(nav);
+    return () => observer.disconnect();
+  }, []);
+
   // Reset quantity whenever the customer switches variant.
   useEffect(() => {
     setQty(1);
@@ -414,6 +445,11 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 80, opacity: 0 }}
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            /* The class is the pre-measurement fallback; once the tab bar has
+               been measured its real height (plus a visible gap) wins. */
+            style={
+              navHeight != null ? { bottom: `${navHeight + 8}px` } : undefined
+            }
             className="fixed inset-x-0 bottom-[calc(3.75rem+var(--sa-bottom))] z-40 border-t border-border bg-background/95 px-4 py-2.5 backdrop-blur-xl md:hidden"
           >
             <div className="flex items-center gap-2">

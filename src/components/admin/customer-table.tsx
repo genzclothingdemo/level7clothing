@@ -9,6 +9,7 @@ import {
 } from "@/lib/customers";
 import {
   ContactActions,
+  CustomerKindBadge,
   CustomerStatusBadge,
   MergeTip,
   SignalIcons,
@@ -73,6 +74,10 @@ export function CustomerTable({
                   >
                     {c.displayName}
                   </Link>
+                  {/* Renders nothing for someone with an account — see the
+                      note on the component. A search can cross both lists, so
+                      this is how you tell which half a hit came from. */}
+                  <CustomerKindBadge kind={c.kind} />
                   <CustomerStatusBadge status={c.status} />
                   <MergeTip customer={c} />
                 </div>
@@ -158,6 +163,7 @@ export function CustomerTable({
                       <MergeTip customer={c} />
                     </div>
                     <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                      <CustomerKindBadge kind={c.kind} />
                       <CustomerStatusBadge status={c.status} />
                       {/* Where they are is identity, not contact — it helps you
                           recognise which "Jay Patel" this is, so it stays on

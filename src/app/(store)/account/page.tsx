@@ -2,11 +2,20 @@ import { redirect } from "next/navigation";
 import { LogOut } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { getUserSession } from "@/lib/user-auth";
+import { getSettings } from "@/lib/settings";
 import { logout } from "@/app/actions/account";
 import { listMyAddresses } from "@/app/actions/addresses";
 import { AccountView, type AccountTab } from "@/components/store/account-view";
 import type { AccountOrder } from "@/components/store/account-orders";
-import type { StatusEntry } from "@/components/store/order-timeline";
+import {
+  buildOrderTimeline,
+  buildStoreMessages,
+  formatOrderDate,
+} from "@/components/store/order-status";
+import {
+  buildOrderReturns,
+  type ReturnProductFlags,
+} from "@/components/store/order-returns";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "My account" };
@@ -17,6 +26,16 @@ const TABS: readonly AccountTab[] = [
   "addresses",
   "portfolio",
 ];
+
+/** A line as checkout wrote it into `Order.items` (JSON, so untyped by Prisma). */
+type RawItem = {
+  productId?: string;
+  name: string;
+  image?: string;
+  price: number;
+  quantity: number;
+  options?: { name: string; value: string }[];
+};
 
 export default async function AccountPage({
   searchParams,
@@ -44,45 +63,142 @@ export default async function AccountPage({
   // into a real `Address` row on this load. See src/app/actions/addresses.ts.
   const addresses = (await listMyAddresses()) ?? [];
 
-  // Orders
-  const raw = await prisma.order
-    .findMany({
-      where: { OR: [{ userId: user.id }, { email: user.email }] },
-      orderBy: { createdAt: "desc" },
-    })
-    .catch(() => []);
+  // Orders. `returnRequests` is included because the list offers returns now,
+  // not just the order page — a customer who has just been told "delivered"
+  // is on this screen, not on a confirmation page they closed a week ago.
+  const [settings, raw] = await Promise.all([
+    getSettings(),
+    prisma.order
+      .findMany({
+        where: { OR: [{ userId: user.id }, { email: user.email }] },
+        orderBy: { createdAt: "desc" },
+        include: { returnRequests: { orderBy: { createdAt: "desc" } } },
+      })
+      .catch(() => []),
+  ]);
 
-  const orders: AccountOrder[] = raw.map((o) => ({
-    id: o.id,
-    orderNumber: o.orderNumber,
-    status: o.status,
-    total: o.total,
-    subtotal: o.subtotal,
-    shipping: o.shipping,
-    discountTotal: o.discountTotal,
-    couponCode: o.couponCode,
-    paymentMethod: o.paymentMethod,
-    paymentStatus: o.paymentStatus,
-    createdAt: o.createdAt.toISOString(),
-    courier: o.courier,
-    trackingNumber: o.trackingNumber,
-    trackingUrl: o.trackingUrl,
-    deliveryStatus: o.deliveryStatus,
-    items: o.items as AccountOrder["items"],
-    statusHistory: (Array.isArray(o.statusHistory)
-      ? o.statusHistory
-      : []) as unknown as StatusEntry[],
-    address: o.address,
-    city: o.city,
-    state: o.state,
-    pincode: o.pincode,
-    // `o.note` is the admin's INTERNAL note and must never reach the customer.
-    // It starts life as the shopper's own checkout note and is then overwritten
-    // by admin-only text, so it cannot be treated as safe. The customer-facing
-    // message is `customerNote`; per-status messages are filtered out of
-    // statusHistory by the `forCustomer` flag inside OrderTimeline.
-    note: o.customerNote,
-  }));
+  // ---- Products behind the order lines ----
+  // One query for the whole page, not one per order. It answers two questions
+  // at once: what to link a line to, and whether that line may be returned.
+  const itemsByOrder = new Map<string, RawItem[]>();
+  const productIds = new Set<string>();
+  for (const order of raw) {
+    const items = (Array.isArray(order.items)
+      ? order.items
+      : []) as unknown as RawItem[];
+    itemsByOrder.set(order.id, items);
+    for (const item of items) if (item.productId) productIds.add(item.productId);
+  }
+
+  const products = productIds.size
+    ? await prisma.product
+        .findMany({
+          where: { id: { in: [...productIds] } },
+          // `isCustomisable` is load-bearing, not decoration: without it
+          // `resolveReturnPolicy` treats a made-to-order piece as returnable
+          // and typechecks perfectly while doing so.
+          select: {
+            id: true,
+            slug: true,
+            isActive: true,
+            images: true,
+            returnable: true,
+            returnsInfo: true,
+            isCustomisable: true,
+          },
+        })
+        .catch(() => [])
+    : [];
+  const productById = new Map(products.map((p) => [p.id, p]));
+  const policyById = new Map<string, ReturnProductFlags>(
+    products.map((p) => [
+      p.id,
+      {
+        returnable: p.returnable,
+        returnsInfo: p.returnsInfo,
+        isCustomisable: p.isCustomisable,
+      },
+    ])
+  );
+
+  // One clock for the whole page, so two orders can't disagree about whether
+  // today is inside their return window.
+  const now = new Date();
+
+  const orders: AccountOrder[] = raw.map((order) => {
+    const items = itemsByOrder.get(order.id) ?? [];
+    return {
+      id: order.id,
+      orderNumber: order.orderNumber,
+      status: order.status,
+      // Formatted here, on the server. A client component calling
+      // toLocaleDateString reads the browser's timezone and mismatches the
+      // server's on any order placed near midnight.
+      placedOn: formatOrderDate(order.createdAt),
+      total: order.total,
+      items: items.map((item) => {
+        const product = item.productId
+          ? productById.get(item.productId)
+          : undefined;
+        return {
+          name: item.name,
+          quantity: item.quantity,
+          price: item.price,
+          options: item.options,
+          // The photo captured at checkout is the variant the shopper actually
+          // bought; the product's own first image is only a fallback for an
+          // older order that stored none.
+          image: item.image?.trim() || product?.images?.[0] || null,
+          // Linked ONLY while the product is live: getProductBySlug returns
+          // null for an inactive one and the page calls notFound(), so a link
+          // here would hand a customer a 404 for something they own.
+          slug: product?.isActive ? product.slug : null,
+        };
+      }),
+      trail: buildOrderTimeline(order.statusHistory),
+      // `order.note` is the admin's INTERNAL note and is never read. The
+      // customer-facing text is `customerNote` plus the status notes the admin
+      // flagged `forCustomer`, which is exactly what this builds.
+      messages: buildStoreMessages(order.customerNote, order.statusHistory),
+      payment: {
+        subtotal: order.subtotal,
+        shipping: order.shipping,
+        discountTotal: order.discountTotal,
+        couponCode: order.couponCode,
+        total: order.total,
+        paymentMethod: order.paymentMethod,
+        paymentStatus: order.paymentStatus,
+        amountPaid: order.amountPaid,
+        balanceDue: order.balanceDue,
+      },
+      delivery: {
+        customerName: order.customerName,
+        phone: order.phone,
+        address: order.address,
+        city: order.city,
+        state: order.state,
+        pincode: order.pincode,
+        courier: order.courier,
+        trackingNumber: order.trackingNumber,
+        trackingUrl: order.trackingUrl,
+      },
+      refs: {
+        orderNumber: order.orderNumber,
+        razorpayPaymentId: order.razorpayPaymentId,
+        razorpayOrderId: order.razorpayOrderId,
+      },
+      deliveryStatus: order.deliveryStatus,
+      deliveryLocation: order.deliveryLocation,
+      returns: buildOrderReturns({
+        order,
+        items,
+        products: policyById,
+        returnRequests: order.returnRequests,
+        settings,
+        now,
+      }),
+    };
+  });
 
   // Reviews — approved for portfolio display
   const reviewModel = (prisma as unknown as Record<string, any>).review;
@@ -116,7 +232,7 @@ export default async function AccountPage({
         <form action={logout}>
           <button
             type="submit"
-            className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer"
+            className="inline-flex min-h-11 items-center gap-2 rounded-full border border-border px-4 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer"
           >
             <LogOut className="h-4 w-4" /> Log out
           </button>

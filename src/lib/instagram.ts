@@ -1,17 +1,20 @@
 /**
- * The social grid shown on the homepage and at /instagram.
+ * Instagram helpers that are safe to import from anywhere.
  *
- * These are curated catalogue shots, NOT live Instagram content. Pulling real
- * posts and reels needs the Instagram Graph API: a Business/Creator account
- * linked to a Facebook Page, an app, and a long-lived access token that has to
- * be refreshed every 60 days. None of that is configured here, and inventing a
- * fake "live feed" would be worse than an honest curated one.
+ * This file used to own the storefront's social grid as a hardcoded
+ * `CURATED_POSTS` array. That grid is now **admin-managed**: it lives in the
+ * `PortfolioItem` table, is edited at `/admin/portfolio` and rendered at
+ * `/portfolio`. See `lib/portfolio.ts`, which also holds the single seam where
+ * a real Instagram Graph API token would turn the page into a live mirror.
  *
- * To make it real later: store the token as `INSTAGRAM_ACCESS_TOKEN`, fetch
- * `/me/media?fields=id,caption,media_type,media_url,permalink,thumbnail_url`,
- * cache it (the rate limit is low and the token is per-hour throttled), and
- * swap `CURATED_POSTS` for that result. Keep this file as the fallback for
- * when the token expires — an empty grid on the homepage is a visible outage.
+ * What is left here is deliberately Prisma-free, so a **client** component can
+ * import it. `lib/portfolio.ts` imports the database client and cannot be
+ * imported across that boundary — keep the split.
+ *
+ * `CURATED_POSTS` is kept as the last-resort fallback for the homepage strip:
+ * an empty grid on the homepage is a visible outage, and the table is empty
+ * until the owner adds their first piece. It is not shown once there is real
+ * content, and `/portfolio` never uses it.
  */
 
 export type SocialPost = {

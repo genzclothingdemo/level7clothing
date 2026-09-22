@@ -11,6 +11,21 @@ const nextConfig: NextConfig = {
   // `ENOENT .next/server/pages-manifest.json` at the end of `next build`
   // (this app is App Router only, so that manifest is never emitted).
   turbopack: { root: path.join(__dirname) },
+
+  /**
+   * /instagram is now /portfolio — the page grew past Instagram into reels,
+   * blog links, collaborations and bulk-order work, and one table with two
+   * pages on it is the "two editors" trap.
+   *
+   * Done here rather than with `redirect()` inside the page: the `(store)`
+   * segment has a layout, a template and a loading file, so a response is
+   * already streaming by the time a page-level redirect throws — it degrades
+   * to a `200` with a `<meta http-equiv="refresh">`, which browsers follow but
+   * crawlers weight far less. This emits a real 308 before any rendering.
+   */
+  async redirects() {
+    return [{ source: "/instagram", destination: "/portfolio", permanent: true }];
+  },
   images: {
     remotePatterns: [
       // Admin-uploaded product photos are stored on Vercel Blob.

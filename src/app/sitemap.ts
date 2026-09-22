@@ -23,6 +23,9 @@ export const revalidate = 3600;
 const STATIC_ROUTES: { path: string; priority: number; changeFrequency: "daily" | "weekly" | "monthly" | "yearly" }[] = [
   { path: "/", priority: 1.0, changeFrequency: "weekly" },
   { path: "/shop", priority: 0.9, changeFrequency: "daily" },
+  // The portfolio is a real indexable page — reels, shoots, collaborations.
+  // Only the first page: the shop does not enumerate `?page=` either.
+  { path: "/portfolio", priority: 0.7, changeFrequency: "weekly" },
   { path: "/about", priority: 0.6, changeFrequency: "monthly" },
   { path: "/contact", priority: 0.6, changeFrequency: "monthly" },
   { path: "/faq", priority: 0.5, changeFrequency: "monthly" },

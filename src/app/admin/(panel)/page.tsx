@@ -1,220 +1,399 @@
 import Link from "next/link";
 import {
-  Package,
-  ShoppingCart,
-  IndianRupee,
-  Users,
-  MessageSquare,
-  Clock,
-  ArrowUpRight,
-} from "lucide-react";
-import { prisma } from "@/lib/prisma";
-import { formatINR } from "@/lib/utils";
+  getAttentionQueue,
+  getCustomerAnalytics,
+  getFinanceReport,
+  resolveWindow,
+  delta,
+  METRIC,
+  NOT_MEASURED,
+  TIMEZONE_NOTE,
+  formatHours,
+} from "@/lib/analytics";
+import { ColumnChart } from "@/components/admin/finance-chart";
+import {
+  ActionRow,
+  Caveat,
+  Empty,
+  NotMeasured,
+  Panel,
+  StatTile,
+  TileGrid,
+  formatCount,
+  formatINR,
+  formatPercent,
+} from "@/components/admin/finance-ui";
+import { Workspace, readClock } from "@/components/admin/dash-workspace";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Dashboard" };
 
-async function getStats() {
-  try {
-    const [
-      products,
-      activeProducts,
-      orders,
-      pendingOrders,
-      revenueAgg,
-      leads,
-      unreadMessages,
-      recentOrders,
-      recentLeads,
-    ] = await Promise.all([
-      prisma.product.count(),
-      prisma.product.count({ where: { isActive: true } }),
-      prisma.order.count(),
-      prisma.order.count({ where: { status: "pending" } }),
-      prisma.order.aggregate({
-        _sum: { total: true },
-        where: { status: { not: "cancelled" } },
-      }),
-      prisma.lead.count({ where: { status: "interested" } }),
-      prisma.message.count({ where: { isRead: false } }),
-      prisma.order.findMany({ orderBy: { createdAt: "desc" }, take: 6 }),
-      prisma.lead.findMany({ orderBy: { createdAt: "desc" }, take: 6 }),
-    ]);
-    return {
-      products,
-      activeProducts,
-      orders,
-      pendingOrders,
-      revenue: revenueAgg._sum.total ?? 0,
-      leads,
-      unreadMessages,
-      recentOrders,
-      recentLeads,
-      ok: true as const,
-    };
-  } catch {
-    return { ok: false as const };
-  }
-}
+/**
+ * Admin → Dashboard → Overview.
+ *
+ * The executive view, and the first of the workspace's six sections. It
+ * answers three questions in the order an owner actually asks them: what did
+ * the store take, where is it going, and what is waiting for me.
+ *
+ * Two deliberate scoping decisions, both stated on screen rather than only
+ * here:
+ *
+ * - The tiles and the chart are scoped by the range control above them.
+ * - **"Needs attention" is not.** An order that has been waiting a month to be
+ *   confirmed is more urgent than one from this morning, so filtering that
+ *   panel by the same window would hide precisely the rows that matter.
+ *
+ * The fourth panel is the list of things this workspace *cannot* compute. It
+ * sits on Overview in full rather than tucked into a sub-page, because the
+ * most expensive mistake available on a screen like this is believing a figure
+ * exists when it does not — and every row doubles as the next thing to build.
+ */
+export default async function AdminOverview({
+  searchParams,
+}: {
+  searchParams: Promise<{ range?: string; grain?: string }>;
+}) {
+  const sp = await searchParams;
+  const now = await readClock();
 
-export default async function AdminDashboard() {
-  const stats = await getStats();
+  // The window is resolved once, up front, so all three reads below can run in
+  // parallel against the same interval. Asking `getFinanceReport` for it first
+  // and then chaining would serialise the whole page behind one query set, and
+  // `getFinanceReport` is deliberately not React-cached — calling it twice
+  // really does run it twice.
+  const resolved = resolveWindow(sp.range, now);
 
-  if (!stats.ok) {
-    return (
-      <div className="rounded-2xl border border-dashed border-border p-10 text-center">
-        <h1 className="font-serif text-2xl">Database not connected</h1>
-        <p className="mt-2 text-muted-foreground">
-          Set your <code className="rounded bg-muted px-1.5">DATABASE_URL</code>{" "}
-          and run the setup script to see your dashboard. See the README.
-        </p>
-      </div>
-    );
-  }
+  const [report, queue, customers] = await Promise.all([
+    getFinanceReport(sp.range, now, sp.grain),
+    getAttentionQueue(),
+    // Needs the identity rule in lib/customers, which is a second fan-out of
+    // queries. It is React-cached, so the Customers section rendering in the
+    // same request shares this one resolution.
+    getCustomerAnalytics(resolved, now),
+  ]);
 
-  const cards = [
+  const { revenue, cash, previous, window: win } = report;
+  const vs = previous ? `vs ${previous.label}` : undefined;
+  const nothing = revenue.orders === 0 && revenue.cancelledOrders === 0;
+
+  const queueRows = [
     {
-      label: "Revenue",
-      value: formatINR(stats.revenue),
-      icon: IndianRupee,
-      href: "/admin/orders",
+      count: queue.pendingOrders,
+      label: "orders waiting to be confirmed",
+      detail: "Nothing reaches a courier until one of these is accepted.",
+      href: "/admin/orders?status=pending",
+      tone: "alert" as const,
     },
     {
-      label: "Orders",
-      value: stats.orders,
-      sub: `${stats.pendingOrders} pending`,
-      icon: ShoppingCart,
-      href: "/admin/orders",
+      count: queue.awaitingDispatch,
+      label: "confirmed orders with no AWB yet",
+      detail:
+        queue.draftStaged > 0
+          ? `${queue.draftStaged} already ${queue.draftStaged === 1 ? "has" : "have"} a NimbusPost draft staged, waiting to be booked — that is the review gate, not a backlog.`
+          : "None have a NimbusPost draft staged yet.",
+      href: "/admin/orders?status=confirmed",
+      tone: "neutral" as const,
     },
     {
-      label: "Products",
-      value: stats.products,
-      sub: `${stats.activeProducts} active`,
-      icon: Package,
+      count: queue.openReturns,
+      label: "return requests still open",
+      detail: "Pending, approved, picked up or received — none of them finished.",
+      href: "/admin/returns?status=all",
+      tone: "alert" as const,
+    },
+    {
+      count: queue.outOfStock,
+      label: "live product pages that cannot be bought",
+      detail: "Active on the storefront with no stock left.",
       href: "/admin/products",
+      tone: "alert" as const,
     },
     {
-      label: "Interested",
-      value: stats.leads,
-      sub: "in cart",
-      icon: Users,
-      href: "/admin/leads",
-    },
-    {
-      label: "Inquiries",
-      value: stats.unreadMessages,
-      sub: "unread",
-      icon: MessageSquare,
+      count: queue.unreadChats,
+      label: "chats with an unread message",
       href: "/admin/messages",
+      tone: "neutral" as const,
     },
-  ];
+    {
+      count: queue.unreadInquiries,
+      label: "unread contact-form inquiries",
+      href: "/admin/messages",
+      tone: "neutral" as const,
+    },
+    {
+      count: queue.unapprovedReviews,
+      label: "reviews awaiting moderation",
+      detail: "Not visible on the storefront until approved.",
+      href: "/admin/reviews",
+      tone: "neutral" as const,
+    },
+    {
+      count: queue.interestedLeads,
+      label: "cart leads nobody has followed up",
+      href: "/admin/leads",
+      tone: "neutral" as const,
+    },
+  ].filter((r) => r.count > 0);
 
   return (
-    <div>
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-serif text-3xl">Dashboard</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Welcome back — here&apos;s how your store is doing.
+    <Workspace>
+      <div className="space-y-5">
+        {(report.degraded || queue.degraded || customers.degraded) && (
+          <p className="rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger">
+            At least one query failed, so some panels below may read zero. This
+            is a reporting failure, not a business one — check the database
+            connection before acting on anything here.
           </p>
-        </div>
-        <Link
-          href="/admin/products/new"
-          className="hidden rounded-full bg-primary px-5 py-2.5 text-sm text-primary-foreground hover:opacity-90 sm:inline-block"
+        )}
+
+        {/* ---- Headline --------------------------------------------------- */}
+
+        <TileGrid>
+          <StatTile
+            emphasis
+            label="Net revenue"
+            value={formatINR(revenue.netRevenue)}
+            tip={METRIC.netRevenue}
+            delta={previous ? delta(revenue.netRevenue, previous.netRevenue) : undefined}
+            deltaLabel={vs}
+            sub={`${win.label} · booked, not collected`}
+          />
+          <StatTile
+            label="Orders"
+            value={formatCount(revenue.orders)}
+            tip={METRIC.orders}
+            delta={previous ? delta(revenue.orders, previous.orders) : undefined}
+            deltaLabel={vs}
+            sub={
+              revenue.cancelledOrders > 0
+                ? `${revenue.cancelledOrders} cancelled excluded`
+                : "none cancelled"
+            }
+          />
+          <StatTile
+            label="Average order value"
+            value={formatINR(revenue.aov)}
+            tip={METRIC.aov}
+            delta={previous ? delta(revenue.aov, previous.aov) : undefined}
+            deltaLabel={vs}
+          />
+          <StatTile
+            label="Cash collected"
+            value={formatINR(cash.collected)}
+            tip={METRIC.collected}
+            sub={
+              cash.outstanding > 0
+                ? `${formatINR(cash.outstanding)} billed and not yet in hand`
+                : "nothing outstanding"
+            }
+          />
+        </TileGrid>
+
+        {!previous && (
+          <p className="text-xs text-muted-foreground">
+            No period-on-period comparison on All time — there is no equally
+            long period before it to compare against. Pick 7, 30 or 90 days for
+            deltas.
+          </p>
+        )}
+
+        {/* ---- Trend ------------------------------------------------------ */}
+
+        <Panel
+          title="Net revenue over time"
+          tip={METRIC.netRevenue}
+          subtitle={
+            <>
+              One bar per {report.granularity}, by order date. {TIMEZONE_NOTE}{" "}
+              Refunds are <strong className="font-medium text-foreground">not</strong>{" "}
+              netted out of these bars — they are dated by when the money left,
+              which is a different day from the order.{" "}
+              <Link href="/admin/finance/sales" className="underline hover:text-accent">
+                Sales
+              </Link>{" "}
+              breaks the same series down month by month.
+            </>
+          }
         >
-          + Add product
-        </Link>
-      </div>
+          {report.granularityForced && (
+            <Caveat>
+              You asked for one bar per {report.granularityForced}, which over
+              this range would be more than 120 bars — too many to read at any
+              width. The chart is showing {report.granularity}s instead.
+            </Caveat>
+          )}
+          <ColumnChart
+            measure="Net revenue"
+            unit={report.granularity}
+            columns={report.series.map((p) => ({
+              key: p.key,
+              label: p.label,
+              value: p.netRevenue,
+              detail: `${p.orders} order${p.orders === 1 ? "" : "s"}, ${p.units} unit${p.units === 1 ? "" : "s"}`,
+            }))}
+            formatValue={formatINR}
+            tableHead={[
+              report.granularity === "month"
+                ? "Month"
+                : report.granularity === "week"
+                  ? "Week of"
+                  : "Day",
+              "Net revenue",
+              "Orders / units",
+            ]}
+          />
+        </Panel>
 
-      <div className="mt-8 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
-        {cards.map((c) => {
-          const Icon = c.icon;
-          return (
-            <Link
-              key={c.label}
-              href={c.href}
-              className="group rounded-2xl border border-border bg-card p-5 transition-colors hover:border-accent"
-            >
-              <div className="flex items-center justify-between">
-                <Icon className="h-5 w-5 text-muted-foreground" />
-                <ArrowUpRight className="h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-              </div>
-              <p className="mt-4 text-2xl font-medium">{c.value}</p>
-              <p className="text-xs uppercase tracking-wider text-muted-foreground">
-                {c.label}
-              </p>
-              {c.sub && (
-                <p className="mt-1 text-xs text-muted-foreground">{c.sub}</p>
-              )}
-            </Link>
-          );
-        })}
-      </div>
+        {/* ---- The queue + the shape of the business ---------------------- */}
 
-      <div className="mt-8 grid gap-6 lg:grid-cols-2">
-        {/* Recent orders */}
-        <section className="rounded-2xl border border-border bg-card p-5">
-          <div className="flex items-center justify-between">
-            <h2 className="font-serif text-lg">Recent orders</h2>
-            <Link href="/admin/orders" className="text-sm hover:text-accent">
-              View all
-            </Link>
-          </div>
-          <div className="mt-4 divide-y divide-border">
-            {stats.recentOrders.length === 0 && (
-              <p className="py-6 text-sm text-muted-foreground">No orders yet.</p>
+        <div className="grid gap-5 lg:grid-cols-2">
+          <Panel
+            title="Needs attention"
+            tip="Everything currently sitting in a queue, across the whole store. Deliberately NOT filtered by the time range above: an order that has been waiting a month to be confirmed is more urgent than one placed this morning, and scoping this panel to the last 30 days would hide it."
+            subtitle="Right now, not this period. Every row links to the screen where you can clear it."
+          >
+            {queueRows.length === 0 ? (
+              <Empty>Nothing is waiting. Every queue in the store is empty.</Empty>
+            ) : (
+              <ul className="-my-1">
+                {queueRows.map((r) => (
+                  <ActionRow
+                    key={r.label}
+                    count={formatCount(r.count)}
+                    label={r.label}
+                    detail={r.detail}
+                    href={r.href}
+                    tone={r.tone}
+                  />
+                ))}
+              </ul>
             )}
-            {stats.recentOrders.map((o) => (
-              <div key={o.id} className="flex items-center justify-between py-3">
-                <div>
-                  <p className="text-sm font-medium">{o.customerName}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {o.orderNumber}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="text-sm font-medium">{formatINR(o.total)}</p>
-                  <p className="text-xs capitalize text-muted-foreground">
-                    {o.status}
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
+          </Panel>
 
-        {/* Recent interested */}
-        <section className="rounded-2xl border border-border bg-card p-5">
-          <div className="flex items-center justify-between">
-            <h2 className="font-serif text-lg">Interested customers</h2>
-            <Link href="/admin/leads" className="text-sm hover:text-accent">
-              View all
-            </Link>
-          </div>
-          <div className="mt-4 divide-y divide-border">
-            {stats.recentLeads.length === 0 && (
-              <p className="py-6 text-sm text-muted-foreground">
-                No cart activity yet.
-              </p>
-            )}
-            {stats.recentLeads.map((l) => (
-              <div key={l.id} className="flex items-center justify-between py-3">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{l.productName}</p>
-                  <p className="text-xs text-muted-foreground">
-                    Qty {l.quantity}
-                    {l.email ? ` · ${l.email}` : ""}
-                  </p>
-                </div>
-                <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                  <Clock className="h-3 w-3" />
-                  {l.createdAt.toLocaleDateString("en-IN")}
-                </span>
+          <Panel
+            title="Who is buying"
+            tip={METRIC.newVsReturning}
+            subtitle={
+              <>
+                Customer identity comes from the same merge rule as{" "}
+                <Link href="/admin/customers" className="underline hover:text-accent">
+                  Admin → Customers
+                </Link>
+                , so the two screens cannot disagree about who a shopper is.
+              </>
+            }
+          >
+            {customers.buyers === 0 ? (
+              <Empty>Nobody has placed an order yet.</Empty>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <StatTile
+                  label="Repeat rate"
+                  value={formatPercent(customers.repeatRate)}
+                  tip={METRIC.repeatRate}
+                  sub={`${customers.repeatBuyers} of ${customers.buyers} buyers have ordered more than once · all time`}
+                />
+                <StatTile
+                  label="Median lifetime value"
+                  value={formatINR(customers.medianLtv)}
+                  tip={METRIC.ltv}
+                  good="none"
+                  sub={`mean ${formatINR(customers.meanLtv)} · billed, incl. shipping`}
+                />
+                <StatTile
+                  label="Orders from new customers"
+                  value={formatCount(customers.windowNewOrders)}
+                  tip={METRIC.newVsReturning}
+                  good="none"
+                  sub={`${formatINR(customers.windowNewRevenue)} · ${win.label.toLowerCase()}`}
+                />
+                <StatTile
+                  label="Orders from returning"
+                  value={formatCount(customers.windowReturningOrders)}
+                  tip={METRIC.newVsReturning}
+                  good="none"
+                  sub={`${formatINR(customers.windowReturningRevenue)} · ${win.label.toLowerCase()}`}
+                />
               </div>
-            ))}
-          </div>
-        </section>
+            )}
+            <Caveat>
+              Repeat rate and lifetime value are all-time and do not move with
+              the range control; the two order counts do.{" "}
+              <Link href="/admin/finance/customers" className="underline hover:text-accent">
+                Customers
+              </Link>{" "}
+              has the segments and the cohort retention behind these.
+            </Caveat>
+          </Panel>
+        </div>
+
+        {/* ---- Operations at a glance ------------------------------------- */}
+
+        <Panel
+          title="Getting orders out"
+          tip={METRIC.dispatchTime}
+          subtitle={`Measured over orders placed in ${win.phrase} that have actually shipped.`}
+        >
+          {nothing ? (
+            <Empty>No orders placed in this period.</Empty>
+          ) : (
+            <TileGrid>
+              <StatTile
+                label="Median dispatch"
+                value={formatHours(report.fulfilment.dispatch.medianHours)}
+                tip={METRIC.dispatchTime}
+                good="down"
+                sub={
+                  report.fulfilment.dispatch.count > 0
+                    ? `over ${report.fulfilment.dispatch.count} shipped order${report.fulfilment.dispatch.count === 1 ? "" : "s"}`
+                    : "nothing has shipped yet"
+                }
+              />
+              <StatTile
+                label="Median delivery"
+                value={formatHours(report.fulfilment.delivery.medianHours)}
+                tip={METRIC.deliveryTime}
+                good="down"
+                sub={
+                  report.fulfilment.delivery.count > 0
+                    ? `over ${report.fulfilment.delivery.count} delivered order${report.fulfilment.delivery.count === 1 ? "" : "s"}`
+                    : "nothing delivered yet"
+                }
+              />
+              <StatTile
+                label="In transit"
+                value={formatCount(report.fulfilment.inTransit)}
+                tip="Orders from this period currently marked shipped and not yet delivered."
+                good="none"
+              />
+              <StatTile
+                label="Return rate"
+                value={formatPercent(report.returnRate.orderRate)}
+                tip={METRIC.returnRate}
+                good="down"
+                sub={`${report.returnRate.ordersWithReturn} of ${revenue.orders} orders`}
+              />
+            </TileGrid>
+          )}
+          <Caveat>
+            <Link href="/admin/finance/fulfilment" className="underline hover:text-accent">
+              Fulfilment
+            </Link>{" "}
+            has the distributions behind these medians, the courier split and
+            the full returns breakdown.
+          </Caveat>
+        </Panel>
+
+        {/* ---- The honest blank ------------------------------------------- */}
+
+        <Panel
+          title="What this dashboard cannot tell you"
+          tip="Written down rather than left as a gap. Every row is something an e-commerce dashboard normally shows and this one deliberately does not, because the data to compute it does not exist in this database."
+          subtitle="A plausible-looking number with nothing behind it is worse than an empty space — a real decision gets made on it. Each row names the one change that would make the figure real."
+        >
+          <NotMeasured rows={NOT_MEASURED} />
+        </Panel>
       </div>
-    </div>
+    </Workspace>
   );
 }

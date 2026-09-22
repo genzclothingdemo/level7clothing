@@ -216,6 +216,42 @@ Also guarded server-side: turning **all four** payment methods off is refused,
 because `resolveAllowedModes` falls back to `["direct"]` and would silently
 turn every order into a pay-the-owner request.
 
+## RSC boundary traps — neither is caught by tsc or `next build`
+
+Both of these took down live admin pages on 2026-09-22, and both have since
+recurred in new code. They only throw when a page **renders**, so a clean
+typecheck and a clean build prove nothing about them.
+
+**1. Never pass an icon *component* from a server component to a client one.**
+
+```tsx
+<Block icon={ShoppingBag}>        // ✗ throws
+<Block icon={<ShoppingBag />}>    // ✓ an element serialises
+```
+
+Lucide icons are `forwardRef` objects, so this is a function crossing the
+boundary:
+
+```
+Functions cannot be passed directly to Client Components…
+{$$typeof: ..., render: function, displayName: ...}
+```
+
+It is easy to miss because it is **legal between two client components** — so a
+shared component like `Block` or `Disclosure` works everywhere until the first
+server caller. Type any `icon` prop as `React.ReactNode`, never `LucideIcon`.
+
+**2. A server component may not call a function exported from a `"use client"`
+module.** Everything such a module exports is a client *reference*:
+
+```
+Attempted to call isTabKey() from the server but isTabKey is on the client.
+```
+
+Constants, type guards and pure helpers shared by both sides belong in `lib/`,
+in a module with no directive. Types are erased at build time, so importing a
+*type* from a client module is fine — it is only runtime values that break.
+
 ## Turbopack workspace root
 
 There is a stray `package.json` + `package-lock.json` in the user's home

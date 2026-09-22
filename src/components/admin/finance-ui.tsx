@@ -1,8 +1,8 @@
 /**
- * finance-ui — the furniture of Admin → Finance.
+ * finance-ui — the furniture of the Admin → Dashboard analytics workspace.
  *
  * **Server components.** Nothing here is interactive, so nothing here ships
- * JavaScript; the only client island on these screens is the filter row
+ * JavaScript; the only client island on these screens is the section/filter bar
  * (`finance-nav`) and the `InfoTip` bubbles, both of which genuinely need it.
  *
  * Two house rules from the data-viz method are baked in rather than left to
@@ -257,6 +257,106 @@ export function Caveat({ children }: { children: React.ReactNode }) {
     <p className="mt-3 border-l-2 border-border pl-3 text-xs leading-relaxed text-muted-foreground">
       {children}
     </p>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Percentages                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `12.4%` / `—`. One decimal below 10, whole numbers above, because the extra
+ * digit on "47.3%" implies a precision that a denominator of nineteen orders
+ * does not have.
+ */
+export function formatPercent(v: number | null): string {
+  if (v === null || !Number.isFinite(v)) return "—";
+  const abs = Math.abs(v);
+  return `${abs < 10 ? Math.round(v * 10) / 10 : Math.round(v)}%`;
+}
+
+/* ------------------------------------------------------------------ */
+/*  What this cannot tell you                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The honest blank, rendered from `NOT_MEASURED` in `lib/analytics`.
+ *
+ * It is a list of *absences*, so it is deliberately plain text rather than a
+ * warning box: none of these is an error, and dressing them in danger red
+ * would train the reader to dismiss the panel that is doing the most useful
+ * work on the screen. Each row names the one change that would make the figure
+ * real, which is what turns the list into a roadmap rather than an apology.
+ */
+export function NotMeasured({
+  rows,
+}: {
+  rows: { metric: string; why: string; toGetIt: string }[];
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <ul className="divide-y divide-border">
+      {rows.map((row) => (
+        <li key={row.metric} className="py-3 first:pt-0 last:pb-0">
+          <p className="text-sm font-medium">{row.metric}</p>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{row.why}</p>
+          <p className="mt-1.5 text-xs leading-relaxed">
+            <span className="eyebrow">To measure it</span>{" "}
+            <span className="text-muted-foreground">{row.toGetIt}</span>
+          </p>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Needs attention                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One line of the Overview's queue: a count, what it means, and where to go
+ * and do something about it. Rendered as a link because every row on that
+ * panel has an action behind it — a row with nothing to click is a statistic,
+ * and statistics belong in the tiles above.
+ */
+export function ActionRow({
+  count,
+  label,
+  detail,
+  href,
+  tone = "neutral",
+}: {
+  count: string;
+  label: string;
+  detail?: string;
+  href: string;
+  /** `alert` for a queue that costs money while it sits there. */
+  tone?: "neutral" | "alert";
+}) {
+  return (
+    <li>
+      <Link
+        href={href}
+        className="flex min-h-11 items-center gap-3 rounded-lg px-2 py-2 -mx-2 transition-colors hover:bg-muted"
+      >
+        <span
+          className={cn(
+            "w-10 shrink-0 text-right text-lg font-medium tabular-nums",
+            tone === "alert" ? "text-danger" : "text-foreground"
+          )}
+        >
+          {count}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm">{label}</span>
+          {detail && (
+            <span className="block text-xs leading-relaxed text-muted-foreground">{detail}</span>
+          )}
+        </span>
+        <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+      </Link>
+    </li>
   );
 }
 

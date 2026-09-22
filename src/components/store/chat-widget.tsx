@@ -1,5 +1,6 @@
 "use client";
 
+import { playNotificationSound } from "@/lib/notification-sound";
 import {
   createContext,
   useCallback,
@@ -191,6 +192,19 @@ export function ChatProvider({
   const commit = useCallback(
     (incoming: ChatMessageDTO[], statuses: { id: string; status: ChatStatus }[]) => {
       const merged = mergeMessages(messagesRef.current, incoming, statuses);
+
+      // Chime only for a genuinely new message from the store, and only for
+      // real arrivals — `incoming` is empty on the overwhelming majority of
+      // polls, and status-only updates (sent → delivered → seen) must stay
+      // silent or every message would sound three times.
+      //
+      // Skipped on the first load: `messagesRef.current` is empty then, and
+      // replaying a chime for history the shopper has already read would be
+      // startling rather than helpful.
+      const firstLoad = messagesRef.current.length === 0;
+      const fromAdmin = incoming.some((m) => m.sender === "admin");
+      if (!firstLoad && fromAdmin) playNotificationSound();
+
       messagesRef.current = merged;
       setMessages(merged);
     },

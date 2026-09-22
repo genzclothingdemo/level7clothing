@@ -9,6 +9,7 @@ import { InfoTip } from "@/components/store/info-tip";
 import { updateProfile } from "@/app/actions/account";
 import type { SavedAddress } from "@/app/actions/addresses";
 import { AddressSummary } from "./address-card";
+import { AppSettingsCard } from "@/components/store/app-settings-card";
 
 /**
  * Identity, and a read-only glance at where parcels go.
@@ -58,6 +59,13 @@ export function AccountProfile({
 
   return (
     <div className="space-y-4">
+      {/* Install + notifications, first.
+          Both were effectively unreachable before: install lived only in the
+          footer, and notifications could only be switched on from a prompt
+          bar that shows once and never returns — so anyone who dismissed it
+          had no way back. This is where people look for their own settings. */}
+      <AppSettingsCard />
+
       {/* ── Identity ── */}
       <section className="rounded-lg border border-border bg-card p-5 sm:p-6">
         <div className="flex items-center justify-between gap-3">

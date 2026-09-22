@@ -4,13 +4,11 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { ShoppingBag, User, Search, Home, Store, Heart } from "lucide-react";
-import { InstagramIcon } from "@/components/store/instagram-icon";
+import { ShoppingBag, User, Home, Store, Heart, LayoutGrid } from "lucide-react";
 import { useWishlist } from "@/context/wishlist";
 import { useCart } from "@/context/cart";
 import { useSettings } from "@/context/settings";
 import { ChatLauncherButton } from "@/components/store/chat-widget";
-import { SearchBox } from "@/components/store/search-box";
 import { useKeyboardOpen } from "@/hooks/use-keyboard-open";
 import { cn } from "@/lib/utils";
 
@@ -99,18 +97,15 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
 
           {/* Right: action icons */}
           <div className="flex items-center gap-1.5 md:gap-2">
-            {/* Desktop search icon */}
-            <div className="hidden md:block">
-              <SearchBox variant="icon" />
-            </div>
-            {/* Mobile: quick link to search / shop */}
-            <Link
-              href="/shop"
-              className="grid h-11 w-11 place-items-center rounded-full border border-border transition-colors hover:border-primary/40 hover:bg-primary/5 cursor-pointer md:hidden"
-              aria-label="Search"
-            >
-              <Search className="h-[18px] w-[18px]" />
-            </Link>
+            {/*
+              No search icon here, on either breakpoint.
+              /shop carries a real search field with filters and sorting
+              beside it, which is where searching actually happens; the icon
+              was a second entry point to the same thing and the mobile one
+              was only a link to /shop dressed up as a search control.
+              Removing it gives the three icons that DO something — chat,
+              wishlist, cart — room to breathe.
+            */}
             {/*
               This slot held the light/dark toggle. It now opens the chat,
               which is what a shopper actually reaches for — the store stays
@@ -207,27 +202,33 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
             );
           })}
           {/*
-            Instagram tab, where Cart used to be. Cart already has a permanent
+            Portfolio tab, where Cart used to be. Cart already has a permanent
             slot in the top bar with its own count badge, so a second entry
             point down here spent a quarter of the phone's primary navigation
             on a duplicate.
+
+            Points at /portfolio, not /instagram: the portfolio is a superset
+            (reels, blog links, collaborations, bulk-order work) and Instagram
+            is only one source feeding it. The old path still resolves via a
+            redirect, but the active check has to match the path the page
+            actually renders at or the tab never highlights.
           */}
           <li className="flex-1">
             <Link
-              href="/instagram"
+              href="/portfolio"
               className={cn(
                 "relative flex flex-col items-center justify-center gap-0.5 py-2.5 text-[10px] font-medium tracking-wide transition-colors",
-                pathname.startsWith("/instagram")
+                pathname.startsWith("/portfolio")
                   ? "text-accent"
                   : "text-muted-foreground"
               )}
-              aria-current={pathname.startsWith("/instagram") ? "page" : undefined}
+              aria-current={pathname.startsWith("/portfolio") ? "page" : undefined}
             >
-              <InstagramIcon
+              <LayoutGrid
                 className="h-5 w-5"
-                strokeWidth={pathname.startsWith("/instagram") ? 2.2 : 1.6}
+                strokeWidth={pathname.startsWith("/portfolio") ? 2.2 : 1.6}
               />
-              Instagram
+              Portfolio
             </Link>
           </li>
           {/* Account tab */}

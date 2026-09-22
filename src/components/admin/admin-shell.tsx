@@ -18,22 +18,36 @@ import {
   X,
   Ticket,
   Images,
+  Clapperboard,
   Star,
   PackageX,
   UserRound,
-  LineChart,
   Megaphone,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { logout } from "@/app/actions/auth";
 import { cn } from "@/lib/utils";
 
-const nav = [
-  { href: "/admin", label: "Dashboard", icon: LayoutDashboard, exact: true },
-  // Finance sits directly under the dashboard: the dashboard answers "what
-  // happened just now", this answers "what is happening over time". Both are
-  // read-only, so they belong above the screens where work gets done.
-  { href: "/admin/finance", label: "Finance", icon: LineChart },
+/**
+ * `match` exists for one entry. The analytics workspace is a single
+ * destination spread over two route trees — Overview is the panel's index page
+ * at `/admin`, the other five sections are `/admin/finance/*` — because
+ * `/admin/page.tsx` cannot be moved. One nav item, one highlight rule covering
+ * both, so the sidebar shows what the reader sees: one place, not two.
+ */
+const nav: {
+  href: string;
+  label: string;
+  icon: typeof LayoutDashboard;
+  exact?: boolean;
+  match?: (pathname: string) => boolean;
+}[] = [
+  {
+    href: "/admin",
+    label: "Dashboard",
+    icon: LayoutDashboard,
+    match: (p) => p === "/admin" || p.startsWith("/admin/finance"),
+  },
   { href: "/admin/products", label: "Products", icon: Package },
   { href: "/admin/categories", label: "Categories", icon: Tag },
   { href: "/admin/orders", label: "Orders", icon: ShoppingCart },
@@ -46,6 +60,9 @@ const nav = [
   // Next to Coupons: both are "things that change what the shopper is
   // offered". A coupon waits to be typed in, a promotion goes looking.
   { href: "/admin/promotions", label: "Promotions", icon: Megaphone },
+  // Next to the Media Library: both are "the pictures side of the store". The
+  // library is every photo we hold; the portfolio is the ones we chose to show.
+  { href: "/admin/portfolio", label: "Portfolio", icon: Clapperboard },
   { href: "/admin/media", label: "Media Library", icon: Images },
   { href: "/admin/leads", label: "Interested customers", icon: Users },
   { href: "/admin/messages", label: "Inquiries", icon: MessageSquare },
@@ -73,9 +90,11 @@ export function AdminShell({
       </div>
       <nav className="flex-1 space-y-1 px-3">
         {nav.map((item) => {
-          const active = item.exact
-            ? pathname === item.href
-            : pathname.startsWith(item.href);
+          const active = item.match
+            ? item.match(pathname)
+            : item.exact
+              ? pathname === item.href
+              : pathname.startsWith(item.href);
           const Icon = item.icon;
           return (
             <Link

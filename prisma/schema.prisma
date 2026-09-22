@@ -677,3 +677,32 @@ model ProductImage {
   @@unique([productId, mediaId, variantValue])
   @@index([productId, variantValue])
 }
+
+// -------- Portfolio --------
+// The admin-managed body of work shown at /portfolio: Instagram reels, blog
+// posts, collaborations, bulk-order jobs. It replaces the hardcoded curated
+// Instagram grid, and it is deliberately NOT Instagram-only.
+//
+// `productId` is a plain String, not a relation, on purpose: a portfolio entry
+// must outlive the product it was about. A relation with onDelete: Cascade
+// would silently delete the entry when the piece is retired, and Restrict would
+// block the product delete entirely. See lib/portfolio.ts, which resolves the
+// id and drops the link when the product is gone.
+model PortfolioItem {
+  id          String   @id @default(cuid())
+  kind        String   @default("instagram") // "instagram" | "link" | "image" | "video"
+  title       String
+  description String?
+  url         String? // permalink / blog / external
+  imageUrl    String? // thumbnail or uploaded image
+  embedHtml   String? // oEmbed/iframe html when available
+  productId   String? // when this piece is about one product
+  tags        String[] @default([])
+  sortOrder   Int      @default(0)
+  isFeatured  Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+}

@@ -1,57 +1,54 @@
 import Link from "next/link";
-import { getFinanceReport, delta, METRIC, TIMEZONE_NOTE } from "@/lib/analytics";
-import { ColumnChart, RankBars, Meter } from "@/components/admin/finance-chart";
+import { getFinanceReport, METRIC, notMeasuredFor } from "@/lib/analytics";
+import { RankBars, Meter } from "@/components/admin/finance-chart";
 import {
   Caveat,
   DefRow,
   Empty,
+  NotMeasured,
   Panel,
   StatTile,
   TileGrid,
   formatCount,
   formatINR,
+  formatPercent,
 } from "@/components/admin/finance-ui";
-import { TableScroll } from "@/components/admin/form-kit";
+import { readClock } from "@/components/admin/dash-workspace";
 import { Badge } from "@/components/admin/order-ui";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Finance" };
+export const metadata = { title: "Dashboard — Finance" };
 
 /**
- * Admin → Finance → Money.
+ * Admin → Dashboard → Finance.
  *
- * The page is thin on purpose: it reads the range out of the URL, asks
- * `lib/analytics` for one report, and renders it. Every definition, every
- * exclusion and every piece of arithmetic lives in that module, and the (i)
- * text on each figure is the same constant the query was written against — so
- * a number and its explanation cannot drift apart.
+ * The bank-balance view, as distinct from the shop view on Sales. It answers
+ * one question the rest of the workspace deliberately does not: of everything
+ * the store booked, how much is actually money, and where did the rest go.
  *
- * The order of the page is the order the questions get asked: what did we
- * sell, how did that move, how was it built, how much of it is actually in
- * the bank, what went back out, and where did it come from.
+ * The order is the order the arithmetic happens in — goods at list price, less
+ * discount, giving net revenue; then shipping and the total billed; then what
+ * of that has been collected; then what went back out as refunds.
+ *
+ * Nothing on this page is profit. There is no cost price on a product and no
+ * courier invoice in the database, and the page says so rather than letting
+ * "revenue" be read as "earnings".
  */
-
-/**
- * Wall clock, read through an async boundary rather than called in the render
- * body — the same pattern as Admin → Customers. The page is force-dynamic so
- * the value is genuinely per-request.
- */
-async function readClock(): Promise<Date> {
-  return new Date();
-}
-
-export default async function FinanceMoney({
+export default async function FinanceSection({
   searchParams,
 }: {
-  searchParams: Promise<{ range?: string }>;
+  searchParams: Promise<{ range?: string; grain?: string }>;
 }) {
   const sp = await searchParams;
   const now = await readClock();
-  const report = await getFinanceReport(sp.range, now);
+  const report = await getFinanceReport(sp.range, now, sp.grain);
 
-  const { revenue, cash, refunds, previous, window: win } = report;
-  const vs = previous ? `vs ${previous.label}` : undefined;
+  const { revenue, cash, refunds, window: win } = report;
   const nothing = revenue.orders === 0 && revenue.cancelledOrders === 0;
+
+  /** Refunds paid out over revenue booked — two clocks, stated as such. */
+  const refundRate =
+    revenue.netRevenue > 0 ? Math.round((refunds.net / revenue.netRevenue) * 1000) / 10 : null;
 
   return (
     <div className="space-y-5">
@@ -63,88 +60,36 @@ export default async function FinanceMoney({
         </p>
       )}
 
-      {/* ---- Headline ---------------------------------------------------- */}
-
       <TileGrid>
         <StatTile
           emphasis
-          label="Net revenue"
-          value={formatINR(revenue.netRevenue)}
-          tip={METRIC.netRevenue}
-          delta={previous ? delta(revenue.netRevenue, previous.netRevenue) : undefined}
-          deltaLabel={vs}
-          sub={`${win.label} · booked, not collected`}
+          label="Cash collected"
+          value={formatINR(cash.collected)}
+          tip={METRIC.collected}
+          sub={`of ${formatINR(cash.billed)} billed · ${win.label.toLowerCase()}`}
         />
         <StatTile
-          label="Orders"
-          value={formatCount(revenue.orders)}
-          tip={METRIC.orders}
-          delta={previous ? delta(revenue.orders, previous.orders) : undefined}
-          deltaLabel={vs}
-          sub={
-            revenue.cancelledOrders > 0
-              ? `${revenue.cancelledOrders} cancelled (${formatINR(revenue.cancelledValue)}) excluded`
-              : "none cancelled"
-          }
+          label="Still outstanding"
+          value={formatINR(cash.outstanding)}
+          tip={METRIC.outstanding}
+          good="down"
+          sub="billed, not in hand"
         />
         <StatTile
-          label="Average order value"
-          value={formatINR(revenue.aov)}
-          tip={METRIC.aov}
-          delta={previous ? delta(revenue.aov, previous.aov) : undefined}
-          deltaLabel={vs}
+          label="Refunds paid out"
+          value={formatINR(refunds.net)}
+          tip={METRIC.refundsPaid}
+          good="down"
+          sub={`${refunds.paidCount} refund${refunds.paidCount === 1 ? "" : "s"} · dated by when the money left`}
         />
         <StatTile
-          label="Units sold"
-          value={formatCount(revenue.units)}
-          tip={METRIC.units}
-          delta={previous ? delta(revenue.units, previous.units) : undefined}
-          deltaLabel={vs}
+          label="Refund rate"
+          value={formatPercent(refundRate)}
+          tip={METRIC.refundRate}
+          good="down"
+          sub="refunds out ÷ revenue booked"
         />
       </TileGrid>
-
-      {!previous && (
-        <p className="text-xs text-muted-foreground">
-          No period-on-period comparison on All time — there is no equally long
-          period before it to compare against. Pick 7, 30 or 90 days for deltas.
-        </p>
-      )}
-
-      {/* ---- Trend ------------------------------------------------------- */}
-
-      <Panel
-        title="Net revenue over time"
-        tip={METRIC.netRevenue}
-        subtitle={
-          <>
-            One bar per {report.granularity}, by order date. {TIMEZONE_NOTE} Refunds
-            are <strong className="font-medium text-foreground">not</strong> netted
-            out of these bars — they are dated by when the money left, which is a
-            different day from the order, and are reported separately below.{" "}
-            {win.days !== null && (
-              <>
-                The window is a rolling one ending now, so the first and last bars
-                cover part of a {report.granularity} and will read low. They are
-                kept rather than trimmed, because dropping them would take real
-                orders out of the total to tidy the axis.
-              </>
-            )}
-          </>
-        }
-      >
-        <ColumnChart
-          measure="Net revenue"
-          unit={report.granularity}
-          columns={report.series.map((p) => ({
-            key: p.key,
-            label: p.label,
-            value: p.netRevenue,
-            detail: `${p.orders} order${p.orders === 1 ? "" : "s"}, ${p.units} unit${p.units === 1 ? "" : "s"}`,
-          }))}
-          formatValue={formatINR}
-          tableHead={[report.granularity === "month" ? "Month" : report.granularity === "week" ? "Week of" : "Day", "Net revenue", "Orders / units"]}
-        />
-      </Panel>
 
       {/* ---- Composition + cash ------------------------------------------ */}
 
@@ -241,16 +186,46 @@ export default async function FinanceMoney({
               </div>
               <Caveat>
                 A cash-on-delivery balance counts as collected only once the
-                order is marked delivered — <code className="text-foreground">balanceDue</code>{" "}
-                is written at checkout and never decremented, so reading it as
-                income would invent money on every parcel still in transit. This
-                is the same rule the refund engine uses, so the two can never
-                disagree.
+                order is marked delivered —{" "}
+                <code className="text-foreground">balanceDue</code> is written
+                at checkout and never decremented, so reading it as income would
+                invent money on every parcel still in transit. This is the same
+                rule the refund engine uses, so the two can never disagree.
               </Caveat>
             </div>
           )}
         </Panel>
       </div>
+
+      {/* ---- Cash by payment method --------------------------------------- */}
+
+      <Panel
+        title="Cash by payment method"
+        tip="The cash position for each checkout method, on one zero-based scale. This is the same set of orders Sales splits by revenue — here the bar is money in hand rather than money booked, which is a different ranking on a cash-on-delivery store."
+      >
+        <RankBars
+          emptyText="No orders placed in this period."
+          rows={report.byPaymentMethod.map((s) => ({
+            key: s.key,
+            label: s.label,
+            value: s.collected,
+            valueLabel: formatINR(s.collected),
+            sub: (
+              <>
+                {formatINR(s.netRevenue)} booked across {s.orders} order
+                {s.orders === 1 ? "" : "s"}
+                {s.outstanding > 0 && (
+                  <>
+                    {" "}
+                    · <span className="tabular-nums">{formatINR(s.outstanding)}</span> still
+                    to collect
+                  </>
+                )}
+              </>
+            ),
+          }))}
+        />
+      </Panel>
 
       {/* ---- Refunds ------------------------------------------------------ */}
 
@@ -311,134 +286,71 @@ export default async function FinanceMoney({
           <Link href="/admin/returns?status=all" className="underline hover:text-accent">
             Open returns
           </Link>
+          <Link href="/admin/finance/fulfilment" className="underline hover:text-accent">
+            Return rate by product
+          </Link>
         </div>
         {refunds.pendingCount > 0 && (
           <Caveat>
-            Approved-but-unpaid requests are shown whenever they were raised, not
-            just this period, because that money is owed out regardless of when
-            it was agreed. It is deliberately not inside any period&apos;s refund
-            total until it is actually sent.
+            Approved-but-unpaid requests are shown whenever they were raised,
+            not just this period, because that money is owed out regardless of
+            when it was agreed. It is deliberately not inside any period&apos;s
+            refund total until it is actually sent.
           </Caveat>
         )}
       </Panel>
 
-      {/* ---- Splits ------------------------------------------------------- */}
-
-      <div className="grid gap-5 lg:grid-cols-2">
-        <Panel
-          title="By payment method"
-          tip="Net revenue split by the method chosen at checkout, with the cash position for each. Bars share one zero-based scale, so their lengths are directly comparable."
-        >
-          <RankBars
-            emptyText="No orders placed in this period."
-            rows={report.byPaymentMethod.map((s) => ({
-              key: s.key,
-              label: s.label,
-              value: s.netRevenue,
-              valueLabel: formatINR(s.netRevenue),
-              sub: (
-                <>
-                  {s.orders} order{s.orders === 1 ? "" : "s"} ·{" "}
-                  <span className="tabular-nums">{formatINR(s.collected)}</span> collected
-                  {s.outstanding > 0 && (
-                    <>
-                      {" "}
-                      · <span className="tabular-nums">{formatINR(s.outstanding)}</span>{" "}
-                      outstanding
-                    </>
-                  )}
-                </>
-              ),
-            }))}
-          />
-        </Panel>
-
-        <Panel
-          title="By order status"
-          tip="The same counted orders, split by where they are in the pipeline. Kept in lifecycle order rather than sorted by size — sorting would scramble the one thing this answers, which is where orders are piling up."
-          subtitle="Cancelled orders are excluded from every money figure on this page, so they do not appear here."
-        >
-          <RankBars
-            emptyText="No orders placed in this period."
-            rows={report.byStatus.map((s) => ({
-              key: s.key,
-              label: s.label,
-              value: s.netRevenue,
-              valueLabel: formatINR(s.netRevenue),
-              sub: (
-                <>
-                  {s.orders} order{s.orders === 1 ? "" : "s"}
-                  {s.outstanding > 0 && (
-                    <>
-                      {" "}
-                      · <span className="tabular-nums">{formatINR(s.outstanding)}</span> not yet
-                      collected
-                    </>
-                  )}
-                </>
-              ),
-            }))}
-          />
-          {revenue.cancelledOrders > 0 && (
-            <Caveat>
-              {revenue.cancelledOrders} cancelled order
-              {revenue.cancelledOrders === 1 ? "" : "s"} worth{" "}
-              {formatINR(revenue.cancelledValue)} were placed in this period and
-              left out of every figure above.
-            </Caveat>
-          )}
-        </Panel>
-      </div>
-
-      {/* ---- Coupons ------------------------------------------------------ */}
+      {/* ---- Catalogue value ---------------------------------------------- */}
 
       <Panel
-        title="Coupons redeemed"
-        tip={METRIC.couponUse}
-        subtitle="From the redemption ledger, which records a use even if the order is later cancelled — so this can exceed the discount inside net revenue above."
+        title="Stock on hand"
+        tip="Σ Product.stock across the whole catalogue, as it stands right now. Not a windowed figure — stock is a present-tense fact and does not have a period."
+        subtitle="Shown here because it is the one asset figure available, and it is the largest thing on the balance sheet this database knows about."
       >
-        {report.coupons.length === 0 ? (
-          <Empty>No coupons redeemed in this period.</Empty>
-        ) : (
-          <TableScroll>
-            <table className="w-full text-sm">
-              <caption className="sr-only">
-                Coupons redeemed in {win.label.toLowerCase()}, by discount given
-              </caption>
-              <thead className="bg-muted/40">
-                <tr>
-                  <th scope="col" className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Code
-                  </th>
-                  <th scope="col" className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Uses
-                  </th>
-                  <th scope="col" className="px-3 py-2 text-right text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Discount given
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {report.coupons.map((c) => (
-                  <tr key={c.code}>
-                    <th scope="row" className="px-3 py-2 text-left font-normal">
-                      <span className="flex flex-wrap items-center gap-1.5">
-                        <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{c.code}</code>
-                        {!c.isActive && <Badge tone="neutral">Off</Badge>}
-                      </span>
-                    </th>
-                    <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground">
-                      {c.uses}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
-                      {formatINR(c.discount)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </TableScroll>
-        )}
+        <TileGrid>
+          <StatTile
+            label="Units in stock"
+            value={formatCount(report.catalogue.unitsInStock)}
+            tip="Σ Product.stock across every product, active or not, right now."
+            good="none"
+          />
+          <StatTile
+            label="Products"
+            value={formatCount(report.catalogue.total)}
+            tip="Every row in the catalogue."
+            good="none"
+            sub={`${report.catalogue.active} active`}
+          />
+          <StatTile
+            label="Out of stock"
+            value={formatCount(report.catalogue.outOfStock)}
+            tip="Active products whose stock is zero or less. Every one of these is a live product page that cannot be bought."
+            good="down"
+          />
+          <StatTile
+            label="Cancelled value"
+            value={formatINR(revenue.cancelledValue)}
+            tip={METRIC.cancelled}
+            good="down"
+            sub={`${revenue.cancelledOrders} order${revenue.cancelledOrders === 1 ? "" : "s"} · excluded from everything above`}
+          />
+        </TileGrid>
+        <Caveat>
+          Stock is counted in units, not in rupees. Valuing it would need a cost
+          price per product, which does not exist — multiplying stock by the
+          selling price would value the shelf at what it might fetch rather than
+          at what it cost, which is not an asset figure anyone should put in a
+          book.
+        </Caveat>
+      </Panel>
+
+      {/* ---- The honest blank ---------------------------------------------- */}
+
+      <Panel
+        title="What this section cannot tell you"
+        tip="The absences that belong to the money view specifically. The full list is on Overview."
+      >
+        <NotMeasured rows={notMeasuredFor("finance")} />
       </Panel>
     </div>
   );

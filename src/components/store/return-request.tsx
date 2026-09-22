@@ -93,6 +93,7 @@ export function ReturnRequest({
   daysLeft,
   windowDays,
   closedReason,
+  embedded = false,
 }: {
   orderNumber: string;
   lines: ReturnableLine[];
@@ -103,6 +104,12 @@ export function ReturnRequest({
   windowDays?: number;
   /** Why the form isn't offered, when it isn't. */
   closedReason?: "not_delivered" | "window_closed" | "store_disabled" | null;
+  /**
+   * Drop the card chrome and the heading. Set when this already sits inside
+   * something that frames it — the "Returns" disclosure on an account order —
+   * so a card doesn't get nested inside a card inside a card on a phone.
+   */
+  embedded?: boolean;
 }) {
   const { brandName } = useSettings();
   const [policy, setPolicy] = useState<ReturnPolicySnapshot | null>(null);
@@ -222,14 +229,20 @@ export function ReturnRequest({
           : "You can raise a return once this order has been delivered.";
 
   return (
-    <section className="mt-6 rounded-2xl border border-border p-4 sm:p-5">
-      <h2 className="flex items-center gap-2 font-serif text-xl">
-        <PackageX className="h-5 w-5" /> Returns
-      </h2>
+    <section
+      className={
+        embedded ? "min-w-0" : "mt-6 rounded-2xl border border-border p-4 sm:p-5"
+      }
+    >
+      {!embedded && (
+        <h2 className="flex items-center gap-2 font-serif text-xl">
+          <PackageX className="h-5 w-5" /> Returns
+        </h2>
+      )}
 
       {/* ── Already requested ── */}
       {existing.length > 0 && (
-        <ul className="mt-3 space-y-2">
+        <ul className={embedded ? "space-y-2" : "mt-3 space-y-2"}>
           {existing.map((e) => (
             <li key={e.requestNumber} className="rounded-xl bg-muted/40 p-3">
               <div className="flex flex-wrap items-center gap-2">
@@ -275,7 +288,7 @@ export function ReturnRequest({
       {!open ? (
         // Explained, never silently hidden: a shopper who thinks the button is
         // missing writes in; one who reads the closing date does not.
-        <p className="mt-3 text-sm text-muted-foreground">
+        <p className="mt-3 text-sm text-muted-foreground first:mt-0">
           {closedMessage}{" "}
           {(policy?.code ?? closedReason) === "window_closed" &&
             "Message us on WhatsApp if something's wrong and we'll still take a look."}
@@ -285,14 +298,14 @@ export function ReturnRequest({
           {policy?.policyNote && (
             <ExpandableText
               lines={3}
-              className="mt-3 rounded-lg bg-muted/40 p-3"
+              className="mt-3 rounded-lg bg-muted/40 p-3 first:mt-0"
               contentClassName="whitespace-pre-line text-xs leading-relaxed text-muted-foreground"
             >
               {policy.policyNote}
             </ExpandableText>
           )}
 
-          <p className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+          <p className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground first:mt-0">
             <Clock className="h-3.5 w-3.5 shrink-0" />
             <span>
               {effDaysLeft} day{effDaysLeft === 1 ? "" : "s"} left to raise a

@@ -1,5 +1,8 @@
 /**
- * finance-chart — the three chart forms this dashboard needs, in plain HTML.
+ * finance-chart — the four chart forms this workspace needs, in plain HTML:
+ * a column chart over time, ranked bars across nominal categories, a meter for
+ * one ratio against a limit, and a heat grid for magnitude across two
+ * dimensions (cohort retention, the recency × frequency map).
  *
  * ── Why no chart library, and no SVG ─────────────────────────────────────────
  *
@@ -154,7 +157,7 @@ export function ColumnChart({
         </span>
 
         <div className="absolute inset-0 flex items-end gap-[2px]">
-          {columns.map((c, i) => {
+          {columns.map((c) => {
             const pct = axisMax > 0 ? (c.value / axisMax) * 100 : 0;
             return (
               <div
@@ -373,5 +376,212 @@ export function Meter({
         {caption ? <> · {caption}</> : null}
       </p>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Heat grid — magnitude across two dimensions                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * ── The ramp, measured rather than eyeballed ─────────────────────────────────
+ *
+ * A grid of magnitudes is a **sequential** encoding, so the rule is one hue,
+ * light → dark. There is exactly one hue in this design system, so the ramp is
+ * the brand accent mixed into the card surface at four fixed steps —
+ * 12 / 28 / 44 / 60 %. Both modes come out of the same `color-mix`, so dark mode
+ * is genuinely re-stepped against the dark card rather than an inverted copy.
+ *
+ * Resolved hexes, and what the data-viz validator says about them
+ * (`validate_palette.js --ordinal`):
+ *
+ * | step | light (on #ffffff) | dark (on #131316) |
+ * |------|--------------------|-------------------|
+ * | 12%  | `#efe7fd`          | `#252131`         |
+ * | 28%  | `#dac8fa`          | `#3c3556`         |
+ * | 44%  | `#c5a8f7`          | `#54487a`         |
+ * | 60%  | `#b089f4`          | `#6c5b9f`         |
+ *
+ * PASS on lightness monotonicity, on the ≥0.06 adjacent-ΔL gate, and on single
+ * hue (spread 3°), in **both** modes. The one gate it does not clear is the
+ * ordinal ramp's "lightest step ≥ 2:1 against the surface" (1.20:1 light,
+ * 1.18:1 dark), and that is deliberate on two counts: this is a sequential
+ * ramp, where the lightest step means *near zero* and is allowed to recede
+ * toward the surface, and the relief the method requires for a sub-3:1 mark is
+ * supplied twice over — **every cell prints its own value as text**, and the
+ * whole chart is already a `<table>`, so no value is ever gated behind colour
+ * or behind a hover.
+ *
+ * ── Why the cap is 60% and not 100% ─────────────────────────────────────────
+ *
+ * Above ~65% the ink token stops clearing 4.5:1 against the fill, and the
+ * mode-flip makes a per-bin text colour impossible to get right: light mode's
+ * accent is dark violet (so a full-strength cell wants white text) and dark
+ * mode's is light violet (so the same cell wants near-black). Capping the ramp
+ * lets one token, `--foreground`, be correct in every cell in both modes —
+ * measured worst case 5.54:1, on the 60% step in dark. A wider ramp would buy
+ * a little more separation at the cost of a value the reader cannot read.
+ *
+ * ── Form ────────────────────────────────────────────────────────────────────
+ *
+ * This is rendered as a real table, not a div grid, because a heat grid whose
+ * cells carry their own numbers already IS the table view — building a second
+ * one would be two copies of the same data that can disagree. The 2px gap
+ * between cells is `border-spacing`, i.e. the surface doing the separating,
+ * which is the prescribed spacer; no cell has a border drawn round it.
+ */
+
+/** Fill for a cell, as a share of the grid's maximum. `null` = no data. */
+function heatFill(share: number | null): string | undefined {
+  if (share === null) return undefined;
+  if (share <= 0) return "var(--muted)";
+  const step = share <= 0.25 ? 12 : share <= 0.5 ? 28 : share <= 0.75 ? 44 : 60;
+  return `color-mix(in srgb, var(--accent) ${step}%, var(--card))`;
+}
+
+const HEAT_STEPS = [12, 28, 44, 60];
+
+/** The four steps with the band each one covers. Never colour without a key. */
+export function HeatLegend({
+  max,
+  format,
+  zeroLabel = "none",
+}: {
+  max: number;
+  format: (n: number) => string;
+  zeroLabel?: string;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[10px] text-muted-foreground">
+      <span className="eyebrow">Scale</span>
+      <span className="flex items-center gap-1">
+        <span
+          className="h-3 w-3 shrink-0 rounded-sm"
+          style={{ background: "var(--muted)" }}
+          aria-hidden="true"
+        />
+        {zeroLabel}
+      </span>
+      {HEAT_STEPS.map((step, i) => (
+        <span key={step} className="flex items-center gap-1">
+          <span
+            className="h-3 w-3 shrink-0 rounded-sm"
+            style={{ background: `color-mix(in srgb, var(--accent) ${step}%, var(--card))` }}
+            aria-hidden="true"
+          />
+          <span className="tabular-nums">
+            {i === 0 ? "up to " : ""}
+            {format((max * (i + 1)) / 4)}
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+export type HeatRow = {
+  key: string;
+  /** The row header — a cohort month, a recency band. */
+  label: string;
+  /** A second line under the header: the cohort's size, the band's range. */
+  sub?: string;
+  /** One per column. `null` renders as "not yet", never as zero. */
+  cells: (number | null)[];
+  /** Hover detail per cell, same length as `cells`. */
+  details?: (string | null)[];
+};
+
+export function HeatGrid({
+  rows,
+  columns,
+  format,
+  max,
+  caption,
+  rowHeader,
+  emptyText = "Nothing to show yet.",
+  nullLabel = "—",
+}: {
+  rows: HeatRow[];
+  /** Column headings, e.g. ["Month 0", "+1", "+2"]. */
+  columns: string[];
+  format: (n: number) => string;
+  /** The value the darkest step represents. Bins are quarters of it. */
+  max: number;
+  caption: string;
+  /** Heading for the first column. */
+  rowHeader: string;
+  emptyText?: string;
+  nullLabel?: string;
+}) {
+  if (rows.length === 0 || columns.length === 0) return <Empty>{emptyText}</Empty>;
+
+  return (
+    <figure className="m-0">
+      <HeatLegend max={max} format={format} />
+      <TableScroll className="mt-2">
+        <table
+          className="w-full text-xs"
+          style={{ borderCollapse: "separate", borderSpacing: "2px" }}
+        >
+          <caption className="sr-only">{caption}</caption>
+          <thead>
+            <tr>
+              <th
+                scope="col"
+                className="whitespace-nowrap px-2 py-1.5 text-left text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
+              >
+                {rowHeader}
+              </th>
+              {columns.map((c) => (
+                <th
+                  key={c}
+                  scope="col"
+                  className="whitespace-nowrap px-2 py-1.5 text-right text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
+                >
+                  {c}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.key}>
+                <th scope="row" className="whitespace-nowrap px-2 py-1.5 text-left font-normal">
+                  {r.label}
+                  {r.sub && (
+                    <span className="ml-1.5 tabular-nums text-muted-foreground">{r.sub}</span>
+                  )}
+                </th>
+                {columns.map((_, i) => {
+                  const v = i < r.cells.length ? r.cells[i] : null;
+                  const share = v === null ? null : max > 0 ? v / max : 0;
+                  const detail = r.details?.[i] ?? null;
+                  return (
+                    <td
+                      key={i}
+                      // min-w keeps a column readable when the grid scrolls;
+                      // the 2px border-spacing above is the only separator.
+                      className="min-w-[3.25rem] rounded-sm px-2 py-2 text-right tabular-nums"
+                      style={{ background: heatFill(share) }}
+                      title={
+                        v === null
+                          ? `${r.label}, ${columns[i]}: not yet`
+                          : `${r.label}, ${columns[i]}: ${format(v)}${detail ? ` · ${detail}` : ""}`
+                      }
+                    >
+                      {v === null ? (
+                        <span className="text-muted-foreground">{nullLabel}</span>
+                      ) : (
+                        format(v)
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScroll>
+    </figure>
   );
 }

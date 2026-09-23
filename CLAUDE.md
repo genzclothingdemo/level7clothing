@@ -758,6 +758,40 @@ and nothing runs — which is the safe direction, but it is silent unless someon
 reads the function log. The automation queue screen shows the backlog, so a
 scheduler that has stopped is visible there.
 
+**Confirmed working 2026-09-23.** All three routes return 200 with the real
+secret and 401 with a wrong one — the 401 is the proof, because the "not
+configured" branch returns 403, so a 401 means the value is present and being
+compared. `nimbus-sync`'s first authorised run reported `checked 1, waiting 1`.
+
+The secret rides in an **`Authorization: Bearer` header, not `?secret=`**. Both
+are accepted, but a query string ends up in access logs, referrers and the
+job list; a header does not.
+
+Two mistakes worth not repeating, both found in the live scheduler:
+
+- Jobs created with **no secret at all** simply failed, and cron-job.org's only
+  signal is `lastStatus: 4` on a screen nobody opens. Check `lastStatus` after
+  changing anything.
+- `nimbus-sync` was first set to **every 5 minutes** — roughly 288 sweeps a day
+  over every open order, against a courier API, for a parcel that gets scanned
+  a handful of times. 30 minutes is plenty; automation is 15.
+
+### `.env.vercel.backup`
+
+A record of what is set in Vercel production, kept beside `.env`. It is matched
+by `.gitignore`'s `.env*` rule so it never reaches git.
+
+**It is deliberately not called `.env.local`.** Next.js loads `.env.local`
+*ahead of* `.env` for both `next dev` and `next build`, so a second copy of
+these keys would silently win the moment the two drifted — the same trap this
+file already records for `.env.production.local`. The backup name is one Next
+never reads, so it can only ever be a record.
+
+`ADMIN_DEV_BYPASS` is listed there commented out, under a "local only" heading:
+it opens the admin with no login, and although `lib/auth.ts` triple-gates it
+(refused when `NODE_ENV=production`, refused when `VERCEL` is set, and requires
+exactly `"1"`), it has no business in a deployment.
+
 Also: the `RESEND_API_KEY` in `.env` is a **send-only restricted key**. It
 returns `401 restricted_api_key` for `GET /domains`, so you cannot list or
 verify domains with it — don't waste time trying.

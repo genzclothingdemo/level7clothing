@@ -1,10 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
+  ArrowUpRight,
   Loader2,
+  ShieldCheck,
+  ShieldOff,
   X,
   Star,
   Plus,
@@ -29,8 +33,10 @@ import {
   StoreDefaultChoice,
   StoreDefaultText,
 } from "@/components/admin/store-default-field";
+import { RETURN_POLICY_HREF } from "@/components/admin/return-policy-summary";
 import { InfoTip } from "@/components/store/info-tip";
 import { allCombinations, comboKey } from "@/lib/options";
+import { explainReturnPolicy } from "@/lib/returns";
 import { IMAGE_CONTROLLER_NONE } from "@/lib/variants";
 import { formatINR, cn } from "@/lib/utils";
 import type { ProductDTO, ProductOption, ProductVideo } from "@/lib/types";
@@ -54,8 +60,21 @@ type Props = {
     shippingInfo: string;
     returnsInfo: string;
   };
-  /** Store-wide returnable default, so "Store default" can say which it is. */
-  returnDefault?: boolean;
+  /**
+   * The store's returns rules, whole.
+   *
+   * This used to be one boolean — `returnsEnabled && defaultReturnable` — which
+   * merged the master switch into the catalogue default and so could not say
+   * which of the two was answering. Worse, it let the admin switch a product to
+   * "Returnable" while returns were paused store-wide and be told that was the
+   * outcome. Passed intact now and resolved with `explainReturnPolicy`, the
+   * same rule the product page runs.
+   */
+  returnDefaults?: {
+    returnsEnabled: boolean;
+    defaultReturnable: boolean;
+    returnWindowDays: number;
+  };
 };
 
 /** Which top-level tab of the editor is showing. */
@@ -129,7 +148,7 @@ export function ProductForm({
   initialCategory,
   initialSubcategoryId,
   infoDefaults,
-  returnDefault,
+  returnDefaults,
 }: Props) {
   const router = useRouter();
   // A duplicate arrives as a fully populated product with a blank id — that is
@@ -323,10 +342,17 @@ export function ProductForm({
         const val = r.variantValue;
         if (!val) continue;
         if (r.slot === "preview") {
-          // Kept out of `galleries` on purpose: the editor treats the preview
-          // as its own field, and folding it in would silently add it to the
-          // gallery on the next save.
           if (!previews[val]) previews[val] = r.url;
+          // The preview is its own field AND, when `sortOrder >= 0`, a member
+          // of that value's gallery at exactly that index — see
+          // syncProductImages, which writes -1 for a preview that sits outside
+          // the gallery. `ordered` is ascending, so appending here reproduces
+          // the authored order. Without this the photo the admin pressed "Set
+          // preview" on came back missing from its own gallery.
+          if ((r.sortOrder ?? -1) >= 0) {
+            galleries[val] = galleries[val] ?? [];
+            if (!galleries[val].includes(r.url)) galleries[val].push(r.url);
+          }
         } else if (r.slot === "gallery") {
           galleries[val] = galleries[val] ?? [];
           if (!galleries[val].includes(r.url)) galleries[val].push(r.url);
@@ -626,15 +652,30 @@ export function ProductForm({
       }))
       .filter((g) => g.name && g.choices.length > 0);
 
-    // Keep only the galleries/previews for the image-driving option's values, so
-    // orphaned keys (left over from switching which option controls images) are
-    // never persisted. syncProductImages keys ProductImage.variantValue on these.
+    // ── Live galleries vs kept ones ──
+    //
+    // `liveGalleries` are the values the Image Controller currently drives —
+    // the only ones any storefront surface reads. Everything else is a gallery
+    // filed under a value the controller no longer points at, because the admin
+    // switched which option drives images or answered **None**.
+    //
+    // Those are **kept, not deleted.** Dropping them made switching the
+    // controller (and picking None in particular) a silently destructive act:
+    // the photos vanished from ProductImage, and switching back found empty
+    // galleries with no way to recover the assignment. They are persisted with
+    // their own `variantValue`, which no reader looks up while another option
+    // (or none) is driving images, so they are stored and invisible — and they
+    // rehydrate the moment that option is chosen again. The Media tab says so
+    // before the save; see the "kept" notice in variant-media-tab.tsx.
     const imageValues = new Set(
       optionMatrix.find((o) => o.name === imageDrivingOption)?.values ?? []
     );
-    const cleanGalleries: Record<string, string[]> = {};
+    const liveGalleries: Record<string, string[]> = {};
+    const keptGalleries: Record<string, string[]> = {};
     for (const [val, imgs] of Object.entries(visualGallery.galleries)) {
-      if (imageValues.has(val) && imgs.length) cleanGalleries[val] = imgs;
+      if (!imgs.length) continue;
+      if (imageValues.has(val)) liveGalleries[val] = imgs;
+      else keptGalleries[val] = imgs;
     }
     // Preview thumbnail: the admin's manual pick wins; when none is chosen,
     // fall back to the 1st image of that value's gallery (then 1st common).
@@ -642,11 +683,18 @@ export function ProductForm({
     for (const val of imageValues) {
       const manual = visualGallery.previews[val];
       const preview =
-        manual || cleanGalleries[val]?.[0] || visualGallery.common[0] || null;
+        manual || liveGalleries[val]?.[0] || visualGallery.common[0] || null;
       if (preview) cleanPreviews[val] = preview;
     }
+    // A kept value keeps only the preview the admin actually chose — never the
+    // "first gallery photo / first common photo" fallback above, which is a
+    // storefront convenience and would be noise on a gallery nothing shows.
+    for (const val of Object.keys(keptGalleries)) {
+      const manual = visualGallery.previews[val];
+      if (manual) cleanPreviews[val] = manual;
+    }
     const cleanMedia: VisualGalleryState = {
-      galleries: cleanGalleries,
+      galleries: { ...keptGalleries, ...liveGalleries },
       previews: cleanPreviews,
       common: visualGallery.common,
     };
@@ -660,7 +708,7 @@ export function ProductForm({
           const v = variantOf(comboKey(combo));
           // The visual value is this combo's choice for the image-driving option.
           const visualVal = (imageDrivingOption ? combo[imageDrivingOption] : null) ?? null;
-          const designImages = visualVal ? (cleanGalleries[visualVal] ?? []) : [];
+          const designImages = visualVal ? (liveGalleries[visualVal] ?? []) : [];
           const comboImages = [...designImages, ...visualGallery.common];
           return {
             combo,
@@ -677,13 +725,17 @@ export function ProductForm({
     // stable order (variant galleries in option order, then common). It backs the
     // listing card, OG image and JSON-LD — the storefront gallery itself reads the
     // relational ProductImage rows written by syncProductImages.
+    //
+    // **Live galleries only.** It used to sweep up every leftover gallery too,
+    // which was harmless while those rows were being deleted anyway. Now that
+    // they are kept, including them here would leak them back onto the
+    // storefront: `product.images` is the card fallback (`ownStills`), the OG
+    // image and the JSON-LD, so a product set to None with fewer than four
+    // common photos would start swiping through the hidden ones. Kept means
+    // kept in the database, not shown.
     const allVariantImages = new Set<string>();
     for (const val of visualValues) {
-      for (const img of cleanGalleries[val] ?? []) allVariantImages.add(img);
-    }
-    // Any gallery left over from a value that is no longer in the matrix.
-    for (const gal of Object.values(cleanGalleries)) {
-      for (const img of gal) allVariantImages.add(img);
+      for (const img of liveGalleries[val] ?? []) allVariantImages.add(img);
     }
     for (const img of visualGallery.common) allVariantImages.add(img);
     const derivedImages = [...allVariantImages];
@@ -1170,21 +1222,43 @@ export function ProductForm({
             }
           >
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <StoreDefaultChoice
-                label="Returns"
-                tip="Whether this piece can be returned at all. A 'Not returnable' answer hides the return request form for this product only — the usual reason is personalised work that cannot be resold."
-                value={returnable}
-                fallback={returnDefault}
-                fallbackLabel={
-                  returnDefault === undefined
-                    ? "the store setting"
-                    : returnDefault
-                      ? "returnable"
-                      : "not returnable"
-                }
-                onChange={setReturnable}
-                options={{ yes: "Returnable", no: "Not returnable" }}
-              />
+              {/* The switch states this product's answer; the strip under it
+                  states the answer the customer actually gets, which is not the
+                  same question once the master switch or made-to-order is in
+                  play. See ReturnsOutcome. */}
+              <div className="flex min-w-0 flex-col gap-2">
+                <StoreDefaultChoice
+                  label="Returns"
+                  tip={
+                    <>
+                      Whether this piece can be returned at all — the rule, not
+                      the wording. <b>Store default</b> follows Settings &gt;
+                      Returns, so changing the policy once changes every product
+                      that inherits it. <b>Custom</b> pins this one product and
+                      stops it following the store: the usual reason is
+                      personalised work that cannot be resold. Saying
+                      &ldquo;Not returnable&rdquo; hides the return request form
+                      for this product and removes its Returns &amp; Refunds
+                      block from the product page.
+                    </>
+                  }
+                  value={returnable}
+                  fallback={returnDefaults?.defaultReturnable}
+                  fallbackLabel={
+                    returnDefaults === undefined
+                      ? "the store setting"
+                      : returnDefaults.defaultReturnable
+                        ? "returnable"
+                        : "not returnable"
+                  }
+                  onChange={setReturnable}
+                  options={{ yes: "Returnable", no: "Not returnable" }}
+                />
+                <ReturnsOutcome
+                  product={{ returnable, isCustomisable }}
+                  settings={returnDefaults}
+                />
+              </div>
               <StoreDefaultText
                 label="Materials & Care"
                 tip="Fabric, GSM, fit and washing instructions. One point per line; each line becomes a bullet on the product page."
@@ -1643,6 +1717,100 @@ function ModeRow({
         <span className="py-2 text-sm">{label}</span>
       </label>
       <InfoTip term={label}>{tip}</InfoTip>
+    </div>
+  );
+}
+
+/**
+ * **What the customer actually gets**, under the Returns switch.
+ *
+ * The switch above answers one question — "does this product state its own
+ * answer, and which?" — and the owner kept reading it as the whole policy. It
+ * is not. Two things outrank it, and neither was visible anywhere in this
+ * editor:
+ *
+ *   - `SiteSettings.returnsEnabled` off ⇒ nothing is returnable, and picking
+ *     "Custom → Returnable" changes precisely nothing;
+ *   - a made-to-order piece inheriting the default is NOT returnable, however
+ *     "returnable" the store default reads.
+ *
+ * So the resolved answer is stated here in the sentence the storefront would
+ * give, computed by `explainReturnPolicy` — which is `resolveReturnPolicy` with
+ * its reasoning kept — so the editor cannot claim one thing while the product
+ * page does another. The store-wide half is a **link**, never a second control:
+ * two editable copies of one settings column is the lost-update bug this repo
+ * has already paid for once.
+ */
+function ReturnsOutcome({
+  product,
+  settings,
+}: {
+  product: { returnable: boolean | null; isCustomisable: boolean };
+  settings?: {
+    returnsEnabled: boolean;
+    defaultReturnable: boolean;
+    returnWindowDays: number;
+  };
+}) {
+  // Nothing to resolve against (the caller didn't pass the store rules) — say
+  // nothing rather than guess at an outcome.
+  if (!settings) return null;
+
+  const outcome = explainReturnPolicy(
+    { returnable: product.returnable, isCustomisable: product.isCustomisable },
+    { ...settings, defaultReturnsInfo: "" }
+  );
+  const overridden = !outcome.inherited;
+
+  return (
+    <div
+      className={cn(
+        "min-w-0 rounded-lg border px-3 py-2.5 text-xs leading-relaxed",
+        outcome.returnable
+          ? "border-success/30 bg-success/5"
+          : "border-danger/40 bg-danger/5"
+      )}
+    >
+      <p className="flex items-start gap-1.5 font-medium text-foreground">
+        {outcome.returnable ? (
+          <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />
+        ) : (
+          <ShieldOff className="mt-0.5 h-3.5 w-3.5 shrink-0 text-danger" />
+        )}
+        <span className="min-w-0">{outcome.headline}</span>
+      </p>
+      <p className="mt-1 text-muted-foreground">{outcome.because}</p>
+
+      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span
+          className={cn(
+            "rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest",
+            overridden
+              ? "bg-accent/15 text-accent"
+              : "bg-muted text-muted-foreground"
+          )}
+        >
+          {overridden ? "Overridden here" : "Following the store"}
+        </span>
+        <Link
+          href={RETURN_POLICY_HREF}
+          className="inline-flex items-center gap-0.5 font-medium underline underline-offset-2 hover:text-accent"
+        >
+          Settings &gt; Returns <ArrowUpRight className="h-3 w-3" />
+        </Link>
+        <InfoTip term="Store default for all products">
+          <>
+            <b>Settings &gt; Returns</b> holds the store-wide rules: the master
+            switch, the catalogue default, the window in days, the reasons
+            offered and the policy wording. Every product follows them until it
+            answers for itself with <b>Custom</b> — so change the policy there
+            once, and it moves for the whole catalogue. Overriding is a
+            per-product exception and nothing else: it cannot re-open returns
+            while the master switch is off, and it does not change the wording,
+            which is the <b>Returns &amp; Refunds</b> block on the right.
+          </>
+        </InfoTip>
+      </div>
     </div>
   );
 }

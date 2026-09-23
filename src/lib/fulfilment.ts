@@ -851,7 +851,7 @@ export async function runConfirmationPipeline(
   // route emails from `shipOrderViaNimbus` in the admin action, and there is
   // no admin here. Without this an auto-booked parcel arrives unannounced,
   // with tracking the customer was never sent.
-  await notifyStatus(orderId, "shipped").catch((err) =>
+  await notifyStatus(orderId, "shipped", "confirmed").catch((err) =>
     console.error("[fulfilment] auto-ship email failed:", err)
   );
 
@@ -927,6 +927,17 @@ export async function autoConfirmOrder(orderId: string): Promise<AutoConfirmResu
     where: { id: orderId },
     data: { status: "confirmed", statusHistory: history as unknown as object[] },
   });
+
+  // An automatic confirmation is still a confirmation, and the customer is
+  // owed the same mail as when the admin presses the button.
+  //
+  // This raised **nothing** before: `updateOrderStatus` fired the trigger and
+  // this path did not, so a store on auto-confirm silently told its customers
+  // less than a store confirming by hand — and the gap was invisible, because
+  // the order really was confirmed. `previousStatus` is "pending" by the guard
+  // above, and the engine dedupes on `<orderId>:confirmed`, so the manual path
+  // touching the same order later cannot double-send.
+  await notifyStatus(orderId, "confirmed", "pending");
 
   let shipment: ConfirmationPipelineResult;
   try {
@@ -1124,7 +1135,7 @@ export async function refreshTracking(
 
     // Tell the customer only when the order itself moved to a milestone.
     if (changed && nextStatus !== order.status) {
-      await notifyStatus(orderId, nextStatus).catch((err) =>
+      await notifyStatus(orderId, nextStatus, order.status).catch((err) =>
         console.error("[fulfilment] tracking email failed:", err)
       );
     }
@@ -1143,23 +1154,40 @@ export async function refreshTracking(
 
 // NOTIFY_STATUSES is imported from ./nimbus-status — same reason as the map.
 
-async function notifyStatus(orderId: string, status: string) {
+/**
+ * Raise `order.status_changed` for a courier-driven move.
+ *
+ * Goes straight to the automation engine. It used to call
+ * `sendOrderStatusEmail`, which was turned into a shim that does exactly this —
+ * so the shim is now bypassed and can go.
+ *
+ * `previousStatus` is read before the caller's write lands, which is what lets
+ * a rule say "only when it becomes shipped". The engine dedupes on
+ * `<orderId>:<status>`, so this and the NimbusPost webhook can both report the
+ * same scan and the customer still gets one mail.
+ *
+ * Imported lazily: `lib/automation.ts` reaches into the order/return readers,
+ * and a top-level import here would close a cycle.
+ */
+async function notifyStatus(
+  orderId: string,
+  status: string,
+  /**
+   * What the order was **before** the caller wrote the new status.
+   *
+   * Passed in rather than re-read, and that is the whole point: every caller
+   * here updates the row first, so looking it up again would report the *new*
+   * status as the previous one and break any rule scoped to a transition
+   * ("only when it becomes shipped" would match on every later save).
+   */
+  previousStatus: string
+) {
   if (!NOTIFY_STATUSES.has(status)) return;
-  const [{ sendOrderStatusEmail }, order, settings] = await Promise.all([
-    import("./email"),
-    prisma.order.findUnique({ where: { id: orderId } }),
-    getSettings(),
-  ]);
-  if (!order) return;
-  await sendOrderStatusEmail(settings, {
-    orderNumber: order.orderNumber,
-    customerName: order.customerName,
-    email: order.email,
-    status,
-    courier: order.courier,
-    trackingNumber: order.trackingNumber,
-    trackingUrl: order.trackingUrl,
-  });
+  const { runAutomationTrigger } = await import("./automation");
+  await runAutomationTrigger("order.status_changed", {
+    id: orderId,
+    context: { previousStatus },
+  }).catch((err) => console.error("[fulfilment] automation trigger failed:", err));
 }
 
 /**

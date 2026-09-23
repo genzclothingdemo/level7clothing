@@ -72,6 +72,10 @@ export async function GET(req: NextRequest) {
 
   // `allSettled`, not `all`: one leg failing is not a reason to abandon the
   // other, and a rejected promise here would lose a completed sweep's results.
+  //
+  // This route syncs shipments and nothing else. The automation queue is
+  // drained by `/api/cron/automation`, which cron-job.org calls on its own
+  // schedule — one job, one URL, one thing it does.
   const [forward, reverse] = await Promise.allSettled([
     syncAllOpenOrders(),
     syncAllOpenReturns(),

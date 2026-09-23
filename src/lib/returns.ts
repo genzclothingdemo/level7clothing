@@ -481,6 +481,106 @@ export function productReturnsBlock(
   return text ? { text, windowDays: policy.windowDays } : null;
 }
 
+/**
+ * Where a product's return answer actually came from. The admin editor needs
+ * this and the customer never does: "not returnable" is one word on the
+ * storefront and four different decisions behind it.
+ */
+export type ReturnPolicySource =
+  /** `SiteSettings.returnsEnabled` is off — nothing in the catalogue matters. */
+  | "store_disabled"
+  /** `Product.returnable === true`, overriding whatever the store says. */
+  | "product_yes"
+  /** `Product.returnable === false`. */
+  | "product_no"
+  /** Inheriting, but made-to-order outranks the catalogue default. */
+  | "made_to_order"
+  /** Inheriting `SiteSettings.defaultReturnable`. */
+  | "store_default";
+
+export type ReturnPolicyExplained = {
+  /** The answer the storefront will actually give. */
+  returnable: boolean;
+  windowDays: number;
+  /** True when this product states no answer of its own (`returnable === null`). */
+  inherited: boolean;
+  source: ReturnPolicySource;
+  /** The outcome in one sentence, safe to render verbatim. */
+  headline: string;
+  /** Why — naming the setting or the product field responsible. */
+  because: string;
+};
+
+/**
+ * The resolved return answer **plus its provenance**, for the product editor.
+ *
+ * The bug it closes: the editor used to be handed
+ * `returnsEnabled && defaultReturnable` as a single boolean. That collapses two
+ * unrelated facts into one, so a store with returns merely *paused* read as a
+ * catalogue default of "not returnable" — and, far worse, switching the product
+ * to Custom → Returnable then claimed an outcome the master switch makes
+ * impossible. `isCustomisable` was invisible for the same reason: a
+ * made-to-order piece inheriting the default was shown as "returnable" while
+ * `resolveReturnPolicy` was quietly answering the opposite.
+ *
+ * Built ON `resolveReturnPolicy`, never beside it, so the sentence the admin
+ * reads and the rule the product page enforces are produced by one function.
+ */
+export function explainReturnPolicy(
+  product: {
+    returnable?: boolean | null;
+    returnsInfo?: string | null;
+    isCustomisable?: boolean | null;
+  },
+  settings: {
+    returnsEnabled: boolean;
+    defaultReturnable: boolean;
+    returnWindowDays: number;
+    defaultReturnsInfo?: string;
+  }
+): ReturnPolicyExplained {
+  const policy = resolveReturnPolicy(product, settings);
+  const inherited = product.returnable == null;
+  const days = policy.windowDays;
+
+  const source: ReturnPolicySource = !settings.returnsEnabled
+    ? "store_disabled"
+    : product.returnable === true
+      ? "product_yes"
+      : product.returnable === false
+        ? "product_no"
+        : product.isCustomisable
+          ? "made_to_order"
+          : "store_default";
+
+  const headline = policy.returnable
+    ? `Customers can return this within ${days} day${days === 1 ? "" : "s"} of delivery.`
+    : "Customers cannot return this piece.";
+
+  const because: Record<ReturnPolicySource, string> = {
+    store_disabled:
+      "Returns are switched off for the whole store, so nothing is returnable whatever this product says.",
+    product_yes:
+      "This product overrides the store default and is marked returnable.",
+    product_no:
+      "This product overrides the store default and is marked not returnable.",
+    made_to_order:
+      "It is made to order, which outranks the store default — there is nothing to resell. Set Custom → Returnable to override that.",
+    store_default: settings.defaultReturnable
+      ? "It inherits the store default, which is returnable."
+      : "It inherits the store default, which is not returnable.",
+  };
+
+  return {
+    returnable: policy.returnable,
+    windowDays: days,
+    inherited,
+    source,
+    headline,
+    because: because[source],
+  };
+}
+
 const DAY_MS = 86_400_000;
 
 export type ReturnWindow = {

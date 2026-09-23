@@ -53,32 +53,36 @@ import {
   countByTab,
   isFeeKey,
   isPipelineKey,
-  isTabKey,
+  resolveTab,
   tabMeta,
   type DraftKey,
   type SettingsDraft,
   type TabKey,
 } from "@/components/admin/settings-ui";
 import {
-  EmailSection,
   IntegrationsSection,
   OrdersSection,
   PaymentsSection,
   ReturnsSection,
   StoreSection,
-  StorefrontSection,
   type SectionProps,
   type SettingsFacts,
 } from "@/components/admin/settings-sections";
 
+/**
+ * One component per tab. `Record<TabKey, …>` is what makes this exhaustive —
+ * adding a key to `TABS` without a section here is a type error rather than an
+ * empty panel at runtime.
+ *
+ * `StorefrontSection` and `EmailSection` are gone: their controls moved inside
+ * `StoreSection` when the three tabs merged.
+ */
 const SECTIONS: Record<TabKey, (p: SectionProps) => React.ReactElement> = {
   store: StoreSection,
   orders: OrdersSection,
   payments: PaymentsSection,
   integrations: IntegrationsSection,
   returns: ReturnsSection,
-  storefront: StorefrontSection,
-  email: EmailSection,
 };
 
 export function SettingsForm({
@@ -128,8 +132,10 @@ export function SettingsForm({
   // though it was written without a navigation.
   useEffect(() => {
     function onPop() {
-      const q = new URLSearchParams(window.location.search).get("tab");
-      setTab(isTabKey(q ?? undefined) ? (q as TabKey) : DEFAULT_TAB);
+      // Same resolver the server page uses, so a back/forward step onto a
+      // retired `?tab=storefront` entry lands on the tab that absorbed it
+      // rather than on whatever the default happens to be.
+      setTab(resolveTab(new URLSearchParams(window.location.search).get("tab")));
     }
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -374,7 +380,7 @@ export function SettingsForm({
       >
         {/*
           The heading used to be `sr-only`, which left a sighted owner looking
-          at seven nouns in a tab bar with nothing to choose between them. It is
+          at a row of nouns in a tab bar with nothing to choose between them. It is
           printed now: the heading names the group, the blurb says in a few
           words what the tab is FOR, and the long version is behind the (i) —
           the same three levels the sections below already use.

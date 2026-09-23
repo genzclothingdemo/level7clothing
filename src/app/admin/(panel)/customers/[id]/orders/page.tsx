@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
-import { getCustomer, getCustomerProducts } from "@/lib/customers";
+import { getCustomer } from "@/lib/customers";
+import { getAdminProductIndex } from "@/components/admin/product-index";
 import { CustomerOrders } from "@/components/admin/customer-orders";
 
 export const dynamic = "force-dynamic";
@@ -20,8 +21,10 @@ export default async function CustomerOrdersSection({
   if (!customer) notFound();
 
   // One query for every product this person has ever touched — order lines,
-  // returns, carts and saves together. Not one per order.
-  const products = await getCustomerProducts(customer);
+  // returns, carts and saves together. Not one per order. Still one query
+  // after the switch from `getCustomerProducts`: the select is a column wider
+  // (`images`), because every line now leads with its photo.
+  const products = await getAdminProductIndex(customer);
 
   return <CustomerOrders customer={customer} products={products} />;
 }

@@ -64,10 +64,12 @@ export function AutomationQueue({
       const res = await runDueAutomationJobs();
       if (res.success && res.report) {
         const r = res.report;
+        const swept =
+          r.swept > 0 ? ` · checked ${r.swept} return${r.swept === 1 ? "" : "s"}` : "";
         toast.success(
-          r.due === 0
-            ? "Nothing was due."
-            : `${r.sent} sent · ${r.failed} failed · ${r.skipped} skipped`
+          r.due === 0 && r.sent === 0
+            ? `Nothing was due${swept.replace(" · ", " — ")}.`
+            : `${r.sent} sent · ${r.failed} failed · ${r.skipped} skipped${swept}`
         );
         router.refresh();
       } else {
@@ -100,17 +102,26 @@ export function AutomationQueue({
             {pending === 0
               ? "Nothing waiting."
               : `${pending} waiting${due > 0 ? `, ${due} due now` : ""}.`}{" "}
-            The scheduled job drains this once a day.
+            The scheduled job runs once a day: it sends anything due and checks
+            whether a courier has moved a return since it last looked.
           </p>
         </div>
+        {/*
+          Not disabled when nothing is due, which it used to be. A pass does two
+          things now, and the second — noticing that a return was collected or
+          delivered back — is exactly what an owner wants on demand, at the
+          moment they are looking at a return, with an empty queue. Every send
+          is still claimed with a compare-and-set before it leaves, so pressing
+          this repeatedly cannot send anything twice.
+        */}
         <button
           type="button"
           onClick={runNow}
-          disabled={running || due === 0}
+          disabled={running}
           className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-border px-4 text-[11px] font-medium uppercase tracking-widest transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Play className="h-4 w-4" />
-          {running ? "Running…" : "Run due jobs now"}
+          {running ? "Running…" : "Run now"}
         </button>
       </div>
 

@@ -711,19 +711,52 @@ looks like it worked and returns fine.
 
 It surfaced only when Admin → Automation gave the failures a screen to appear on.
 
-Local `.env` now reads `EMAIL_FROM="Level7 Clothing <onboarding@resend.dev>"`,
-which is Resend's shared sending domain and needs no verification.
-**Production reads its own copy from Vercel and is still wrong until that is
-changed** — Settings → Environment Variables → `EMAIL_FROM`, then redeploy.
+**Resolved on 2026-09-23**: the owner verified **`level7clothing.shop`** in
+Resend, so `.env` now reads
+`EMAIL_FROM="Level7 Clothing <orders@level7clothing.shop>"`. That address does
+not need to be a real mailbox — Resend only checks that the *domain* is
+verified — but replies go nowhere unless one exists, so `contactEmail` in
+Settings is what customers are told to write to.
 
-Two caveats worth knowing before trusting it:
+**Production reads its own copy from Vercel**, so the same value has to be set
+there or production keeps sending from whatever it has.
 
-- `onboarding@resend.dev` on a free Resend account will only deliver to **the
-  address that owns the Resend account**. Good enough to prove the pipeline;
-  not good enough for real customers.
-- The real fix is a verified domain. `level7clothing.shop` is disabled (see the
-  top of this file), so that has to be sorted first — which is why this is
-  written down rather than quietly "fixed".
+Two things to check before trusting it:
+
+- The domain must read **Verified** (green) in Resend, not merely "added". An
+  unverified domain rejects every send exactly like the Gmail address did.
+- `level7clothing.shop` is the domain this file records as **disabled on
+  GoDaddy** with corrupt records. Resend verification needs live DNS on it, so
+  if it verified, those records were fixed — but the domain is still not
+  attached to Vercel, and `NEXT_PUBLIC_SITE_URL` must keep pointing at
+  `clothingdemoshop.vercel.app`. Sending mail from a domain and serving a site
+  from it are independent.
+
+## Cron runs on cron-job.org, not on Vercel
+
+`vercel.json` has **no `crons` key at all**, and that is deliberate.
+
+The project is on Vercel's **free plan**, which allows two cron jobs at a daily
+maximum. A commit that added a third entry and an hourly schedule did not make
+the cron fail — it made **the whole deployment fail**, silently, so a day's work
+sat pushed and un-deployed while the site served the previous build. Nothing in
+the app said so; the only evidence was `/api/version` not changing.
+
+So scheduling moved out to **cron-job.org**, which is free, runs at any
+interval, and is one scheduler rather than two. Every `/api/cron/*` route is
+guarded by `CRON_SECRET` and accepts it either as a `Bearer` header or as
+`?secret=…`, which is what an external scheduler can send.
+
+| URL | Suggested interval | What it does |
+|---|---|---|
+| `/api/cron/automation?secret=…` | every 15–60 min | drains `AutomationJob` — delayed rules like the 24h cart nudge |
+| `/api/cron/nimbus-sync?secret=…` | every 30–60 min | pulls AWBs and courier scans, both forward and reverse legs |
+| `/api/cron/purge-media?secret=…` | weekly | deletes unreferenced blobs |
+
+**`CRON_SECRET` must be set in Vercel**, or every route fails closed with a 403
+and nothing runs — which is the safe direction, but it is silent unless someone
+reads the function log. The automation queue screen shows the backlog, so a
+scheduler that has stopped is visible there.
 
 Also: the `RESEND_API_KEY` in `.env` is a **send-only restricted key**. It
 returns `401 restricted_api_key` for `GET /domains`, so you cannot list or

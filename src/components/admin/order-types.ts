@@ -26,6 +26,16 @@ export type AdminOrderItem = {
   productId?: string;
   /** Resolved server-side; null when the product has since been deleted. */
   slug?: string | null;
+  /**
+   * The line's photo — the catalogue's current first image, falling back to
+   * the one frozen onto the order at checkout.
+   *
+   * It was flowing through this shape at runtime the whole time (`placeOrder`
+   * writes `image` onto every line) and was simply never declared, so nothing
+   * could render it without a cast. Declared now because the orders row leads
+   * with the product rather than with the order number.
+   */
+  image?: string | null;
   name: string;
   quantity: number;
   price: number;

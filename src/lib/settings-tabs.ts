@@ -12,22 +12,40 @@
  * directive can be imported from both sides, which is what a shared constant
  * and a type guard actually need.
  *
- * ## Why these seven
+ * ## Why these five
  *
  * Settings is now the **single home for settings** — the order pipeline and the
  * return policy both moved in from the screens that used to own them, because
  * the owner went looking for auto-confirm here twice and it was on the Orders
  * page. That would have made nine tabs, and nine tabs on a 375px screen is a
  * swipe, not a menu. So they are grouped by the errand instead of by the
- * schema, and two pairs merged:
+ * schema, and the pairs merged:
  *
- *   Brand + Contact          → **Store**       (who you are)
- *   Copy + Product defaults  → **Storefront**  (what it says)
+ *   Brand + Contact          → **Store**  (who you are)
+ *   Copy + Product defaults  → **Store**  (what it says)
+ *   Your own alert address   → **Store**  (where it writes to you)
  *
  * and the order is by how often the owner touches them. **Store** stays first
  * because the sidebar calls this screen "Branding & settings" and landing
  * somewhere else would not match the door you came through; **Orders** is
  * second, because it is the one people go hunting for.
+ *
+ * ## Store, Storefront and Email are one tab
+ *
+ * They were three, and the split never survived contact with the errand. All
+ * three answer the same question — *what is this shop called, what does it say,
+ * and where does it write* — and the owner asked for them folded together.
+ * Concretely: the brand name and the hero headline are both "the words at the
+ * top of the home page", and the public contact email (Store) and the admin
+ * alert address (Email) are two fields that only make sense read side by side,
+ * because the whole point of the second one is that it is *not* the first.
+ * Being on different tabs is what made that hard to check.
+ *
+ * Nothing was dropped. Every control moved across, and the set-once ones are
+ * behind the same `SetOnce` folds they already used, so the merged tab is five
+ * closed rows and two open cards rather than three tabs' worth of fields.
+ *
+ * `TAB_ALIASES` keeps the two retired `?tab=` values working — see below.
  *
  * ## Shipping is gone, and Integrations replaced it
  *
@@ -53,9 +71,10 @@
  * on top, what is set once is behind a `Disclosure`, and every long explanation
  * is behind an `(i)` rather than in a paragraph.
  *
- * Renaming `brand`/`copy`/`contact`/`product` changes their `?tab=` values.
- * `isTabKey` rejects the old ones and `DEFAULT_TAB` catches them, so a stale
- * bookmark opens Store rather than an empty panel.
+ * A tab key IS its `?tab=` value, so removing or renaming one breaks every
+ * bookmark holding the old string. `resolveTab()` is the single answer to that:
+ * live key → itself, retired key → `TAB_ALIASES`, anything else → `DEFAULT_TAB`.
+ * A stale bookmark opens a real tab rather than an empty panel, and never 404s.
  */
 /**
  * Every tab states, in one printed line, what it is for.
@@ -73,10 +92,10 @@ export const TABS = [
   {
     key: "store",
     label: "Store",
-    heading: "Brand, contact & social",
-    blurb: "Your name, logo and how customers reach you",
+    heading: "Brand, copy & contact",
+    blurb: "What the shop is called, what it says, and where it writes",
     guide:
-      "Identity and contact details. Everything here is read from the database at render time — the brand name in the header, the browser tab, order emails, the sitemap and the home-screen icon all come from this tab, and none of it is hardcoded anywhere. The announcement bar is on top because it is the one thing here that changes for a sale; the rest is set once.",
+      "Identity, the words on the storefront, and the two email addresses. Everything here is read from the database at render time — the brand name in the header, the browser tab, order emails, the sitemap and the home-screen icon all come from this tab, and none of it is hardcoded anywhere. The announcement bar and the hero are on top because they are what changes for a sale; the rest is set once and folded away. The two addresses are deliberately together: the contact email is public and is where customers reply, the alert address is private and is where the store writes to you.",
   },
   {
     key: "orders",
@@ -110,22 +129,6 @@ export const TABS = [
     guide:
       "The return window, the reasons a customer may pick, and how a refund is worked out. This is the one owner of those columns: Admin → Returns shows the same policy read-only and links here. Everything on this tab has its own Save, separate from the bar at the foot of the screen.",
   },
-  {
-    key: "storefront",
-    label: "Storefront",
-    heading: "Storefront copy & product defaults",
-    blurb: "The words on the home and product pages",
-    guide:
-      "Copy, not rules. The hero is the first screen a visitor sees and its headline is the page's H1, so it is also what search engines read as the subject of the site. The product-page accordion text set here is inherited by the whole catalogue; a product only needs its own version when it genuinely differs.",
-  },
-  {
-    key: "email",
-    label: "Email",
-    heading: "Notifications & email",
-    blurb: "Where the store writes to you",
-    guide:
-      "Your own alerts — a new order, an enquiry, an interested customer. Deliberately separate from the public contact email, which is what customers see and where their replies land. Push notifications and the newsletter are not settings but messages you compose, so each has its own screen.",
-  },
 ] as const;
 
 export type TabKey = (typeof TABS)[number]["key"];
@@ -134,8 +137,44 @@ export type SettingsTab = (typeof TABS)[number];
 
 export const DEFAULT_TAB: TabKey = "store";
 
+/**
+ * Retired `?tab=` values, and where they went.
+ *
+ * `storefront` and `email` were folded into `store`. Both would already have
+ * landed there by accident — `isTabKey` rejects them and `DEFAULT_TAB` catches
+ * the rejection — but "by accident" is a fallback that breaks silently the day
+ * someone reorders `TABS` and the default stops being `store`. Stating the
+ * redirect makes it a decision instead: a bookmark saved at Storefront opens
+ * the tab that now holds the storefront copy, and it keeps doing so whatever
+ * happens to the default.
+ *
+ * `brand`, `copy`, `contact`, `product` and `shipping` are deliberately NOT
+ * here. Those were renamed or dismantled long enough ago that nothing points
+ * at them, and an alias for a value nobody holds is a row to maintain forever.
+ * They fall through to `DEFAULT_TAB`, which is the right answer for a stale
+ * bookmark whose section no longer exists in any form.
+ */
+export const TAB_ALIASES: Readonly<Record<string, TabKey>> = {
+  storefront: "store",
+  email: "store",
+};
+
 export function isTabKey(v: string | undefined): v is TabKey {
   return TABS.some((t) => t.key === v);
+}
+
+/**
+ * Any `?tab=` value → the tab to open. Never throws, never 404s.
+ *
+ * Three cases, in order: a live key opens itself, a retired key opens whatever
+ * absorbed it, and anything else — a typo, a deleted section, a hand-edited URL
+ * — opens the default. The server page and the client form both call this, so
+ * the first paint and the tab state can never disagree about where a stale link
+ * lands.
+ */
+export function resolveTab(v: string | null | undefined): TabKey {
+  if (isTabKey(v ?? undefined)) return v as TabKey;
+  return (v && TAB_ALIASES[v]) || DEFAULT_TAB;
 }
 
 /** The whole row for a tab. Never `undefined` — `TabKey` guarantees a hit. */

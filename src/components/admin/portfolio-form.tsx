@@ -33,7 +33,7 @@ import {
   updatePortfolioItem,
 } from "@/app/actions/portfolio";
 import type { PortfolioKind } from "@/lib/portfolio";
-import { socialProviderOf } from "@/lib/instagram-resolve";
+import { socialProviderOf, type SocialProvider } from "@/lib/instagram-resolve";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -166,7 +166,7 @@ export function PortfolioForm({
      requirement and the fallback is a real one. */
   const [importing, setImporting] = useState(false);
   const [imported, setImported] = useState<{
-    provider: "instagram" | "youtube";
+    provider: SocialProvider;
     author: string | null;
     warning?: string;
   } | null>(null);
@@ -188,7 +188,14 @@ export function PortfolioForm({
 
     setV((prev) => ({
       ...prev,
-      kind: res.provider === "youtube" ? "video" : "instagram",
+      kind:
+        res.provider === "youtube"
+          ? "video"
+          : res.provider === "instagram"
+            ? "instagram"
+            : // Anything else is a page we read the Open Graph tags off — a
+              // blog post, a press mention. It links out; it does not play.
+              "link",
       url: res.url,
       // Never clobber a title the owner has already written.
       title: prev.title.trim() || res.title || prev.title,
@@ -196,10 +203,12 @@ export function PortfolioForm({
       embedHtml: res.embedHtml,
       // A reel or a film belongs on the reels shelf, and the owner just told
       // us which it is by pasting the link. Only filled in when they have not
-      // already chosen a shelf themselves.
-      tags: sectionFromTags(prev.tags)
-        ? prev.tags
-        : withSectionTag(prev.tags, "reels"),
+      // already chosen a shelf themselves — and only for something that plays,
+      // because a blog post on the reels shelf is just wrong.
+      tags:
+        sectionFromTags(prev.tags) || res.provider === "link"
+          ? prev.tags
+          : withSectionTag(prev.tags, "reels"),
     }));
     setImported({
       provider: res.provider,
@@ -425,7 +434,9 @@ export function PortfolioForm({
                     ? "Fetching…"
                     : linkProvider === "youtube"
                       ? "Fetch from YouTube"
-                      : "Fetch from Instagram"}
+                      : linkProvider === "instagram"
+                        ? "Fetch from Instagram"
+                        : "Fetch details"}
                 </button>
               )}
             </div>

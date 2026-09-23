@@ -10,7 +10,7 @@ import { SettingsForm } from "@/components/admin/settings-form";
 // "use client", so importing `isTabKey` from it makes this server component
 // call a client reference, which throws at render. Types are erased at build
 // time, so importing those from the client module is harmless.
-import { DEFAULT_TAB, isTabKey, type TabKey } from "@/lib/settings-tabs";
+import { resolveTab, type TabKey } from "@/lib/settings-tabs";
 import type { SettingsDraft } from "@/components/admin/settings-ui";
 import type { SettingsFacts } from "@/components/admin/settings-sections";
 
@@ -102,7 +102,11 @@ export default async function AdminSettings({
     readCatalogue(),
   ]);
 
-  const tab: TabKey = isTabKey(rawTab) ? rawTab : DEFAULT_TAB;
+  // `resolveTab` and not a bare `isTabKey` check: `?tab=storefront` and
+  // `?tab=email` are retired keys that now open Store, and that has to be a
+  // stated redirect rather than a fall-through to whichever tab happens to be
+  // the default. Anything unrecognised still lands on the default.
+  const tab: TabKey = resolveTab(rawTab);
   const d = DEFAULT_SETTINGS;
   // Narrowed once, so the six pipeline columns arrive as their real unions
   // rather than as the plain `String` the schema stores them in.
@@ -190,7 +194,7 @@ export default async function AdminSettings({
 
   return (
     <div>
-      {/* The paragraph that used to sit here said the same thing the seven tab
+      {/* The paragraph that used to sit here said the same thing the tab
           blurbs below now say one at a time, which made it the second-longest
           string on a screen whose whole problem was length. It is behind the
           (i), where the rest of this screen's explanation lives. */}

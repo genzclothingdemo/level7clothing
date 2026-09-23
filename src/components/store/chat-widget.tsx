@@ -25,6 +25,9 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+// A generic, React-only hook that happens to live under components/admin —
+// see its file header. Nothing admin-specific crosses into the store bundle.
+import { useTitleBadge } from "@/components/admin/use-title-badge";
 import { useKeyboardOpen } from "@/hooks/use-keyboard-open";
 import type {
   ChatAttachment,
@@ -43,12 +46,36 @@ import type {
  *
  * Polling rules, per the brief and per this app being serverless:
  *
- * - Panel closed: nothing. Not a slow poll, nothing.
+ * - Panel closed, and this browser has never chatted: nothing at all.
+ * - Panel closed with a conversation in progress: every 2 minutes, and only
+ *   while the tab is actually visible. See "the quiet loop" below.
  * - Open and visible: every 5s.
  * - Open but the tab is hidden: every 30s, and an immediate catch-up the
  *   moment it comes back.
  * - Each request carries the newest message the client already holds, so the
  *   server replies with the delta, not the conversation.
+ *
+ * ## The quiet loop, and why the badge was a lie without it
+ *
+ * The launcher has always carried an unread badge, and it was filled by exactly
+ * one request: a single bootstrap on a cold page load. So the store could reply
+ * while a shopper was browsing and **nothing would change** — no badge, no
+ * chime, no tab title — until they navigated (remounting the provider) or
+ * opened the panel on a hunch. The one signal the design had was only ever
+ * right by accident.
+ *
+ * The closed-panel loop fixes that, and it is deliberately cheap:
+ *
+ * - It is gated on the same `MARKER_KEY` as the bootstrap, so a visitor who has
+ *   never sent a message still costs zero queries.
+ * - It stops dead when the tab is hidden, rather than backing off, and catches
+ *   up the instant it is visible again. A background tab has nobody to show a
+ *   badge to.
+ * - It **never sends `seen`**. A closed panel has not been read, and a poll
+ *   that marked its own subject read would clear the badge it just set.
+ *
+ * It is not a second loop running beside the open one: the two effects are
+ * mutually exclusive on `open`, so exactly one timer exists at any moment.
  */
 
 /* ------------------------------------------------------------------ */
@@ -83,6 +110,13 @@ type Outbound = {
 
 const POLL_VISIBLE_MS = 5_000;
 const POLL_HIDDEN_MS = 30_000;
+/**
+ * The closed-panel cadence. Two minutes, not five seconds: this is "did the
+ * store reply while I was shopping", and every tick is a query from the
+ * function region to Mumbai. A shopper who is actually in a conversation opens
+ * the panel, and the panel polls properly.
+ */
+const POLL_IDLE_MS = 120_000;
 
 /**
  * Marks that this browser has a conversation, so the widget knows whether a
@@ -140,6 +174,20 @@ const ChatContext = createContext<ChatStore | null>(null);
 /** Null outside the store layout, so the launcher can simply not render. */
 function useChatStore(): ChatStore | null {
   return useContext(ChatContext);
+}
+
+/**
+ * Just the number, for anything that wants to show "the store has replied"
+ * without being the chat.
+ *
+ * The navbar's account link uses it. Exported as a scalar rather than letting
+ * callers reach into the store because there is now more than one consumer, and
+ * one number with one source is what keeps the launcher badge, the account dot
+ * and the tab title from ever disagreeing. Zero outside the provider, so a
+ * component that renders in both trees does not have to care.
+ */
+export function useChatUnread(): number {
+  return useContext(ChatContext)?.unread ?? 0;
 }
 
 function sortMessages(list: ChatMessageDTO[]): ChatMessageDTO[] {
@@ -252,6 +300,62 @@ export function ChatProvider({
     const id = setTimeout(() => void poll(), 0);
     return () => clearTimeout(id);
   }, [poll]);
+
+  /**
+   * The quiet loop: panel **closed**, conversation in progress.
+   *
+   * Everything about it is the conservative half of the open loop — slower,
+   * visible-tab only, and read-only (`poll()` with no `seen`, so `userUnread`
+   * is reported and never cleared). Its entire job is to let the launcher
+   * badge, the account dot and the tab title tell the truth while the shopper
+   * is doing something else.
+   */
+  useEffect(() => {
+    if (open) return;
+    if (!readMarker()) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const tick = async () => {
+      await poll();
+      if (cancelled) return;
+      // Rescheduled only while visible. `onVisibility` restarts it, so a tab
+      // left in the background for an hour costs nothing and is up to date one
+      // tick after it is looked at again.
+      if (document.visibilityState === "visible") {
+        timer = setTimeout(tick, POLL_IDLE_MS);
+      }
+    };
+
+    const onVisibility = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      if (document.visibilityState === "visible") void tick();
+    };
+
+    // No immediate tick on mount: the bootstrap effect above has just made the
+    // same request. The first quiet tick is one interval away.
+    if (document.visibilityState === "visible") {
+      timer = setTimeout(tick, POLL_IDLE_MS);
+    }
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [open, poll]);
+
+  /**
+   * `(1) Level7 Clothing` while the store is waiting on a reply.
+   *
+   * Driven by the same `unread` the badge uses, so the two can never disagree,
+   * and it clears itself the moment `unread` reaches 0 — which happens on the
+   * first visible poll after the panel is opened.
+   */
+  useTitleBadge(unread);
 
   /** The interval itself: open only, with a hidden-tab backoff. */
   useEffect(() => {

@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { getCustomer } from "@/lib/customers";
+import { getAdminProductIndex } from "@/components/admin/product-index";
 import { CustomerPayments } from "@/components/admin/customer-payments";
 
 export const dynamic = "force-dynamic";
@@ -23,5 +24,10 @@ export default async function CustomerPaymentsSection({
   const customer = await getCustomer(id);
   if (!customer) notFound();
 
-  return <CustomerPayments customer={customer} />;
+  // One query for the photos and names of everything on this ledger. The
+  // ledger leads with the product now, so this page needs it where it did not
+  // before — see `product-index.ts` for why it is not `getCustomerProducts`.
+  const products = await getAdminProductIndex(customer);
+
+  return <CustomerPayments customer={customer} products={products} />;
 }

@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
-import { getCustomer, getCustomerProducts } from "@/lib/customers";
+import { getCustomer } from "@/lib/customers";
+import { getAdminProductIndex } from "@/components/admin/product-index";
 import {
   CustomerCart,
   CustomerChats,
@@ -27,7 +28,9 @@ export default async function CustomerActivitySection({
   const customer = await getCustomer(id);
   if (!customer) notFound();
 
-  const products = await getCustomerProducts(customer);
+  // Same single query as before, one column wider: cart lines, returns and
+  // saved items all lead with the product's photo now.
+  const products = await getAdminProductIndex(customer);
 
   return (
     <div className="grid gap-3 lg:grid-cols-2">

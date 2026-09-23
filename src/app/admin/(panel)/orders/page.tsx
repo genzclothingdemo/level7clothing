@@ -150,6 +150,13 @@ export default async function AdminOrders({
             select: {
               id: true,
               slug: true,
+              // The order line already stores an `image` captured at checkout,
+              // but a piece re-photographed since should show its current shot
+              // on an admin screen — and orders placed before that field
+              // existed have none at all. One more column on a query that was
+              // already running, so the row can lead with the product rather
+              // than with `L7-MUCL3FCASI`.
+              images: true,
               isCustomisable: true,
               customisationNote: true,
             },
@@ -175,6 +182,10 @@ export default async function AdminOrders({
         return {
           ...it,
           slug: p?.slug ?? null,
+          // Catalogue first, then whatever the order froze at checkout. `it`
+          // is spread above, so this line is also what stops a stale stored
+          // path winning over the current one.
+          image: p?.images[0] ?? it.image ?? null,
           isCustomisable: p?.isCustomisable ?? false,
           customisationNote: p?.customisationNote ?? null,
         };

@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { formatINR } from "@/lib/utils";
 import { LeadActions } from "@/components/admin/lead-actions";
 import { LeadFilters } from "@/components/admin/lead-filters";
+import { IntentNav } from "@/components/admin/wishlist-nav";
 import { LEAD_STATUS_COLOR, LEAD_STATUS_LABEL, isLeadStatus } from "@/lib/leads";
 import { adminLink, customerIdForContact } from "@/lib/customers";
 
@@ -30,7 +31,7 @@ export default async function AdminLeads({
     ];
   }
 
-  const [leads, grouped, total] = await Promise.all([
+  const [leads, grouped, total, saveCount] = await Promise.all([
     prisma.lead
       .findMany({ where, orderBy: { createdAt: "desc" }, take: 300 })
       .catch(() => []),
@@ -38,6 +39,9 @@ export default async function AdminLeads({
       () => [] as { status: string; _count: { _all: number } }[]
     ),
     prisma.lead.count().catch(() => 0),
+    // The other tab's count. One indexed count — cheap enough to keep the
+    // strip honest about what is behind the tab you are not looking at.
+    prisma.wishlistItem.count().catch(() => 0),
   ]);
 
   const counts: Record<string, number> = { all: total };
@@ -51,7 +55,17 @@ export default async function AdminLeads({
         status and jot notes as you follow up.
       </p>
 
-      <div className="mt-6">
+      {/* The same strip renders on /admin/wishlist. Two signals of the same
+          intent — a cart they left, a piece they saved — under one sidebar
+          entry, with a route each so both keep their own filters. */}
+      <div className="mt-4">
+        <IntentNav
+          active="carts"
+          counts={{ carts: total, wishlist: saveCount }}
+        />
+      </div>
+
+      <div className="mt-4">
         <LeadFilters counts={counts} />
       </div>
 

@@ -5,8 +5,6 @@ import { revalidatePath } from "next/cache";
 import { runAutomationTrigger } from "@/lib/automation";
 import { prisma } from "@/lib/prisma";
 import { getAdminSession, hashPassword } from "@/lib/auth";
-import { getSettings } from "@/lib/settings";
-import { sendOrderStatusEmail } from "@/lib/email";
 import { isLeadStatus } from "@/lib/leads";
 import { slugify } from "@/lib/utils";
 import { deriveVariantModel } from "@/lib/variants";
@@ -214,8 +212,23 @@ export async function createProduct(input: ProductInput) {
  *    (Product.propertyModules.images[0], e.g. "Pink"). The editor already keys
  *    `media.galleries` / `media.previews` on those values, so we use their keys
  *    directly rather than assuming any particular option:
- *      preview → slot="preview", variantValue=V, sortOrder=0 (when a preview exists)
- *      gallery → slot="gallery", variantValue=V, sortOrder=0..n
+ *      preview → slot="preview", variantValue=V, sortOrder = its index in that
+ *                value's gallery, or -1 when the preview is not in the gallery
+ *      gallery → slot="gallery", variantValue=V, sortOrder = its index
+ *
+ * **`sortOrder` on a preview row is the position, not a constant.** It used to
+ * be 0 while the gallery rows renumbered around the skipped duplicate, and that
+ * broke the most ordinary interaction in the Media tab: pressing "Set preview"
+ * on a gallery photo. `@@unique([productId, mediaId, variantValue])` means that
+ * photo can only be one row, so it was written as the preview and dropped from
+ * the gallery rows — the remaining photos closed the gap, the storefront showed
+ * the preview first instead of in place, and reopening the editor found the
+ * photo missing from the gallery list with the "preview is not in that gallery"
+ * warning firing about a photo the admin had never moved. Writing the true
+ * index on the preview row makes a value's rows a complete 0..n sequence again,
+ * so both readers — `galleryForSelection` (sorts by sortOrder) and the editor's
+ * rehydration — reproduce exactly what was authored. `-1` sorts first, which is
+ * where a preview that is not a gallery member has always been shown.
  *  - Common gallery → slot="common", variantValue=null, sortOrder=0..n
  *  - Deduped to respect @@unique([productId, mediaId, variantValue]).
  * When no media split is present, product-level images fall back to slot="common".
@@ -289,17 +302,21 @@ async function syncProductImages(productId: string, data: z.infer<typeof product
       ...Object.keys(previews),
     ]);
     for (const val of values) {
+      const gallery = galleries[val] ?? [];
       const preview = previews[val];
+      // The preview row carries its own place in the gallery, so the gallery
+      // rows can keep their authored indices instead of closing up around it.
+      const previewIdx = preview ? gallery.indexOf(preview) : -1;
       if (preview) {
         const id = idByUrl.get(preview);
-        if (id) push(id, val, "preview", 0);
+        if (id) push(id, val, "preview", previewIdx);
       }
-      let gs = 0;
-      for (const url of galleries[val] ?? []) {
+      gallery.forEach((url, i) => {
         const id = idByUrl.get(url);
-        if (!id) continue;
-        if (push(id, val, "gallery", gs)) gs += 1;
-      }
+        // A gallery photo that IS the preview is already written above, at this
+        // same index — `seen` skips it here, and the index is not reused.
+        if (id) push(id, val, "gallery", i);
+      });
     }
     // Common gallery — shown for every variant.
     let cs = 0;
@@ -917,33 +934,18 @@ export async function updateOrderStatus(
     },
   });
 
-  // Notify the customer of the new status.
-  try {
-    const settings = await getSettings();
-    await sendOrderStatusEmail(settings, {
-      orderNumber: order.orderNumber,
-      customerName: order.customerName,
-      email: order.email,
-      status,
-      courier: order.courier,
-      trackingNumber: order.trackingNumber,
-      trackingUrl: order.trackingUrl,
-    });
-  } catch (err) {
-    console.error("[admin] status email failed:", err);
-  }
-
-  // Automation rules bound to `order.status_changed`.
+  // Automation rules bound to `order.status_changed` — the only thing that
+  // emails a status change now.
+  //
+  // A hardcoded `sendOrderStatusEmail` used to run immediately above this, with
+  // a fixed five-line copy table, *and* this trigger fired straight after. That
+  // is why the seeded order rules had to ship switched off: turning them on
+  // sent the customer both. The sender is retired and the rules are on.
   //
   // `previousStatus` is read from the row BEFORE the update above, which is
   // what lets a rule say "only when it becomes shipped" rather than firing on
   // every save. The engine dedupes on `<orderId>:<newStatus>`, so pressing
   // Update twice on the same status sends once.
-  //
-  // NOTE: the seeded "order confirmed" and "order shipped" rules ship DISABLED
-  // because `sendOrderStatusEmail` above already mails the customer on a status
-  // change. Enable them only when that sender is retired, or the customer gets
-  // both.
   await runAutomationTrigger("order.status_changed", {
     id: order.id,
     context: { previousStatus: order.status },
@@ -1083,21 +1085,14 @@ async function confirmOneOrder(
     data: { status: "confirmed", statusHistory: history as unknown as object[] },
   });
 
-  // Notify the customer.
-  try {
-    const settings = await getSettings();
-    await sendOrderStatusEmail(settings, {
-      orderNumber: order.orderNumber,
-      customerName: order.customerName,
-      email: order.email,
-      status: "confirmed",
-      courier: order.courier,
-      trackingNumber: order.trackingNumber,
-      trackingUrl: order.trackingUrl,
-    });
-  } catch (err) {
-    console.error("[admin] confirm email failed:", err);
-  }
+  // Notify the customer — through the rules, not from here.
+  //
+  // `order.status` was read before the update above, so it is the status this
+  // order is leaving, which is what `{{order.previousStatus}}` means.
+  await runAutomationTrigger("order.status_changed", {
+    id,
+    context: { previousStatus: order.status },
+  }).catch((err) => console.error("[admin] confirm automation failed:", err));
 
   // Best-effort: the order IS confirmed and the customer has been told. A
   // courier problem must not undo that, so it is reported, never thrown.
@@ -1184,26 +1179,14 @@ export async function shipOrderNowAction(
     };
   }
 
-  // Notify the customer their order has shipped (with tracking).
-  try {
-    const [settings, order] = await Promise.all([
-      getSettings(),
-      prisma.order.findUnique({ where: { id } }),
-    ]);
-    if (order) {
-      await sendOrderStatusEmail(settings, {
-        orderNumber: order.orderNumber,
-        customerName: order.customerName,
-        email: order.email,
-        status: "shipped",
-        courier: order.courier,
-        trackingNumber: order.trackingNumber,
-        trackingUrl: order.trackingUrl,
-      });
-    }
-  } catch (err) {
-    console.error("[admin] ship email failed:", err);
-  }
+  // Notify the customer their order has shipped (with tracking) — through the
+  // rules. `shipOrderNow` has already written `status: "shipped"` along with
+  // the courier and AWB, so the engine re-reads a row that carries everything
+  // the shipped template quotes.
+  await runAutomationTrigger("order.status_changed", {
+    id,
+    context: { previousStatus: "confirmed" },
+  }).catch((err) => console.error("[admin] ship automation failed:", err));
 
   revalidatePath("/admin/orders");
   revalidatePath("/admin");
@@ -1442,25 +1425,13 @@ export async function syncOrderFromNimbusAction(id: string) {
     };
   }
 
-  try {
-    const [settings, order] = await Promise.all([
-      getSettings(),
-      prisma.order.findUnique({ where: { id } }),
-    ]);
-    if (order) {
-      await sendOrderStatusEmail(settings, {
-        orderNumber: order.orderNumber,
-        customerName: order.customerName,
-        email: order.email,
-        status: "shipped",
-        courier: order.courier,
-        trackingNumber: order.trackingNumber,
-        trackingUrl: order.trackingUrl,
-      });
-    }
-  } catch (err) {
-    console.error("[admin] sync ship email failed:", err);
-  }
+  // Someone booked this in the NimbusPost dashboard and we have just pulled the
+  // AWB back. Tell the customer — through the rules, deduped on
+  // `<orderId>:shipped`, so a sync that runs twice cannot mail them twice.
+  await runAutomationTrigger("order.status_changed", {
+    id,
+    context: { previousStatus: "confirmed" },
+  }).catch((err) => console.error("[admin] sync automation failed:", err));
 
   revalidatePath("/admin/orders");
   revalidatePath("/admin");

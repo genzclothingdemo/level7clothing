@@ -15,11 +15,13 @@ import {
   isReturnStatus,
   returnReasonLabel,
 } from "@/lib/returns";
+import { adminLink, type CustomerRecord } from "@/lib/customers";
 import {
-  adminLink,
-  type CustomerProductIndex,
-  type CustomerRecord,
-} from "@/lib/customers";
+  AdminProductName,
+  AdminProductThumb,
+  type AdminProductRef,
+} from "@/components/admin/product-lead";
+import type { AdminProductIndex } from "@/components/admin/product-index";
 import {
   AdminRef,
   DeadRef,
@@ -36,7 +38,31 @@ import {
  * the returns queue, a chat to the inbox, a saved item to the product editor.
  * Where a product has since been deleted the reference is shown struck through
  * rather than linked — the cart entry is still a fact, the product is not.
+ *
+ * Every block that is *about a product* now leads with its photo. Three of the
+ * four here are: a cart line, a return and a saved item are all "this piece",
+ * and a return in particular used to open with `L7R-4KQ2` at `font-medium`
+ * with the piece it was about on the line below in muted grey. The request
+ * number is what you paste into the returns queue, which is one tap away from
+ * it — it is not what tells you whether this is worth approving.
  */
+
+/** One row's product, resolved against the live catalogue. */
+function refFor(
+  productId: string | null,
+  fallbackName: string,
+  products: AdminProductIndex
+): { ref: AdminProductRef; found: boolean } {
+  const p = productId ? products.byId.get(productId) : undefined;
+  return {
+    ref: {
+      name: p?.name ?? fallbackName,
+      image: p?.image ?? null,
+      href: p ? adminLink.product(p.id) : null,
+    },
+    found: Boolean(p),
+  };
+}
 
 /* ------------------------------------------------------------------ */
 /*  Cart                                                               */
@@ -59,7 +85,7 @@ export function CustomerCart({
   products,
 }: {
   customer: CustomerRecord;
-  products: CustomerProductIndex;
+  products: AdminProductIndex;
 }) {
   const open = customer.leads.filter(
     (l) => l.status === "interested" || l.status === "contacted"
@@ -137,50 +163,53 @@ function LeadRow({
   products,
 }: {
   lead: CustomerRecord["leads"][number];
-  products: CustomerProductIndex;
+  products: AdminProductIndex;
 }) {
-  const product = lead.productId ? products.byId.get(lead.productId) : undefined;
+  const { ref, found } = refFor(lead.productId, lead.productName, products);
   const status = isLeadStatus(lead.status) ? lead.status : null;
 
   return (
-    <li className="text-xs">
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <span className="min-w-0 flex-1">
-          {product ? (
-            <AdminRef href={adminLink.product(product.id)}>
-              {lead.productName}
-            </AdminRef>
-          ) : lead.productId ? (
-            <DeadRef>{lead.productName}</DeadRef>
-          ) : (
-            lead.productName
-          )}
-          <span className="text-muted-foreground">
-            {" "}
-            × {lead.quantity}
-            {lead.price != null ? ` · ${formatINR(lead.price)}` : ""}
+    <li className="flex items-start gap-2 text-xs">
+      <AdminProductThumb item={ref} size="sm" />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span className="min-w-0 flex-1">
+            <span className="font-medium">
+              {found ? (
+                <AdminProductName item={ref} />
+              ) : lead.productId ? (
+                <DeadRef>{lead.productName}</DeadRef>
+              ) : (
+                lead.productName
+              )}
+            </span>
+            <span className="text-muted-foreground">
+              {" "}
+              × {lead.quantity}
+              {lead.price != null ? ` · ${formatINR(lead.price)}` : ""}
+            </span>
           </span>
-        </span>
-        <span
-          className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-            status ? LEAD_STATUS_COLOR[status] : "bg-muted"
-          }`}
-        >
-          {status ? LEAD_STATUS_LABEL[status] : lead.status}
-        </span>
+          <span
+            className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+              status ? LEAD_STATUS_COLOR[status] : "bg-muted"
+            }`}
+          >
+            {status ? LEAD_STATUS_LABEL[status] : lead.status}
+          </span>
+        </div>
+        <p className="mt-0.5 text-[11px] text-muted-foreground">
+          {formatDay(lead.createdAt)}
+        </p>
+        {lead.notes && (
+          <ExpandableText
+            lines={2}
+            className="mt-0.5"
+            contentClassName="text-muted-foreground"
+          >
+            {lead.notes}
+          </ExpandableText>
+        )}
       </div>
-      <p className="mt-0.5 text-[11px] text-muted-foreground">
-        {formatDay(lead.createdAt)}
-      </p>
-      {lead.notes && (
-        <ExpandableText
-          lines={2}
-          className="mt-0.5"
-          contentClassName="text-muted-foreground"
-        >
-          {lead.notes}
-        </ExpandableText>
-      )}
     </li>
   );
 }
@@ -258,7 +287,7 @@ export function CustomerReturns({
   products,
 }: {
   customer: CustomerRecord;
-  products: CustomerProductIndex;
+  products: AdminProductIndex;
 }) {
   const open = customer.stats.openReturns;
 
@@ -282,50 +311,60 @@ export function CustomerReturns({
         <ul className="space-y-2">
           {customer.returns.map((r) => {
             const status = isReturnStatus(r.status) ? r.status : null;
-            const product = r.productId ? products.byId.get(r.productId) : undefined;
+            const { ref, found } = refFor(r.productId, r.productName, products);
             return (
-              <li key={r.id} className="text-xs">
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <AdminRef
-                    href={adminLink.return(r.requestNumber)}
-                    mono
-                    className="font-medium"
-                    title="Open this return"
-                  >
-                    {r.requestNumber}
-                  </AdminRef>
-                  <span
-                    className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                      status ? RETURN_STATUS_COLOR[status] : "bg-muted"
-                    }`}
-                  >
-                    {status ? RETURN_STATUS_LABEL[status] : r.status}
-                  </span>
-                  <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">
-                    {r.refundAmount != null
-                      ? `${formatINR(r.refundAmount)} refunded`
-                      : formatINR(r.unitPrice * r.quantity)}
-                  </span>
-                </div>
-                <p className="mt-0.5 text-muted-foreground">
-                  {product ? (
-                    <AdminRef href={adminLink.product(product.id)}>
-                      {r.productName}
+              <li key={r.id} className="flex items-start gap-2 text-xs">
+                {/* The piece coming back is the question — "is this the ₹399
+                    tee or the ₹2,400 jacket" decides how the request is
+                    handled, and the request number cannot answer it. */}
+                <AdminProductThumb item={ref} size="sm" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span className="min-w-0 flex-1 font-medium">
+                      {found ? (
+                        <AdminProductName item={ref} />
+                      ) : r.productId ? (
+                        <DeadRef>{r.productName}</DeadRef>
+                      ) : (
+                        r.productName
+                      )}
+                    </span>
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        status ? RETURN_STATUS_COLOR[status] : "bg-muted"
+                      }`}
+                    >
+                      {status ? RETURN_STATUS_LABEL[status] : r.status}
+                    </span>
+                    <span className="shrink-0 tabular-nums text-muted-foreground">
+                      {r.refundAmount != null
+                        ? `${formatINR(r.refundAmount)} refunded`
+                        : formatINR(r.unitPrice * r.quantity)}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    {r.variantLabel ? `${r.variantLabel} · ` : ""}× {r.quantity} ·{" "}
+                    {returnReasonLabel(r.reason)}
+                  </p>
+                  <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground">
+                    <AdminRef
+                      href={adminLink.return(r.requestNumber)}
+                      mono
+                      className="text-[11px]"
+                      title="Open this return"
+                    >
+                      {r.requestNumber}
                     </AdminRef>
-                  ) : r.productId ? (
-                    <DeadRef>{r.productName}</DeadRef>
-                  ) : (
-                    r.productName
-                  )}
-                  {r.variantLabel ? ` · ${r.variantLabel}` : ""} × {r.quantity} ·{" "}
-                  {returnReasonLabel(r.reason)}
-                </p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {formatDay(r.createdAt)} · on order{" "}
-                  <AdminRef href={adminLink.order(r.orderNumber)} mono>
-                    {r.orderNumber}
-                  </AdminRef>
-                </p>
+                    <span>{formatDay(r.createdAt)} · on order</span>
+                    <AdminRef
+                      href={adminLink.order(r.orderNumber)}
+                      mono
+                      className="text-[11px]"
+                    >
+                      {r.orderNumber}
+                    </AdminRef>
+                  </p>
+                </div>
               </li>
             );
           })}
@@ -344,7 +383,7 @@ export function CustomerWishlist({
   products,
 }: {
   customer: CustomerRecord;
-  products: CustomerProductIndex;
+  products: AdminProductIndex;
 }) {
   return (
     <Block
@@ -369,32 +408,35 @@ export function CustomerWishlist({
         <ul className="space-y-1.5">
           {customer.wishlist.map((w) => {
             const product = products.bySlug.get(w.slug);
+            // The wishlist stores a slug, not an id, so an unresolved row has
+            // literally nothing but the slug to show — which is exactly the
+            // case the thumb's `ImageOff` placeholder is for.
+            const ref: AdminProductRef = {
+              name: product?.name ?? w.slug,
+              image: product?.image ?? null,
+              href: product ? adminLink.product(product.id) : null,
+            };
             return (
-              <li
-                key={w.id}
-                className="flex flex-wrap items-baseline gap-x-2 text-xs"
-              >
-                <span className="min-w-0 flex-1">
-                  {product ? (
-                    <AdminRef
-                      href={adminLink.product(product.id)}
-                      title="Edit this product"
-                    >
-                      {product.name}
-                    </AdminRef>
-                  ) : (
-                    <DeadRef>{w.slug}</DeadRef>
-                  )}
-                  {product && !product.isActive && (
-                    <span className="ml-1.5 text-[11px] text-muted-foreground">
-                      (hidden)
-                    </span>
-                  )}
-                </span>
-                <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-                  {product ? formatINR(product.price) : "no longer available"} ·{" "}
-                  {formatDay(w.createdAt)}
-                </span>
+              <li key={w.id} className="flex items-start gap-2 text-xs">
+                <AdminProductThumb item={ref} size="sm" />
+                <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2">
+                  <span className="min-w-0 flex-1 font-medium">
+                    {product ? (
+                      <AdminProductName item={ref} />
+                    ) : (
+                      <DeadRef>{w.slug}</DeadRef>
+                    )}
+                    {product && !product.isActive && (
+                      <span className="ml-1.5 font-normal text-[11px] text-muted-foreground">
+                        (hidden)
+                      </span>
+                    )}
+                  </span>
+                  <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                    {product ? formatINR(product.price) : "no longer available"} ·{" "}
+                    {formatDay(w.createdAt)}
+                  </span>
+                </div>
               </li>
             );
           })}

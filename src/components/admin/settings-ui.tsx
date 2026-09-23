@@ -183,7 +183,9 @@ export function isFeeKey(k: DraftKey): k is FeeKey {
 export {
   TABS,
   DEFAULT_TAB,
+  TAB_ALIASES,
   isTabKey,
+  resolveTab,
   tabMeta,
   type TabKey,
   type SettingsTab,
@@ -219,13 +221,17 @@ export const FIELD_META: Record<DraftKey, { label: string; tab: TabKey }> = {
   razorpayEnabled: { label: "Razorpay online payments", tab: "integrations" },
   nimbusEnabled: { label: "NimbusPost shipping", tab: "integrations" },
 
-  heroHeadline: { label: "Hero headline", tab: "storefront" },
-  heroSubtext: { label: "Hero subtext", tab: "storefront" },
-  aboutText: { label: "About text", tab: "storefront" },
-  defaultMaterialsCare: { label: "Materials & Care", tab: "storefront" },
-  defaultShippingInfo: { label: "Shipping & Delivery", tab: "storefront" },
+  // Storefront copy and the admin alert address were their own two tabs until
+  // they were folded into Store. Their `tab` here is what routes their dirty
+  // count to the right badge — a key still pointing at "storefront" would index
+  // a tab that no longer exists and drop the count on the floor.
+  heroHeadline: { label: "Hero headline", tab: "store" },
+  heroSubtext: { label: "Hero subtext", tab: "store" },
+  aboutText: { label: "About text", tab: "store" },
+  defaultMaterialsCare: { label: "Materials & Care", tab: "store" },
+  defaultShippingInfo: { label: "Shipping & Delivery", tab: "store" },
 
-  adminNotifyEmail: { label: "Order & lead emails", tab: "email" },
+  adminNotifyEmail: { label: "Order & lead emails", tab: "store" },
 };
 
 const ALL_KEYS = Object.keys(FIELD_META) as DraftKey[];

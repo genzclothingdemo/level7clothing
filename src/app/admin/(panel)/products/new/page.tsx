@@ -97,7 +97,13 @@ export default async function NewProductPage({
           shippingInfo: settings.defaultShippingInfo,
           returnsInfo: settings.defaultReturnsInfo,
         }}
-        returnDefault={settings.returnsEnabled && settings.defaultReturnable}
+        /* See the edit page: the master switch and the catalogue default are
+           two different facts and are passed as two. */
+        returnDefaults={{
+          returnsEnabled: settings.returnsEnabled,
+          defaultReturnable: settings.defaultReturnable,
+          returnWindowDays: settings.returnWindowDays,
+        }}
       />
     </div>
   );

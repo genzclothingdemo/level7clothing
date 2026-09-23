@@ -5,7 +5,6 @@ import type { Order } from "@prisma/client";
 import { runAutomationTrigger } from "@/lib/automation";
 import { prisma } from "@/lib/prisma";
 import { getPaymentFees, getSettings } from "@/lib/settings";
-import { sendOrderEmails } from "@/lib/email";
 import { getUserSession, setUserCookie } from "@/lib/user-auth";
 
 import { priceForSelection, repairSelection, imagesForSelection } from "@/lib/variants";
@@ -572,45 +571,36 @@ export async function placeOrder(input: PlaceOrderInput) {
 
   // ---- COD (nothing to charge online): email, then let the pipeline decide. ----
   //
+  // Automation rules bound to `order.created`. This is the ONLY thing that
+  // emails a placed order now: `sendOrderEmails` used to sit on this exact
+  // line, composing a fixed receipt for the customer and a fixed notification
+  // for the owner, and both are seeded rules on this trigger ("Thank the
+  // customer for their order" / "Tell me an order came in") — readable,
+  // editable and switchable from one screen.
+  //
+  // **Before `autoConfirmOrder`, where the old sender was.** With auto-confirm
+  // and auto-ship both on, the pipeline can book a courier and raise
+  // `order.status_changed` within the same request, so running this afterwards
+  // would let "your order is on its way" land in the inbox above "we've got
+  // your order".
+  //
+  // No automation may be the reason a completed checkout reports failure.
+  // `runAutomationTrigger` is written never to throw or reject, so this needs
+  // no catch of its own — the catch is belt and braces.
+  await runAutomationTrigger("order.created", { id: order.id }).catch((err) =>
+    console.error("[orders] automation trigger failed:", err)
+  );
+
   // Nothing is confirmed here by hand. `autoConfirmOrder` applies the store's
   // `orderConfirmMode` (see lib/orders-pipeline.ts) and, when it does confirm,
   // stages the NimbusPost draft — or books it, if the admin has switched
   // auto-ship on. On the shipped defaults (`manual`) this leaves the order
   // pending for a human, which is what the Orders screen is for.
-  try {
-    await sendOrderEmails(settings, {
-      orderNumber: order.orderNumber,
-      customerName: order.customerName,
-      email: order.email,
-      phone: order.phone,
-      address: order.address,
-      city: order.city,
-      state: order.state,
-      pincode: order.pincode,
-      items: validItems,
-      subtotal,
-      shipping,
-      paymentFee,
-      total,
-      paymentMethod: order.paymentMethod,
-      note: order.note,
-    });
-  } catch (err) {
-    console.error("[orders] email failed:", err);
-  }
-
+  //
   // Best-effort: a pipeline problem must never fail an order the customer has
   // already placed. Anything that goes wrong is recorded on the order.
   await autoConfirmOrder(order.id).catch((err) =>
     console.error("[orders] auto-confirm failed:", err)
-  );
-
-  // Automation rules bound to `order.created`. Same rule as the line above: no
-  // automation may be the reason a completed checkout reports failure.
-  // `runAutomationTrigger` is written never to throw or reject, so this needs
-  // no catch of its own — the catch is belt and braces.
-  await runAutomationTrigger("order.created", { id: order.id }).catch((err) =>
-    console.error("[orders] automation trigger failed:", err)
   );
 
   return { ok: true as const, orderNumber: order.orderNumber };
@@ -747,6 +737,24 @@ export async function verifyRazorpayPayment(input: VerifyPaymentInput) {
     },
   });
 
+  // Now that the order is paid, raise `order.created`.
+  //
+  // The prepaid and part-paid legs deliberately do NOT raise it in
+  // `placeOrder` — an order whose payment window the shopper closed is not an
+  // order, and emailing a receipt for it is worse than saying nothing. This is
+  // where a paid order becomes real, so this is where the trigger belongs.
+  //
+  // `sendOrderEmails` used to do this, which is why the store had two senders
+  // for one event. The dedupe key for this trigger is the order id, so a
+  // Razorpay retry that verifies the same payment twice still sends once.
+  //
+  // Raised **before** the shipment pipeline, which can book a courier and email
+  // "your order is on its way" in this same request — an inbox that reads
+  // shipped-then-placed is a store that looks broken.
+  await runAutomationTrigger("order.created", { id: order.id }).catch((err) =>
+    console.error("[orders] automation trigger failed:", err)
+  );
+
   // Confirmed → stage the draft (or book it, when auto-ship is on). Not
   // confirmed → nothing is staged, because "order confirmed ⇒ draft staged"
   // is the contract, and a draft for an order nobody has accepted is clutter
@@ -755,34 +763,6 @@ export async function verifyRazorpayPayment(input: VerifyPaymentInput) {
     await runConfirmationPipeline(order.id).catch((err) =>
       console.error("[orders] draft shipment failed:", err)
     );
-  }
-
-  // Now that the order is paid, send the confirmation emails.
-  try {
-    const settings = await getSettings();
-    await sendOrderEmails(settings, {
-      orderNumber: order.orderNumber,
-      customerName: order.customerName,
-      email: order.email,
-      phone: order.phone,
-      address: order.address,
-      city: order.city,
-      state: order.state,
-      pincode: order.pincode,
-      items: order.items as unknown as {
-        name: string;
-        quantity: number;
-        price: number;
-      }[],
-      subtotal: order.subtotal,
-      shipping: order.shipping,
-      paymentFee: order.paymentFee,
-      total: order.total,
-      paymentMethod: order.paymentMethod,
-      note: order.note,
-    });
-  } catch (err) {
-    console.error("[orders] paid-email failed:", err);
   }
 
   return { ok: true as const, orderNumber: order.orderNumber };

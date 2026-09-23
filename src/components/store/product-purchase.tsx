@@ -19,7 +19,10 @@ import { useCart } from "@/context/cart";
 import { useProductView } from "@/context/product-view";
 import { Button } from "@/components/ui/button";
 import { WhatsAppProductButton } from "@/components/store/product-actions";
-import { VisualVariantPicker } from "@/components/store/visual-variant-picker";
+import {
+  OptionPicker,
+  type OptionChoice,
+} from "@/components/store/option-picker";
 import { SizeGuideModal } from "@/components/store/size-guide-modal";
 import {
   CustomisationNotice,
@@ -31,6 +34,7 @@ import {
   isChoiceEnabled,
   repairSelection,
   visualAttributeName,
+  previewImageForValue,
 } from "@/lib/variants";
 import type { ProductDTO, Attribute, SellableVariant } from "@/lib/types";
 import { comboKey } from "@/lib/options";
@@ -103,14 +107,6 @@ function QtyStepper({
         <Plus className="h-4 w-4" />
       </button>
     </div>
-  );
-}
-
-function StrikeThrough() {
-  return (
-    <svg className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden>
-      <line x1="0" y1="100%" x2="100%" y2="0" stroke="currentColor" strokeWidth="1" strokeOpacity="0.3" />
-    </svg>
   );
 }
 
@@ -226,6 +222,30 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
     return v && v.available ? v.price : null;
   }
 
+  /**
+   * Everything one option group's values need to draw themselves, in one shape,
+   * so the two skins (image cards / pills) can't drift apart on what "sold out"
+   * or "+₹80" means. `preview` is resolved for every group, not just the visual
+   * one — `modeFor()` needs the thumbnails to decide whether the cards would
+   * actually say anything different from each other.
+   */
+  function choicesFor(group: Attribute): OptionChoice[] {
+    return group.values.map((value) => {
+      const enabled = isChoiceEnabled(group.name, value, product);
+      const swapped = enabled ? priceIfSwapped(group.name, value) : null;
+      const delta = swapped == null ? 0 : swapped - unitPrice;
+      return {
+        value,
+        enabled,
+        hint:
+          delta === 0
+            ? null
+            : `${delta > 0 ? "+" : "−"}${formatINR(Math.abs(delta))}`,
+        preview: previewImageForValue(product, value),
+      };
+    });
+  }
+
   function listNames(names: string[]) {
     if (names.length <= 1) return names[0] ?? "";
     return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
@@ -265,94 +285,34 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
 
   return (
     <div className="space-y-6">
-      {/* ── Option groups: visual attribute as image cards, the rest as pills ── */}
-      {orderedGroups.map((group, i) => {
-        const step = orderedGroups.length > 1 ? i + 1 : undefined;
+      {/* ── Option groups ──
+          One selector for every attribute. It picks its own skin (image cards
+          for a genuinely visual attribute, pills for plain text values) from
+          the data — see `modeFor()` in option-picker.tsx.
 
-        if (group.name === visualGroup?.name) {
-          return (
-            <VisualVariantPicker
-              key={group.name}
-              product={product}
-              attributeName={group.name}
-              values={group.values}
-              selected={selection[group.name]}
-              onSelect={(val) => toggle(group.name, val)}
-              isEnabled={(val) => isChoiceEnabled(group.name, val, product)}
-              index={step}
-            />
-          );
-        }
-
-        return (
-          <section key={group.name} aria-label={`Choose ${group.name}`}>
-            <div className="mb-2.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-              <p className="flex flex-wrap items-baseline gap-x-1.5 text-sm font-semibold">
-                <span>
-                  {step ? `${step}. ` : ""}Choose {group.name}
-                </span>
-                {selection[group.name] ? (
-                  <span className="font-normal text-muted-foreground">
-                    — {selection[group.name]}
-                  </span>
-                ) : (
-                  <span className="text-xs font-normal text-danger">Select one</span>
-                )}
-              </p>
-
-              {/* The fits are intentionally oversized, so the chart belongs
-                  right where the size is chosen. */}
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              {group.values.map((val) => {
-                const isActive = selection[group.name] === val;
-                const enabled = isChoiceEnabled(group.name, val, product);
-                const swapped = enabled ? priceIfSwapped(group.name, val) : null;
-                const delta = swapped == null ? 0 : swapped - unitPrice;
-
-                return (
-                  <motion.button
-                    key={val}
-                    type="button"
-                    disabled={!enabled}
-                    whileTap={enabled ? { scale: 0.96 } : undefined}
-                    onClick={() => toggle(group.name, val)}
-                    aria-pressed={isActive}
-                    className={cn(
-                      "relative flex flex-col items-center overflow-hidden rounded-xl border px-4 py-2 text-sm font-medium transition-all",
-                      isActive
-                        ? "border-primary bg-primary/5 text-primary"
-                        : "border-border text-muted-foreground hover:border-foreground/30 hover:text-foreground",
-                      !enabled && "pointer-events-none opacity-40"
-                    )}
-                  >
-                    <span className="relative z-10">{val}</span>
-                    {delta !== 0 && (
-                      <span className="relative z-10 text-[11px] font-normal text-muted-foreground">
-                        {delta > 0 ? "+" : "−"}
-                        {formatINR(Math.abs(delta))}
-                      </span>
-                    )}
-                    {!enabled && <StrikeThrough />}
-                  </motion.button>
-                );
-              })}
-            </div>
-          </section>
-        );
-      })}
-
-      {/* Size guide sits after the option groups rather than inside one,
-          because "Size" can be either the visual (image-card) group or a pill
-          group depending on the product — putting it in the pill branch alone
-          meant it never rendered for products where size drives the imagery.
-          The fits are intentionally oversized, so this chart matters. */}
-      {attributes.some((a) => /size/i.test(a.name)) && (
-        <div className="flex justify-end">
-          <SizeGuideModal category={product.category} />
-        </div>
-      )}
+          The size guide rides in the heading of whichever group is the sizes.
+          CLAUDE.md warns that anything hung off the size selector has to live
+          outside the cards/pills branch or it disappears for half the
+          catalogue; it used to be a separate right-aligned row underneath every
+          group for exactly that reason. There is now one shared header, so the
+          link can sit where the size is actually chosen without that risk —
+          and the fits here are intentionally oversized, so the chart matters. */}
+      {orderedGroups.map((group, i) => (
+        <OptionPicker
+          key={group.name}
+          product={product}
+          attributeName={group.name}
+          choices={choicesFor(group)}
+          selected={selection[group.name]}
+          onSelect={(val) => toggle(group.name, val)}
+          index={orderedGroups.length > 1 ? i + 1 : undefined}
+          aside={
+            /size/i.test(group.name) ? (
+              <SizeGuideModal category={product.category} />
+            ) : null
+          }
+        />
+      ))}
 
       {/* ── Quantity + Add to cart / Buy CTA ── */}
       <div ref={ctaRef} className="space-y-3 pt-1">

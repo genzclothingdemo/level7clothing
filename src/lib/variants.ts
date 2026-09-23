@@ -174,13 +174,29 @@ export function visualAttributeName(product: {
  * Priority: the admin's manual pick (ProductImage slot="preview"), then that
  * value's first gallery photo, then the first common photo, then the product's
  * flat image list. Videos are skipped — a picker card needs a still.
+ *
+ * **With no visual attribute (None) the per-value media is skipped entirely.**
+ * Switching the Image Controller to None does not delete the galleries already
+ * filed under the old values — they are kept so the choice can be undone — so a
+ * per-value lookup here would still find them and put a hidden photo on screen.
+ * Today no caller reaches this under None (`product-purchase` renders pills
+ * instead of a picker when `visualAttributeName` is null), which is exactly why
+ * the guard belongs in the function rather than in the one call site that
+ * currently happens to be safe.
  */
 export function previewImageForValue(
-  product: { images: string[]; media?: MediaDTO[] },
+  product: {
+    images: string[];
+    media?: MediaDTO[];
+    attributes?: Attribute[];
+    propertyModules?: PropertyDependencies;
+  },
   value: string
 ): string | null {
-  const own = ownPreviewForValue(product.media ?? [], value);
-  if (own) return own;
+  if (visualAttributeName(product) !== null) {
+    const own = ownPreviewForValue(product.media ?? [], value);
+    if (own) return own;
+  }
   // Unlike a listing card, a picker card must render something for every value.
   return coverStill(product);
 }

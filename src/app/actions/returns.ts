@@ -179,6 +179,29 @@ function revalidateReturns(orderNumber?: string | null) {
   if (orderNumber) revalidatePath(`/order/${orderNumber}`);
 }
 
+/**
+ * Tell the automation engine a return moved. **The only way a return emails
+ * anybody** — there is no hardcoded sender for the reverse leg and there must
+ * not be one.
+ *
+ * Called *after* the row is written and revalidated, for the same reason
+ * `requestReturn` does it that way: a rule that fails must not cost the
+ * customer the decision that was just made. `runAutomationTrigger` is written
+ * never to throw, so the `.catch` is belt and braces.
+ *
+ * The courier-driven statuses (`picked_up`, `received`) are written by
+ * `lib/nimbus-returns.ts` and the NimbusPost webhook, which do not call this.
+ * They are picked up instead by the sweep inside every automation pass — and
+ * because both land on the dedupe key `<returnId>:<status>`, a status that
+ * somehow arrives down both paths still emails once.
+ */
+async function notifyReturnMoved(id: string, previousStatus: string) {
+  await runAutomationTrigger("return.status_changed", {
+    id,
+    context: { previousStatus },
+  }).catch((err) => console.error("[returns] automation trigger failed:", err));
+}
+
 type HistoryEntry = { status: string; note?: string; at: string; by?: string };
 
 function readHistory(value: unknown): HistoryEntry[] {
@@ -668,6 +691,7 @@ export async function decideReturn(input: DecideReturnInput) {
       },
     });
     revalidateReturns(existing.order.orderNumber);
+    await notifyReturnMoved(data.id, existing.status);
     return {
       ok: true as const,
       status: "rejected",
@@ -793,6 +817,9 @@ export async function decideReturn(input: DecideReturnInput) {
   }
 
   revalidateReturns(existing.order.orderNumber);
+  // After the pickup draft, not before: the approval email quotes the pickup
+  // courier when there is one, and there is nothing to quote until this point.
+  await notifyReturnMoved(data.id, existing.status);
 
   return {
     ok: true as const,
@@ -1011,6 +1038,7 @@ export async function markRefundPaid(input: MarkRefundPaidInput) {
   });
 
   revalidateReturns(existing.order.orderNumber);
+  await notifyReturnMoved(data.id, existing.status);
   return { ok: true as const, net, reference };
 }
 
@@ -1143,6 +1171,7 @@ export async function setReturnStatus(id: string, status: string, note?: string)
     },
   });
   revalidateReturns(existing.order.orderNumber);
+  await notifyReturnMoved(id, existing.status);
   return { ok: true as const };
 }
 

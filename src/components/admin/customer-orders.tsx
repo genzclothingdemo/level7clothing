@@ -1,11 +1,13 @@
 import { ShoppingBag } from "lucide-react";
 import { formatINR } from "@/lib/utils";
 import { Badge, Block, StatusPill } from "@/components/admin/order-ui";
+import { adminLink, type CustomerRecord } from "@/lib/customers";
 import {
-  adminLink,
-  type CustomerProductIndex,
-  type CustomerRecord,
-} from "@/lib/customers";
+  AdminProductThumb,
+  AdminProductName,
+  variantText,
+} from "@/components/admin/product-lead";
+import type { AdminProductIndex } from "@/components/admin/product-index";
 import {
   AdminRef,
   DeadRef,
@@ -25,6 +27,18 @@ import {
  * So the line items stay (they are this section's whole reason to exist) and
  * each one links to the product editor, while the order's own machinery does
  * not get a second, read-only copy here.
+ *
+ * ── The card's headline is the goods, not the reference ──────────────────────
+ *
+ * It used to be `L7-MUCL3FCASI` at `text-sm font-medium` — the largest text on
+ * the card — with the line items below a divider at `text-xs` and no photos at
+ * all. For a section whose entire purpose is "what does this person buy", the
+ * most prominent thing on every card was the one string that answers nothing.
+ *
+ * Now each line carries its photo and its name at the top of the card, and the
+ * order number sits with the date and the status on the line underneath. It is
+ * still a link to Admin → Orders filtered to it, which is how you get from here
+ * to actually working the order.
  */
 
 /** Payment status has no shared pill — order status does, and that one is used. */
@@ -46,7 +60,7 @@ export function CustomerOrders({
   products,
 }: {
   customer: CustomerRecord;
-  products: CustomerProductIndex;
+  products: AdminProductIndex;
 }) {
   const orders = customer.orders;
   const contact = customer.email ?? customer.phone ?? "";
@@ -85,15 +99,63 @@ export function CustomerOrders({
               key={o.id}
               className="rounded-lg border border-border bg-background/40 p-2.5"
             >
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <AdminRef
-                  href={adminLink.order(o.orderNumber)}
-                  mono
-                  className="text-sm font-medium"
-                  title="Open this order"
-                >
-                  {o.orderNumber}
-                </AdminRef>
+              {/* ---- the goods, first: photo, name, variant, line total ----
+                  Every line is shown rather than one with "+N more", because
+                  this section exists to be read as a buying history — which
+                  size, which colour, how often — and that is the one question
+                  a collapsed list cannot answer. */}
+              {o.items.length > 0 ? (
+                <ul className="space-y-1.5">
+                  {o.items.map((it, i) => {
+                    const product = it.productId
+                      ? products.byId.get(it.productId)
+                      : undefined;
+                    const variant = variantText(it.options);
+                    const ref = {
+                      name: it.name,
+                      image: product?.image ?? null,
+                      href: product ? adminLink.product(product.id) : null,
+                    };
+                    return (
+                      <li
+                        key={`${o.id}-${i}`}
+                        className="flex items-start gap-2 text-xs"
+                      >
+                        <AdminProductThumb item={ref} size="sm" />
+                        <span className="min-w-0 flex-1">
+                          <span className="line-clamp-2 block font-medium leading-snug">
+                            {/* `DeadRef` is kept for the one case it names:
+                                the line points at a product id that is no
+                                longer in the catalogue. A line with no id at
+                                all (a very old order) is just plain text — it
+                                was never linked and nothing was deleted. */}
+                            {product ? (
+                              <AdminProductName item={ref} />
+                            ) : it.productId ? (
+                              <DeadRef>{it.name}</DeadRef>
+                            ) : (
+                              it.name
+                            )}
+                          </span>
+                          <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                            {variant ? `${variant} · ` : ""}× {it.quantity}
+                          </span>
+                        </span>
+                        <span className="shrink-0 tabular-nums text-muted-foreground">
+                          {formatINR(it.price * it.quantity)}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  No line items recorded on this order.
+                </p>
+              )}
+
+              {/* ---- and only then the paperwork ---- */}
+              <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border pt-1.5">
                 <StatusPill status={o.status} />
                 {o.paymentStatus === "failed" && (
                   <Badge
@@ -111,62 +173,28 @@ export function CustomerOrders({
                 </span>
               </div>
 
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                {formatDayTime(o.createdAt)} · {o.itemCount} item
-                {o.itemCount === 1 ? "" : "s"}
+              <p className="mt-1 flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground">
+                <AdminRef
+                  href={adminLink.order(o.orderNumber)}
+                  mono
+                  className="text-[11px]"
+                  title="Open this order"
+                >
+                  {o.orderNumber}
+                </AdminRef>
+                <span>
+                  {formatDayTime(o.createdAt)} · {o.itemCount} item
+                  {o.itemCount === 1 ? "" : "s"}
+                </span>
                 {o.couponCode && (
-                  <>
-                    {" · "}
+                  <span>
                     <AdminRef href={adminLink.coupon(o.couponCode)} mono>
                       {o.couponCode}
                     </AdminRef>{" "}
                     −{formatINR(o.discountTotal)}
-                  </>
+                  </span>
                 )}
               </p>
-
-              {/* ---- line items, each linked to its product ---- */}
-              {o.items.length > 0 && (
-                <ul className="mt-2 space-y-1 border-t border-border pt-1.5">
-                  {o.items.map((it, i) => {
-                    const product = it.productId
-                      ? products.byId.get(it.productId)
-                      : undefined;
-                    return (
-                      <li
-                        key={`${o.id}-${i}`}
-                        className="flex flex-wrap items-baseline gap-x-2 text-xs"
-                      >
-                        <span className="min-w-0 flex-1">
-                          {product ? (
-                            <AdminRef
-                              href={adminLink.product(product.id)}
-                              title="Edit this product"
-                            >
-                              {it.name}
-                            </AdminRef>
-                          ) : it.productId ? (
-                            <DeadRef>{it.name}</DeadRef>
-                          ) : (
-                            <span>{it.name}</span>
-                          )}
-                          {it.options.length > 0 && (
-                            <span className="text-muted-foreground">
-                              {" · "}
-                              {it.options
-                                .map((op) => `${op.name}: ${op.value}`)
-                                .join(" · ")}
-                            </span>
-                          )}
-                        </span>
-                        <span className="shrink-0 tabular-nums text-muted-foreground">
-                          × {it.quantity} · {formatINR(it.price * it.quantity)}
-                        </span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
             </li>
           ))}
         </ul>

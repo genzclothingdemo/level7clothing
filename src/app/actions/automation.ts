@@ -30,6 +30,7 @@ import {
   TRIGGER_KEYS,
   drainDueJobs,
   isTriggerKey,
+  syncSystemAutomation,
   triggerSpec,
   type DrainReport,
 } from "@/lib/automation";
@@ -464,4 +465,51 @@ export async function retryAutomationJob(
 /** Exported for the rule form's trigger picker; keeps the list in one place. */
 export async function listTriggerKeys(): Promise<readonly string[]> {
   return TRIGGER_KEYS;
+}
+
+/* ------------------------------------------------------------------ */
+/*  What the store ships with                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Put back any shipped template or rule that is missing.
+ *
+ * This is the only way the store's own mail gets into a database, and it is
+ * deliberately a **button, not a startup hook**. Running it on every boot would
+ * mean a rule you deleted comes back on the next deploy, which is a store that
+ * argues with its owner.
+ *
+ * It is additive: it never edits words you have written, never re-points a rule
+ * at a different template and never un-pauses anything. Pressing it twice does
+ * nothing the second time, so it is safe to press when you are not sure.
+ */
+export async function restoreSystemAutomation(): Promise<
+  AutomationActionResult & { summary?: string }
+> {
+  try {
+    await requireAdmin();
+    const report = await syncSystemAutomation();
+    revalidateAutomation();
+
+    const added: string[] = [];
+    if (report.templatesCreated.length) {
+      added.push(
+        `${report.templatesCreated.length} template${report.templatesCreated.length === 1 ? "" : "s"}`
+      );
+    }
+    if (report.rulesCreated.length) {
+      added.push(
+        `${report.rulesCreated.length} rule${report.rulesCreated.length === 1 ? "" : "s"}`
+      );
+    }
+
+    return {
+      success: true,
+      summary: added.length
+        ? `Restored ${added.join(" and ")}. Nothing you had already was changed.`
+        : "Nothing was missing — every template and rule the store ships with is already here.",
+    };
+  } catch (error) {
+    return { success: false, error: explain(error) };
+  }
 }

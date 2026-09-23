@@ -8,7 +8,7 @@ import { ShoppingBag, User, Home, Store, Heart, LayoutGrid } from "lucide-react"
 import { useWishlist } from "@/context/wishlist";
 import { useCart } from "@/context/cart";
 import { useSettings } from "@/context/settings";
-import { ChatLauncherButton } from "@/components/store/chat-widget";
+import { ChatLauncherButton, useChatUnread } from "@/components/store/chat-widget";
 import { useKeyboardOpen } from "@/hooks/use-keyboard-open";
 import { cn } from "@/lib/utils";
 
@@ -37,6 +37,22 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
   const pathname = usePathname();
   const [scrolled, setScrolled] = useState(false);
   const keyboardOpen = useKeyboardOpen();
+
+  /*
+   * The store has replied and the shopper has not read it.
+   *
+   * The chat launcher already carries the count; the account entries carry a
+   * plain dot, because Account is where someone goes when they are wondering
+   * "has anything happened about my order" — and on a phone the bottom bar's
+   * Account tab is often the only navigation on screen. It is the same number
+   * from the same source (`useChatUnread`), so the two can never disagree, and
+   * it clears when the chat panel is opened with the tab focused — the only
+   * thing that marks a message read.
+   *
+   * Deliberately a dot and not a count: the count already exists two icons to
+   * the left, and repeating it would state one fact twice.
+   */
+  const chatUnread = useChatUnread();
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -166,12 +182,25 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
             <Link
               href="/account"
               className="icon-btn hidden md:grid"
-              aria-label={account ? "My account" : "Log in"}
+              aria-label={
+                chatUnread > 0
+                  ? `${account ? "My account" : "Log in"} — the store has replied`
+                  : account ? "My account" : "Log in"
+              }
               title={account ? `Hi, ${account.name.split(" ")[0]}` : "Log in"}
             >
               <User className="h-[18px] w-[18px]" />
-              {account && (
-                <span className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full bg-success ring-2 ring-background" />
+              {/* Violet wins over the green "signed in" dot when there is
+                  something waiting: one dot, and it says the more urgent of
+                  the two things. Being signed in is a standing state; a reply
+                  is news. */}
+              {(account || chatUnread > 0) && (
+                <span
+                  className={cn(
+                    "absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full ring-2 ring-background",
+                    chatUnread > 0 ? "bg-accent" : "bg-success"
+                  )}
+                />
               )}
             </Link>
             <button
@@ -271,12 +300,24 @@ export function Navbar({ account }: { account?: { name: string } | null }) {
                 "relative flex flex-col items-center justify-center gap-0.5 py-2.5 text-[10px] font-medium tracking-wide transition-colors",
                 pathname.startsWith("/account") ? "text-accent" : "text-muted-foreground"
               )}
-              aria-label={account ? "My account" : "Log in"}
+              aria-label={
+                chatUnread > 0
+                  ? `${account ? "My account" : "Log in"} — the store has replied`
+                  : account ? "My account" : "Log in"
+              }
             >
               <span className="relative">
                 <User className="h-5 w-5" strokeWidth={1.6} />
-                {account && (
-                  <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-success ring-1 ring-background" />
+                {/* Same rule as the desktop header: news beats standing state,
+                    so an unread reply repaints the green dot violet rather
+                    than adding a second one to a 20px icon. */}
+                {(account || chatUnread > 0) && (
+                  <span
+                    className={cn(
+                      "absolute -right-1 -top-1 h-2 w-2 rounded-full ring-1 ring-background",
+                      chatUnread > 0 ? "bg-accent" : "bg-success"
+                    )}
+                  />
                 )}
               </span>
               {account ? "Account" : "Login"}

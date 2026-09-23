@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import Image from "next/image";
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronLeft, ChevronRight, Play } from "lucide-react";
+import { ChevronLeft, ChevronRight, Play, Expand } from "lucide-react";
+import { HoverZoom, ImageLightbox } from "@/components/store/image-zoom";
 import { useProductView } from "@/context/product-view";
 import { cn } from "@/lib/utils";
 import type { ProductDTO, MediaDTO } from "@/lib/types";
@@ -30,6 +31,17 @@ export function ProductGallery({
 
   const [activeIndex, setActiveIndex] = useState(0);
   const [direction, setDirection] = useState(0);
+  const [lightbox, setLightbox] = useState(false);
+
+  /**
+   * Where the pointer went down, so a tap can be told from a swipe.
+   *
+   * The main image is a framer-motion drag target: a horizontal swipe to
+   * paginate ends with a click event on the same element, so opening the
+   * lightbox from a bare onClick would fire on every swipe. Anything that moved
+   * more than 8px was a gesture, not a tap.
+   */
+  const downAt = useRef<{ x: number; y: number } | null>(null);
 
   // Snap back to the first photo only when the selected variant actually changes.
   // (Keying the reset on the array reference re-fired on every render as soon as
@@ -63,7 +75,21 @@ export function ProductGallery({
 
   return (
     <div className="sticky top-24 flex flex-col gap-3">
-      <div className="relative aspect-[4/5] w-full overflow-hidden rounded-2xl bg-muted">
+      <div
+        className="relative aspect-[4/5] w-full overflow-hidden rounded-2xl bg-muted"
+        onPointerDown={(e) => {
+          downAt.current = { x: e.clientX, y: e.clientY };
+        }}
+        onPointerUp={(e) => {
+          const from = downAt.current;
+          downAt.current = null;
+          if (!from || isVideo) return;
+          // Arrows, dots and the expand affordance speak for themselves.
+          if ((e.target as HTMLElement).closest("button")) return;
+          if (Math.hypot(e.clientX - from.x, e.clientY - from.y) > 8) return;
+          setLightbox(true);
+        }}
+      >
         {/* Directional crossfade: the incoming photo slides in from the side
             being paginated towards while the old one fades under it. */}
         <AnimatePresence initial={false} custom={direction} mode="popLayout">
@@ -122,7 +148,30 @@ export function ProductGallery({
             )}
           </motion.div>
         </AnimatePresence>
-        
+
+        {/* Cursor magnifier — desktop only; renders nothing on a touch device,
+            so the swipe-to-paginate drag underneath is untouched there. */}
+        {!isVideo && (
+          <HoverZoom
+            src={currentUrl || ""}
+            alt={product.name}
+            onOpen={() => setLightbox(true)}
+          />
+        )}
+
+        {/* The affordance. Without it, "this photo enlarges" is invisible on a
+            phone, where there is no hover state to discover it with. */}
+        {!isVideo && (
+          <button
+            type="button"
+            onClick={() => setLightbox(true)}
+            aria-label="Enlarge image"
+            className="absolute bottom-3 left-3 z-10 grid h-9 w-9 place-items-center rounded-full bg-white/80 text-black shadow-md backdrop-blur transition-colors hover:bg-white"
+          >
+            <Expand className="h-4 w-4" />
+          </button>
+        )}
+
         {activeImages.length > 1 && (
           <>
             <button
@@ -206,6 +255,21 @@ export function ProductGallery({
           })}
           </div>
         </div>
+      )}
+
+      {/* Conditionally rendered, never parked off-screen with a transform —
+          see the Modal pattern note in CLAUDE.md. */}
+      {lightbox && (
+        <ImageLightbox
+          images={activeImages}
+          index={Math.min(activeIndex, activeImages.length - 1)}
+          alt={product.name}
+          onIndex={(next) => {
+            setDirection(next > activeIndex ? 1 : -1);
+            setActiveIndex(next);
+          }}
+          onClose={() => setLightbox(false)}
+        />
       )}
     </div>
   );

@@ -129,9 +129,34 @@ function anyDirty(isDirty: (k: DraftKey) => boolean, keys: DraftKey[]): boolean 
 }
 
 /* ------------------------------------------------------------------ */
-/*  1. Store — brand, contact, social                                  */
+/*  1. Store — brand, copy, contact                                    */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Store, Storefront and Email, merged.
+ *
+ * They were three tabs and are now one, because they were never three errands.
+ * "What is the shop called", "what does the home page say" and "where do my
+ * alerts go" are the same sitting-down, and two of the fields only make sense
+ * next to each other: the public contact email and the private alert address
+ * exist as a pair, and the entire point of the second is that it is not the
+ * first. Reading them on two different tabs is what made that impossible to
+ * check at a glance.
+ *
+ * Every control came across. The shape is the same three levels the rest of
+ * this screen uses, which is what keeps one tab from becoming a wall:
+ *
+ *   **Open** — the announcement bar and the hero. The two things rewritten for
+ *   a sale, and the only two here that change more than once a year.
+ *   **Folded** — five `SetOnce` groups: identity, contact & social, about copy,
+ *   product-page copy, alerts. Each is one closed row with a live summary.
+ *   **Behind an (i)** — every explanation longer than its label.
+ *
+ * Contact and Social were two folds and are now one: both answer "how do people
+ * reach you", both are published in the footer, and neither was more than four
+ * fields. Nothing else was regrouped — a fold that merges two unlike things to
+ * save a row is how a summary stops being able to tell the truth.
+ */
 export function StoreSection({ f, set, isDirty }: SectionProps) {
   const [uploading, setUploading] = useState(false);
 
@@ -160,6 +185,8 @@ export function StoreSection({ f, set, isDirty }: SectionProps) {
   }
 
   const socials = [f.instagram, f.facebook, f.whatsapp].filter((v) => v.trim());
+  const sameAsPublic =
+    f.adminNotifyEmail.trim().toLowerCase() === f.contactEmail.trim().toLowerCase();
 
   return (
     <div className="space-y-4">
@@ -181,6 +208,33 @@ export function StoreSection({ f, set, isDirty }: SectionProps) {
           dirty={isDirty("announcement")}
           onChange={(v) => set("announcement", v)}
           hint={`${f.announcement.length}/200 characters`}
+        />
+      </Card>
+
+      {/* ---- Weekly: the first screen a visitor sees ----
+          Open rather than folded, and second rather than fifth: after the
+          announcement strip it is the most-rewritten copy on the store, and
+          its headline is the home page's H1 — the line search engines read as
+          the subject of the whole site. */}
+      <Card
+        title="Home page hero"
+        tip="The first screen a visitor sees. The headline is also the page's H1, so it is what search engines read as the subject of the site."
+      >
+        <TextField
+          label="Hero headline"
+          maxLength={120}
+          value={f.heroHeadline}
+          dirty={isDirty("heroHeadline")}
+          onChange={(v) => set("heroHeadline", v)}
+        />
+        <AreaField
+          label="Hero subtext"
+          rows={3}
+          maxLength={400}
+          value={f.heroSubtext}
+          dirty={isDirty("heroSubtext")}
+          onChange={(v) => set("heroSubtext", v)}
+          hint={`${f.heroSubtext.length}/400 characters`}
         />
       </Card>
 
@@ -274,16 +328,25 @@ export function StoreSection({ f, set, isDirty }: SectionProps) {
         </div>
       </SetOnce>
 
-      {/* ---- Set once: how customers reach you ---- */}
+      {/* ---- Set once: how customers reach you ----
+          Contact and Social were two folds. They are one because they answer
+          one question — how does a person get hold of you — and both are
+          published in the same footer. */}
       <SetOnce
-        label="Contact details"
-        summary={f.contactEmail}
-        tip="Published on the store — the contact page, the footer and order emails. This is what a customer uses to reach you, so it is not the address the courier collects from, and not where your own alerts are sent (that is the Email tab)."
+        label="Contact & social"
+        summary={
+          socials.length === 0
+            ? `${f.contactEmail} · no social links`
+            : `${f.contactEmail} · ${socials.length} social link${socials.length === 1 ? "" : "s"}`
+        }
+        tip="Published on the store — the contact page, the footer and order emails. This is what a customer uses to reach you, so it is not the address the courier collects from, and not where your own alerts are sent (that is Your alerts, further down this tab). Each social link is rendered only when it is filled in, so an empty box removes the icon rather than leaving a dead link."
         dirty={anyDirty(isDirty, [
           "contactEmail",
           "contactPhone",
           "whatsapp",
           "address",
+          "instagram",
+          "facebook",
         ])}
       >
         <div className="grid gap-4 sm:grid-cols-2">
@@ -324,21 +387,6 @@ export function StoreSection({ f, set, isDirty }: SectionProps) {
             dirty={isDirty("address")}
             onChange={(v) => set("address", v)}
           />
-        </div>
-      </SetOnce>
-
-      {/* ---- Set once: social ---- */}
-      <SetOnce
-        label="Social links"
-        summary={
-          socials.length === 0
-            ? "None — icons hidden"
-            : `${socials.length} link${socials.length === 1 ? "" : "s"}`
-        }
-        tip="Each link is rendered in the footer only when it is filled in, so an empty box removes the icon rather than leaving a dead link."
-        dirty={anyDirty(isDirty, ["instagram", "facebook"])}
-      >
-        <div className="grid gap-4 sm:grid-cols-2">
           <TextField
             label="Instagram URL"
             type="url"
@@ -357,6 +405,111 @@ export function StoreSection({ f, set, isDirty }: SectionProps) {
             dirty={isDirty("facebook")}
             onChange={(v) => set("facebook", v)}
           />
+        </div>
+      </SetOnce>
+
+      {/* ---- Set once: the long copy (was the Storefront tab) ---- */}
+      <SetOnce
+        label="About text"
+        summary={`${f.aboutText.length} characters`}
+        tip="Used on the About page and as the fallback description for link previews and search results when a page has none of its own."
+        dirty={isDirty("aboutText")}
+      >
+        <AreaField
+          label="About text"
+          rows={6}
+          maxLength={2000}
+          value={f.aboutText}
+          dirty={isDirty("aboutText")}
+          onChange={(v) => set("aboutText", v)}
+          hint={`${f.aboutText.length}/2000 characters`}
+        />
+      </SetOnce>
+
+      <SetOnce
+        label="Product page info"
+        summary="Materials & Care · Shipping & Delivery"
+        tip={
+          <>
+            The accordion under every product, written once here and inherited
+            by the whole catalogue — a product only needs its own version when
+            it genuinely differs. One line per bullet, and an empty box hides
+            that section across the store. The accordion has five blocks: two
+            are set here, <b>Product details</b> is each product&apos;s own
+            description, <b>Customer reviews</b> is driven by approved reviews,
+            and <b>Returns &amp; refunds</b> belongs to the Returns tab.
+          </>
+        }
+        dirty={anyDirty(isDirty, ["defaultMaterialsCare", "defaultShippingInfo"])}
+      >
+        <LinesField
+          label="Materials & Care"
+          value={f.defaultMaterialsCare}
+          dirty={isDirty("defaultMaterialsCare")}
+          onChange={(v) => set("defaultMaterialsCare", v)}
+          tip="Fabric, wash and iron instructions. The most common thing a shopper opens before buying a tee."
+        />
+        <LinesField
+          label="Shipping & Delivery"
+          value={f.defaultShippingInfo}
+          dirty={isDirty("defaultShippingInfo")}
+          onChange={(v) => set("defaultShippingInfo", v)}
+          tip="Dispatch time, tracking and COD availability as the customer reads them. This is copy, not a rule — it does not change what checkout actually charges."
+        />
+      </SetOnce>
+
+      {/* ---- Set once: where the store writes to YOU (was the Email tab) ----
+          Deliberately the last fold and deliberately on this tab: it is one
+          address, it is set once, and its whole meaning is "not the contact
+          email six rows above". The summary says which of the two it is, so
+          the commonest mistake — both pointing at one inbox — is visible
+          without opening the fold. */}
+      <SetOnce
+        label="Your alerts"
+        summary={
+          sameAsPublic
+            ? `${f.adminNotifyEmail} — same as public`
+            : f.adminNotifyEmail
+        }
+        tip="Where the store writes to you — a new order, a new enquiry, a new interested customer. This address is never shown to a customer, which is why it is separate from the public contact email above. Customer-facing email (the order confirmation, the status update, the return decision) goes out through Resend and replies come back to your contact email, not to this one."
+        dirty={isDirty("adminNotifyEmail")}
+      >
+        <TextField
+          label="Send order & lead emails to"
+          type="email"
+          inputMode="email"
+          required
+          value={f.adminNotifyEmail}
+          dirty={isDirty("adminNotifyEmail")}
+          onChange={(v) => set("adminNotifyEmail", v)}
+          hint={
+            sameAsPublic
+              ? "Same as your public contact email — your alerts and your customers share one inbox."
+              : undefined
+          }
+        />
+
+        <div className="min-w-0">
+          <div className="label flex items-center gap-1">
+            <span>Other channels</span>
+            <InfoTip term="Other channels">
+              Two more ways the store reaches people. Neither has a setting to
+              configure — each one is a message you compose and send, so each
+              has its own screen.
+            </InfoTip>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <ChannelLink
+              href="/admin/notifications"
+              label="Push notifications"
+              detail="Compose and broadcast"
+            />
+            <ChannelLink
+              href="/admin/newsletter"
+              label="Newsletter"
+              detail="Subscriber list"
+            />
+          </div>
         </div>
       </SetOnce>
     </div>

@@ -53,7 +53,12 @@
  */
 
 /** Which site a resolved permalink came from. Drives the copy the admin sees. */
-export type SocialProvider = "instagram" | "youtube";
+/**
+ * `link` is the catch-all: any other public https page, read for its Open
+ * Graph tags. It is what lets the owner paste **anything** and get a title and
+ * a poster back, rather than only the two networks having a fetch button.
+ */
+export type SocialProvider = "instagram" | "youtube" | "link";
 
 export type ResolvedInstagramPost = {
   provider: SocialProvider;
@@ -387,7 +392,113 @@ export async function resolveYouTubeVideo(
 export function socialProviderOf(rawUrl: string): SocialProvider | null {
   if (instagramShortcode(rawUrl)) return "instagram";
   if (youtubeId(rawUrl)) return "youtube";
-  return null;
+  return isFetchableLink(rawUrl) ? "link" : null;
+}
+
+/**
+ * Whether a pasted address is safe for the **server** to go and fetch.
+ *
+ * This guard is what stops "paste any URL and we'll mirror it" turning into
+ * request forgery. The fetch happens on the server, so without it the admin
+ * box could be aimed at `https://169.254.169.254/` (cloud metadata) or at
+ * something on the private network behind the function, and the response
+ * rendered back into the page.
+ *
+ * It is a hostname check, not a DNS resolution — someone controlling a domain
+ * could still point it inward — but this box already sits behind the admin
+ * gate, so the job is preventing an accident, not defeating an adversary.
+ */
+export function isFetchableLink(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl.trim());
+    if (u.protocol !== "https:") return false;
+    const h = u.hostname.toLowerCase();
+    if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local")) return false;
+    if (h === "metadata.google.internal") return false;
+    if (h === "::1" || h === "[::1]") return false;
+    // Bare IPv4: block loopback, link-local and the private ranges outright.
+    const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (octets) {
+      const a = Number(octets[1]);
+      const b = Number(octets[2]);
+      if (a === 0 || a === 10 || a === 127) return false;
+      if (a === 169 && b === 254) return false;
+      if (a === 172 && b >= 16 && b <= 31) return false;
+      if (a === 192 && b === 168) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Any other public page, read for its Open Graph tags.
+ *
+ * This is what makes the portfolio "paste anything" rather than "paste one of
+ * two networks": a blog post, a press mention, a collaborator's page all come
+ * back with a title and a poster, and the thumbnail field becomes optional
+ * instead of a chore.
+ *
+ * `thumbnailExpires: false` — an ordinary site's `og:image` is a plain static
+ * address, not Instagram's signed four-day CDN link. `importSocialPost` still
+ * copies the bytes when it can, because a third party's image can move, but
+ * storing the address is not the trap here that it is for Instagram.
+ */
+async function resolveGenericLink(
+  rawUrl: string,
+  { timeoutMs = 12_000 }: { timeoutMs?: number } = {}
+): Promise<ResolvedInstagramPost | null> {
+  if (!isFetchableLink(rawUrl)) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(rawUrl, {
+      headers: { "user-agent": UA, accept: "text/html,application/xhtml+xml" },
+      signal: controller.signal,
+      redirect: "follow",
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    if (!(res.headers.get("content-type") ?? "").includes("html")) return null;
+
+    // A page can be megabytes and only the head carries what we want.
+    const html = (await res.text()).slice(0, 300_000);
+
+    const rawTitle =
+      ogTag(html, "og:title") ??
+      (/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "").trim();
+    const title = rawTitle ? decodeEntities(rawTitle) : "";
+    const image = ogTag(html, "og:image");
+    if (!title && !image) return null;
+
+    const canonical = ogTag(html, "og:url") ?? res.url ?? rawUrl;
+    let host: string | null = null;
+    try {
+      host = new URL(canonical).hostname.replace(/^www\./, "");
+    } catch {
+      host = null;
+    }
+
+    return {
+      provider: "link",
+      url: canonical,
+      shortcode: "",
+      title: title ? (title.length > 90 ? `${title.slice(0, 87).trimEnd()}…` : title) : null,
+      // The site it came from — the honest equivalent of an author here.
+      author: host,
+      thumbnailUrl: image,
+      thumbnailExpires: false,
+      // No embed: most sites refuse to be framed (X-Frame-Options), and a
+      // blank iframe is worse than an honest link-out.
+      embedUrl: "",
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -406,6 +517,8 @@ export async function resolveSocialPost(
       return resolveInstagramPost(rawUrl, options);
     case "youtube":
       return resolveYouTubeVideo(rawUrl, options);
+    case "link":
+      return resolveGenericLink(rawUrl, options);
     default:
       return null;
   }

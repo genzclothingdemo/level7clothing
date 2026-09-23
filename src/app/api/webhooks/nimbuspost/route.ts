@@ -47,7 +47,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
-import { sendOrderStatusEmail } from "@/lib/email";
+import { runAutomationTrigger } from "@/lib/automation";
 import { revalidatePath } from "next/cache";
 import { mapNimbusStatus, NOTIFY_STATUSES } from "@/lib/nimbus-status";
 import { applyReverseScan } from "@/lib/nimbus-returns";
@@ -247,22 +247,23 @@ export async function POST(req: NextRequest) {
     })
     .catch((err) => console.error("[nimbus-webhook] DB update failed:", err));
 
-  // ---- 6. Email the customer for key milestones ---------------------------
-  if (newStatus && EMAIL_STATUSES.has(newStatus) && newStatus !== order.status) {
-    try {
-      const settings = await getSettings();
-      await sendOrderStatusEmail(settings, {
-        orderNumber: order.orderNumber,
-        customerName: order.customerName,
-        email: order.email,
-        status: newStatus,
-        courier: order.courier,
-        trackingNumber: order.trackingNumber,
-        trackingUrl: order.trackingUrl,
-      });
-    } catch (err) {
-      console.error("[nimbus-webhook] Email failed:", err);
-    }
+  // ---- 6. Tell the automation engine the order moved -----------------------
+  //
+  // The engine decides whether anybody is emailed, which rule does it and in
+  // what words — this file no longer composes a message. It used to call
+  // `sendOrderStatusEmail` directly, so a courier scan could email a customer
+  // with wording that existed nowhere in Admin → Automation and could not be
+  // switched off.
+  //
+  // `previousStatus` is `order.status`, read before the update above, so a rule
+  // scoped to "becomes delivered" fires once rather than on every scan. The
+  // dedupe key is `<orderId>:<status>`, which is also what makes this safe
+  // alongside `lib/fulfilment.ts` reporting the same move.
+  if (newStatus && newStatus !== order.status) {
+    await runAutomationTrigger("order.status_changed", {
+      id: order.id,
+      context: { previousStatus: order.status },
+    }).catch((err) => console.error("[nimbus-webhook] automation trigger failed:", err));
   }
 
   // Revalidate the admin orders page so the new status shows immediately.

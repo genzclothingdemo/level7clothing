@@ -1,7 +1,34 @@
 import "server-only";
 import { Resend } from "resend";
 import type { SettingsDTO } from "./types";
-import { formatINR } from "./utils";
+
+/**
+ * **The only place this store talks to Resend.**
+ *
+ * Two things live here and nothing else should:
+ *
+ * 1. `send()` — the single transport. Every outbound message in the app comes
+ *    through it, so there is one `from`, one failure log and one place to look
+ *    when mail stops arriving.
+ * 2. The handful of message *bodies* that are not rule-driven. Everything that
+ *    reacts to a store event — orders, leads, returns — is now composed from an
+ *    editable template by `lib/automation.ts` and arrives here through
+ *    {@link sendAutomationEmail}. See the note above that function.
+ *
+ * ## Who still sends directly, and why
+ *
+ * Exactly two, both deliberate:
+ *
+ * - **{@link sendPasswordResetEmail}** carries a one-time token. It is a reply
+ *   to something the customer did two seconds ago, not a notification about the
+ *   store — and a rule that could switch it off is a rule that locks people out
+ *   of their own accounts with no error anywhere.
+ * - **{@link sendContactEmail}** is the contact form's own delivery. Switching
+ *   it off would silently bin enquiries the customer believes were sent.
+ *
+ * Both are listed read-only on Admin → Automation so the screen is still the
+ * whole picture — see "Every mail this store sends" there.
+ */
 
 const apiKey = process.env.RESEND_API_KEY;
 // Resend rejects a sender on a domain you have not verified, so the fallback
@@ -10,15 +37,137 @@ const FROM = process.env.EMAIL_FROM || "Level7 Clothing <onboarding@resend.dev>"
 
 const resend = apiKey ? new Resend(apiKey) : null;
 
+/* ------------------------------------------------------------------ */
+/*  Health                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The outcome of the last send this **server process** attempted.
+ *
+ * In-memory on purpose, and labelled as such on screen. A serverless instance
+ * is short-lived, so this is a strong signal in dev and a weak one in
+ * production — the durable record of every rule-driven send is `AutomationJob`,
+ * which Admin → Automation reads beside this. Between them, a Resend rejection
+ * now has somewhere to appear; it used to be a `console.error` nobody saw,
+ * which is why the store was silently undeliverable for weeks.
+ */
+export type LastSend = {
+  at: string;
+  to: string;
+  subject: string;
+  outcome: "sent" | "rejected" | "threw" | "no-api-key";
+  /** Resend's own words, already stringified. Never contains the API key. */
+  error?: string;
+};
+
+let lastSend: LastSend | null = null;
+
+function record(entry: LastSend) {
+  lastSend = entry;
+}
+
+/** What `EMAIL_FROM` is, and whether Resend can plausibly accept it. */
+export type FromVerdict =
+  /** Nothing configured — the built-in fallback is in use. */
+  | "fallback"
+  /** Resend's shared testing domain: delivers ONLY to the Resend account owner. */
+  | "resend-test"
+  /** A public mailbox domain. Nobody can verify it, so every send is a 403. */
+  | "unverifiable"
+  /** A domain of your own. Deliverable *if* it is verified in Resend. */
+  | "custom";
+
+export type EmailHealth = {
+  hasApiKey: boolean;
+  /** The full `EMAIL_FROM`, e.g. `Level7 Clothing <hello@example.com>`. */
+  from: string;
+  /** Just the address part. */
+  fromAddress: string;
+  fromDomain: string;
+  verdict: FromVerdict;
+  /** One sentence the owner can act on. */
+  advice: string;
+  lastSend: LastSend | null;
+};
+
+/** Domains no Resend account can ever verify, so a sender on one always 403s. */
+const PUBLIC_MAILBOX_DOMAINS = new Set([
+  "gmail.com",
+  "googlemail.com",
+  "yahoo.com",
+  "yahoo.in",
+  "outlook.com",
+  "hotmail.com",
+  "live.com",
+  "icloud.com",
+  "me.com",
+  "aol.com",
+  "proton.me",
+  "protonmail.com",
+  "rediffmail.com",
+  "zoho.com",
+]);
+
+function addressIn(from: string): string {
+  const angled = from.match(/<([^>]+)>/);
+  return (angled ? angled[1] : from).trim();
+}
+
+/**
+ * Whether mail can leave this store, in the three facts that decide it.
+ *
+ * **The API key is never part of the answer** — only whether one is set. A
+ * screen that prints a send key is a screen that leaks it into a screenshot.
+ */
+export function emailHealth(): EmailHealth {
+  const configured = Boolean(process.env.EMAIL_FROM?.trim());
+  const fromAddress = addressIn(FROM);
+  const fromDomain = fromAddress.split("@")[1]?.toLowerCase() ?? "";
+
+  const verdict: FromVerdict = !configured
+    ? "fallback"
+    : fromDomain === "resend.dev"
+      ? "resend-test"
+      : PUBLIC_MAILBOX_DOMAINS.has(fromDomain)
+        ? "unverifiable"
+        : "custom";
+
+  const advice = !process.env.RESEND_API_KEY
+    ? "No RESEND_API_KEY is set, so nothing is sent at all — every message is skipped with a line in the log."
+    : verdict === "unverifiable"
+      ? `Resend can only send from a domain you have verified, and nobody can verify ${fromDomain}. Every send is being rejected with a 403. Use a domain you own.`
+      : verdict === "resend-test" || verdict === "fallback"
+        ? "This is Resend's shared testing domain. It needs no setup, but on a free account it only delivers to the address that owns the Resend account — fine for proving the pipeline, not for customers."
+        : `Mail is sent from ${fromDomain}. That domain has to be verified in Resend, or every send is rejected with a 403.`;
+
+  return {
+    hasApiKey: Boolean(apiKey),
+    from: FROM,
+    fromAddress,
+    fromDomain,
+    verdict,
+    advice,
+    lastSend,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  The one transport                                                  */
+/* ------------------------------------------------------------------ */
+
 async function send(opts: {
   to: string | string[];
   subject: string;
   html: string;
 }) {
+  const to = Array.isArray(opts.to) ? opts.to.join(", ") : opts.to;
+  const at = new Date().toISOString();
+
   if (!resend) {
     console.warn(
-      `[email] RESEND_API_KEY not set — skipping email "${opts.subject}" to ${opts.to}`
+      `[email] RESEND_API_KEY not set — skipping email "${opts.subject}" to ${to}`
     );
+    record({ at, to, subject: opts.subject, outcome: "no-api-key" });
     return { skipped: true };
   }
   try {
@@ -28,17 +177,33 @@ async function send(opts: {
       // verified in Resend (a gmail.com / outlook.com address can never be),
       // which rejects every send while the app carries on as if it worked.
       console.error(
-        `[email] REJECTED "${opts.subject}" to ${opts.to} — from="${FROM}".`,
+        `[email] REJECTED "${opts.subject}" to ${to} — from="${FROM}".`,
         `Is that domain verified in Resend? →`,
         res.error
       );
+      record({
+        at,
+        to,
+        subject: opts.subject,
+        outcome: "rejected",
+        error: JSON.stringify(res.error).slice(0, 500),
+      });
+    } else {
+      record({ at, to, subject: opts.subject, outcome: "sent" });
     }
     return res;
   } catch (err) {
     console.error(
-      `[email] THREW sending "${opts.subject}" to ${opts.to} — from="${FROM}":`,
+      `[email] THREW sending "${opts.subject}" to ${to} — from="${FROM}":`,
       err
     );
+    record({
+      at,
+      to,
+      subject: opts.subject,
+      outcome: "threw",
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+    });
     return { error: err };
   }
 }
@@ -57,125 +222,24 @@ function shell(brand: string, title: string, body: string) {
   </div></body></html>`;
 }
 
-/** Fired when someone adds a product to their cart (a warm lead). */
-export async function sendLeadEmail(
-  settings: SettingsDTO,
-  lead: {
-    productName: string;
-    quantity: number;
-    price?: number | null;
-    name?: string | null;
-    phone?: string | null;
-  }
-) {
-  const body = `
-    <p style="font-size:15px;margin:0 0 12px">${lead.name ? `<b>${lead.name}</b> just added a product to their cart — a warm lead 👀` : "A visitor just added a product to their cart — a potential lead 👀"}</p>
-    <table style="width:100%;border-collapse:collapse;font-size:14px">
-      ${lead.name ? `<tr><td style="padding:8px 0;color:#777">Name</td><td style="padding:8px 0;text-align:right;font-weight:600">${lead.name}</td></tr>` : ""}
-      ${lead.phone ? `<tr><td style="padding:8px 0;color:#777">Mobile</td><td style="padding:8px 0;text-align:right;font-weight:600">${lead.phone}</td></tr>` : ""}
-      <tr><td style="padding:8px 0;color:#777">Product</td><td style="padding:8px 0;text-align:right;font-weight:600">${lead.productName}</td></tr>
-      <tr><td style="padding:8px 0;color:#777">Quantity</td><td style="padding:8px 0;text-align:right">${lead.quantity}</td></tr>
-      ${lead.price != null ? `<tr><td style="padding:8px 0;color:#777">Price</td><td style="padding:8px 0;text-align:right">${formatINR(lead.price)}</td></tr>` : ""}
-    </table>
-    <p style="font-size:13px;color:#999;margin-top:16px">See all interested customers in your admin panel → Interested customers.</p>`;
-  return send({
-    to: settings.adminNotifyEmail,
-    subject: `🛒 New lead${lead.name ? ` from ${lead.name}` : ""}: ${lead.productName} added to cart`,
-    html: shell(settings.brandName, "New cart lead", body),
-  });
-}
-
-type OrderLike = {
-  orderNumber: string;
-  customerName: string;
-  email: string;
-  phone: string;
-  address: string;
-  city: string;
-  state: string;
-  pincode: string;
-  items: {
-    name: string;
-    quantity: number;
-    price: number;
-    options?: { name: string; value: string }[];
-  }[];
-  subtotal: number;
-  shipping: number;
-  /**
-   * Cash-handling charge, frozen on `Order.paymentFee`. Optional so existing
-   * callers compile, and omitted from the mail when it is 0 — but when a fee
-   * IS charged it must appear, or subtotal + shipping will not add up to the
-   * total in the customer's own receipt.
-   */
-  paymentFee?: number;
-  total: number;
-  paymentMethod: string;
-  note?: string | null;
-};
-
-function itemsTable(items: OrderLike["items"]) {
-  const rows = items
-    .map((i) => {
-      const opts =
-        i.options && i.options.length > 0
-          ? `<br><span style="color:#999;font-size:12px">${i.options.map((o) => `${o.name}: ${o.value}`).join(" · ")}</span>`
-          : "";
-      return `<tr><td style="padding:8px 0;border-bottom:1px solid #f0f0f0">${i.name} × ${i.quantity}${opts}</td><td style="padding:8px 0;border-bottom:1px solid #f0f0f0;text-align:right;vertical-align:top">${formatINR(i.price * i.quantity)}</td></tr>`;
-    })
-    .join("");
-  return `<table style="width:100%;border-collapse:collapse;font-size:14px;margin:12px 0">${rows}</table>`;
-}
-
-function totals(o: OrderLike) {
-  return `<table style="width:100%;border-collapse:collapse;font-size:14px">
-    <tr><td style="padding:4px 0;color:#777">Subtotal</td><td style="padding:4px 0;text-align:right">${formatINR(o.subtotal)}</td></tr>
-    <tr><td style="padding:4px 0;color:#777">Shipping</td><td style="padding:4px 0;text-align:right">${o.shipping ? formatINR(o.shipping) : "Free"}</td></tr>
-    ${o.paymentFee ? `<tr><td style="padding:4px 0;color:#777">Cash handling</td><td style="padding:4px 0;text-align:right">${formatINR(o.paymentFee)}</td></tr>` : ""}
-    <tr><td style="padding:8px 0;font-weight:700;font-size:16px">Total</td><td style="padding:8px 0;text-align:right;font-weight:700;font-size:16px">${formatINR(o.total)}</td></tr>
-  </table>`;
-}
-
-/** Fired on a successful order — notifies admin and the customer. */
-export async function sendOrderEmails(settings: SettingsDTO, order: OrderLike) {
-  const address = `${order.address}, ${order.city}, ${order.state} - ${order.pincode}`;
-
-  const adminBody = `
-    <p style="font-size:15px;margin:0 0 4px">🎉 New order <b>${order.orderNumber}</b></p>
-    ${itemsTable(order.items)}
-    ${totals(order)}
-    <div style="margin-top:16px;padding-top:16px;border-top:1px solid #eee;font-size:14px">
-      <p style="margin:2px 0"><b>${order.customerName}</b></p>
-      <p style="margin:2px 0;color:#555">${order.email} · ${order.phone}</p>
-      <p style="margin:2px 0;color:#555">${address}</p>
-      <p style="margin:8px 0 0;color:#555">Payment: <b>${order.paymentMethod}</b></p>
-      ${order.note ? `<p style="margin:6px 0 0;color:#555">Note: ${order.note}</p>` : ""}
-    </div>`;
-
-  const customerBody = `
-    <p style="font-size:15px;margin:0 0 4px">Hi ${order.customerName.split(" ")[0]}, thank you for your order! 🧡</p>
-    <p style="font-size:14px;color:#555;margin:0 0 12px">Your order <b>${order.orderNumber}</b> is confirmed. We'll be in touch about dispatch.</p>
-    ${itemsTable(order.items)}
-    ${totals(order)}
-    <div style="margin-top:16px;padding-top:16px;border-top:1px solid #eee;font-size:14px;color:#555">
-      <p style="margin:2px 0">Delivering to: ${address}</p>
-      <p style="margin:2px 0">Payment method: ${order.paymentMethod}</p>
-    </div>
-    <p style="font-size:13px;color:#999;margin-top:16px">Questions? Reply to this email or contact us at ${settings.contactEmail}.</p>`;
-
-  await Promise.all([
-    send({
-      to: settings.adminNotifyEmail,
-      subject: `✅ New order ${order.orderNumber} — ${formatINR(order.total)}`,
-      html: shell(settings.brandName, "New order received", adminBody),
-    }),
-    send({
-      to: order.email,
-      subject: `Your ${settings.brandName} order ${order.orderNumber} is confirmed`,
-      html: shell(settings.brandName, "Order confirmation", customerBody),
-    }),
-  ]);
-}
+/*
+ * `sendLeadEmail` and `sendOrderEmails` used to live here.
+ *
+ * They are **retired**, not moved: both were hardcoded bodies that fired
+ * alongside an automation rule for the same event, which is the duplication
+ * this refactor removes. What replaced them:
+ *
+ * | was                            | now                                             |
+ * |--------------------------------|-------------------------------------------------|
+ * | `sendLeadEmail`                | rule "Tell me when something goes in a cart"     |
+ * | `sendOrderEmails` (admin half) | rule "Tell me an order came in"                  |
+ * | `sendOrderEmails` (cust. half) | rule "Thank the customer for their order"        |
+ *
+ * All three are seeded system rules on `cart.abandoned` / `order.created` —
+ * see `SYSTEM_RULES` in `lib/automation.ts`. Do not add a hardcoded sender
+ * back: a rule the owner switched off must genuinely stop the mail, and a
+ * second sender for the same event is exactly what made that untrue.
+ */
 
 /** Fired when a customer requests a password reset. */
 export async function sendPasswordResetEmail(
@@ -195,55 +259,17 @@ export async function sendPasswordResetEmail(
   });
 }
 
-const STATUS_COPY: Record<string, string> = {
-  pending: "We've received your order and it's being prepared.",
-  confirmed: "Your order is confirmed and being packed with care.",
-  shipped: "Good news — your order is on its way!",
-  delivered: "Your order has been delivered. We hope you love it! 🧡",
-  cancelled: "Your order has been cancelled. Contact us if this is unexpected.",
-};
-
-/** Fired when the admin updates an order's status. Keeps the customer in the loop. */
-export async function sendOrderStatusEmail(
-  settings: SettingsDTO,
-  order: {
-    orderNumber: string;
-    customerName: string;
-    email: string;
-    status: string;
-    courier?: string | null;
-    trackingNumber?: string | null;
-    trackingUrl?: string | null;
-  }
-) {
-  const copy = STATUS_COPY[order.status] ?? "Your order status has been updated.";
-  const tracking =
-    order.status === "shipped" && (order.trackingNumber || order.courier)
-      ? `<div style="margin-top:16px;padding:14px;background:#f7f5f1;border-radius:10px;font-size:14px">
-           ${order.courier ? `<p style="margin:2px 0"><b>Courier:</b> ${order.courier}</p>` : ""}
-           ${order.trackingNumber ? `<p style="margin:2px 0"><b>Tracking no:</b> ${order.trackingNumber}</p>` : ""}
-           ${order.trackingUrl ? `<p style="margin:8px 0 0"><a href="${order.trackingUrl}" style="color:#141210">Track your shipment →</a></p>` : ""}
-         </div>`
-      : "";
-  const body = `
-    <p style="font-size:15px;margin:0 0 4px">Hi ${order.customerName.split(" ")[0]},</p>
-    <p style="font-size:14px;color:#555;margin:0 0 8px">${copy}</p>
-    <p style="font-size:14px;margin:12px 0 0">Order <b>${order.orderNumber}</b> — status: <b style="text-transform:capitalize">${order.status}</b></p>
-    ${tracking}
-    <p style="font-size:13px;color:#999;margin-top:20px">Track your order any time from your account on our website.</p>`;
-  return send({
-    to: order.email,
-    subject: `Update on your ${settings.brandName} order ${order.orderNumber}`,
-    html: shell(settings.brandName, "Order update", body),
-  });
-}
 
 /* ------------------------------------------------------------------ */
 /*  Automation                                                         */
 /* ------------------------------------------------------------------ */
 
 /**
- * The one send used by the automation engine (`lib/automation.ts`).
+ * The send used by the automation engine (`lib/automation.ts`), and therefore
+ * **the route almost every message this store sends now takes** — order
+ * receipts, status updates, cart nudges, the return leg and the owner's own
+ * notifications. Only the password reset and the contact form still compose
+ * their own body; see the note at the top of this file for why.
  *
  * It is a thin wrapper over the same private `send()` and `shell()` as every
  * other email in this file — deliberately, because a second mail path is how a

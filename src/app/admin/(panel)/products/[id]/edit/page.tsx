@@ -96,7 +96,15 @@ export default async function EditProductPage({
           shippingInfo: settings.defaultShippingInfo,
           returnsInfo: settings.defaultReturnsInfo,
         }}
-        returnDefault={settings.returnsEnabled && settings.defaultReturnable}
+        /* All three, not `returnsEnabled && defaultReturnable` — the editor
+           resolves them itself with the storefront's own rule, and merging the
+           master switch into the default left it unable to say which one was
+           answering (see ReturnsOutcome in product-form.tsx). */
+        returnDefaults={{
+          returnsEnabled: settings.returnsEnabled,
+          defaultReturnable: settings.defaultReturnable,
+          returnWindowDays: settings.returnWindowDays,
+        }}
       />
     </div>
   );

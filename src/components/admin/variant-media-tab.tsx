@@ -263,14 +263,32 @@ export function VariantMediaTab({
     return p && !(state.galleries[v] ?? []).includes(p);
   });
 
-  // Galleries filed under a value that no option offers any more — either the
-  // admin switched the controller or answered None. They are dropped on save,
-  // so say so before the save rather than after it.
-  const orphanedValues = flat
-    ? Object.entries(state.galleries)
-        .filter(([, imgs]) => imgs.length > 0)
-        .map(([val]) => val)
-    : [];
+  /**
+   * Galleries filed under a value the Image Controller does not drive — because
+   * the admin switched which option controls images, or answered **None**.
+   *
+   * They are **kept in the database**, not deleted: nothing reads a gallery
+   * whose `variantValue` no option is filtering on, so they are stored and
+   * invisible until that option is chosen again. This used to be computed only
+   * under None and announced as "saving drops them", which was both alarming
+   * and, in the controller-switch case, silent — switching Colour → Size wiped
+   * every Colour gallery with no warning at all. Now it is neither: the same
+   * notice fires in both branches and states what actually happens.
+   */
+  const keptValues = Object.entries(state.galleries)
+    .filter(([val, imgs]) => imgs.length > 0 && !visualValues.includes(val))
+    .map(([val]) => val);
+
+  const keptNotice = keptValues.length > 0 && (
+    <Notice tone="info">
+      Photos are also filed under <b>{keptValues.join(", ")}</b>.{" "}
+      {flat
+        ? "With None, only the Common gallery below is shown — on the product page, on listing cards and on the picker."
+        : `Only ${visualName} drives the galleries now, so these are not shown anywhere.`}{" "}
+      They stay saved: pick that option as the Image Controller again and they
+      come straight back.
+    </Notice>
+  );
 
   const controller = optionMatrix.length > 0 && onVisualOptionChange && (
     <Block>
@@ -307,13 +325,7 @@ export function VariantMediaTab({
           </option>
         ))}
       </select>
-      {orphanedValues.length > 0 && (
-        <Notice tone="warn">
-          Photos are still filed under <b>{orphanedValues.join(", ")}</b>. With
-          no controller they have nowhere to go, and saving drops them — move
-          anything you want to keep into the gallery below first.
-        </Notice>
-      )}
+      {keptNotice}
     </Block>
   );
 
@@ -365,37 +377,45 @@ export function VariantMediaTab({
     <div className="space-y-4">
       {controller}
 
-      {/* ── Readiness summary ── */}
-      {needsPhotos.length === 0 && previewNotInGallery.length === 0 ? (
-        <Notice tone="ok">
-          Every active {visualName} has its own photos. The storefront picker will
-          show a distinct image for each.
-        </Notice>
-      ) : (
-        <div className="space-y-2">
-          {needsPhotos.length > 0 && (
-            <Notice tone="warn">
-              No photos yet for <b>{needsPhotos.join(", ")}</b>. Without their own
-              gallery these fall back to a common photo, so two values look
-              identical on the storefront picker.
-            </Notice>
-          )}
-          {previewNotInGallery.length > 0 && (
-            <Notice tone="warn">
-              The preview for <b>{previewNotInGallery.join(", ")}</b> is not in
-              that gallery — the customer sees a photo on the picker card that
-              they can&apos;t then find in the gallery.{" "}
-              <button
-                type="button"
-                onClick={() => previewNotInGallery.forEach(addPreviewToGallery)}
-                className="cursor-pointer font-medium underline underline-offset-2"
-              >
-                Add each preview to its gallery
-              </button>
-            </Notice>
-          )}
-        </div>
-      )}
+      {/* ── Readiness summary ──
+          The preview note below is no longer part of this verdict: it reports a
+          placement, not a gap, so it must not hold back the green tick. */}
+      <div className="space-y-2">
+        {needsPhotos.length === 0 ? (
+          <Notice tone="ok">
+            Every active {visualName} has its own photos. The storefront picker
+            will show a distinct image for each.
+          </Notice>
+        ) : (
+          <Notice tone="warn">
+            No photos yet for <b>{needsPhotos.join(", ")}</b>. Without their own
+            gallery these fall back to a common photo, so two values look
+            identical on the storefront picker.
+          </Notice>
+        )}
+        {/* NOT a warning that the photo is invisible — it isn't. The
+              storefront gallery is every ProductImage row for the chosen value
+              in sortOrder, and a preview outside its gallery is written at -1,
+              so the customer sees it FIRST. The old copy said the opposite
+              ("a photo they can't then find in the gallery"), which was
+              measured false, and its one action was a no-op on the storefront.
+              What is actually true is that this list can't order it. */}
+        {previewNotInGallery.length > 0 && (
+          <Notice tone="info">
+            The preview for <b>{previewNotInGallery.join(", ")}</b> sits outside
+            that gallery, so it leads the photos on the product page but
+            can&apos;t be dragged into position here.{" "}
+            <button
+              type="button"
+              onClick={() => previewNotInGallery.forEach(addPreviewToGallery)}
+              className="cursor-pointer font-medium underline underline-offset-2"
+            >
+              Add each preview to its gallery
+            </button>{" "}
+            to place it yourself.
+          </Notice>
+        )}
+      </div>
 
       {/* ── Section 1: Variant Previews (manually chosen per value) ── */}
       <Block>

@@ -1,5 +1,5 @@
 /**
- * Drains the automation queue.
+ * Runs one automation pass: sweep, then drain.
  * GET /api/cron/automation
  *
  * This route is the reason `AutomationJob` exists. A rule with a delay — "nudge
@@ -7,6 +7,19 @@
  * serverless function is killed seconds after it flushes its response. The
  * delay has to be durable state that somebody comes back for, and this is that
  * somebody.
+ *
+ * The sweep half is inside `drainDueJobs`, not here, so every caller gets it.
+ * It catches reverse-leg statuses written by the courier paths — a pickup that
+ * was collected or delivered back — which have no code of their own that could
+ * raise a trigger. See `sweepReturnStatuses` in `lib/automation.ts`.
+ *
+ * **On the schedule.** `vercel.json` carries two cron entries because that is
+ * the Hobby plan's budget, and this route is not one of them: the daily
+ * `/api/cron/nimbus-sync` calls `drainDueJobs()` directly so the pass still
+ * happens. This route stays because it is the right target for an hourly
+ * schedule the moment the plan allows one, and because it is what the admin's
+ * "Run now" button mirrors. Admin → Automation states the schedule as it
+ * actually is.
  *
  * Auth is the same shape as `/api/cron/nimbus-sync`, deliberately: Vercel sends
  * `Authorization: Bearer $CRON_SECRET` when CRON_SECRET is set on the project,
@@ -56,10 +69,10 @@ export async function GET(req: NextRequest) {
   const report = await drainDueJobs();
 
   console.log(
-    `[automation] ${report.due} due · ${report.sent} sent · ${report.failed} failed · ${report.skipped} skipped`
+    `[automation] swept ${report.swept} returns · ${report.due} due · ${report.sent} sent · ${report.failed} failed · ${report.skipped} skipped`
   );
 
-  if (report.due > 0) {
+  if (report.due > 0 || report.swept > 0) {
     try {
       revalidatePath("/admin/automation");
     } catch {

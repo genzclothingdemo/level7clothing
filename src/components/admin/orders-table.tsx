@@ -40,6 +40,12 @@ import {
   statusMeta,
   type BadgeTone,
 } from "@/components/admin/order-ui";
+import {
+  AdminProductThumb,
+  ProductLead,
+  variantText,
+  type AdminProductRef,
+} from "@/components/admin/product-lead";
 import { OrderBulkBar } from "@/components/admin/order-bulk-bar";
 import { OrderTracking } from "@/components/admin/order-tracking";
 import type {
@@ -94,8 +100,19 @@ const STATUSES = [
  * Under `md` none of this applies: rows become stacked cards, because eight
  * columns on a 375px screen is a sideways scroll bar, not a table.
  */
+/**
+ * Column two was 9rem and held `L7-MUCL3FCASI` over a date. It is 13rem now
+ * and holds the product: a 44px portrait thumb, the piece's name, "+2 more",
+ * and the order number demoted underneath. The extra 4rem comes out of the
+ * `1fr` customer column, which had the most to spare.
+ *
+ * `items-start`, not `items-center`: a cell whose height is now set by a
+ * thumbnail and a two-line product name cannot vertically centre the five
+ * one-line cells beside it without leaving them floating in the middle of the
+ * row.
+ */
 const ROW_GRID =
-  "md:grid md:grid-cols-[2.75rem_9rem_minmax(0,1fr)_5.5rem_6.5rem_8rem_2.5rem] md:items-center xl:grid-cols-[2.75rem_9rem_minmax(0,1fr)_5.5rem_6.5rem_8rem_8.5rem_2.5rem]";
+  "md:grid md:grid-cols-[2.75rem_13rem_minmax(0,1fr)_5.5rem_6.5rem_8rem_2.5rem] md:items-start xl:grid-cols-[2.75rem_13rem_minmax(0,1fr)_5.5rem_6.5rem_8rem_8.5rem_2.5rem]";
 
 /** Every cell: one padding value, one minimum, so the rhythm is uniform. */
 const CELL = "min-w-0 px-2 py-2";
@@ -346,7 +363,9 @@ export function OrdersTable({
           role="presentation"
         >
           <span className={CELL} aria-hidden />
-          <span className={CELL}>Order</span>
+          {/* Was "Order". The column still carries the order number — it just
+              is not what the column is about any more. */}
+          <span className={CELL}>Items</span>
           <span className={CELL}>Customer</span>
           <span className={cn(CELL, "text-right")}>Total</span>
           <span className={CELL}>Payment</span>
@@ -405,6 +424,22 @@ function OrderRow({
   const PayIcon = pay.icon;
   const ShipIcon = ship.icon;
 
+  /**
+   * The order's lines as the shared product-lead wants them.
+   *
+   * `href: null` on every one: both surfaces that render this put it inside
+   * the row's expander button, and an anchor inside a button is invalid. The
+   * name is still a real link in the expanded detail below, which is where
+   * somebody who wants the product editor is heading anyway.
+   */
+  const leadItems: AdminProductRef[] = o.items.map((it) => ({
+    name: it.name,
+    image: it.image ?? null,
+    href: null,
+    variant: variantText(it.options),
+    quantity: it.quantity,
+  }));
+
   const flags = (
     <>
       {custom && (
@@ -454,16 +489,26 @@ function OrderRow({
             one row should cost two stops (its checkbox and its expander), not
             four. The chevron at the end is the labelled, focusable control
             that carries `aria-expanded` for assistive tech. */}
+        {/*
+          The row's headline: what is in the parcel.
+
+          The thumb and the name are deliberately NOT links here — the whole
+          cell is the row's expander, and a link inside a button is invalid
+          markup as well as a target that steals the click people expect to
+          open the order. `unlinked` on the shared component is exactly for
+          this. The expanded detail below has the real product links.
+        */}
         <button
           type="button"
           onClick={onToggle}
           tabIndex={-1}
           className={cn(CELL, "cursor-pointer text-left")}
         >
-          <span className="block truncate font-mono text-[11px] font-medium">
+          <ProductLead items={leadItems} size="sm" />
+          <span className="mt-1 block truncate font-mono text-[11px] text-muted-foreground">
             {o.orderNumber}
           </span>
-          <span className="mt-0.5 block truncate text-[11px] text-muted-foreground tabular-nums">
+          <span className="block truncate text-[11px] text-muted-foreground tabular-nums">
             {shortDate(o.createdAt)}
           </span>
         </button>
@@ -557,7 +602,13 @@ function OrderRow({
           aria-controls={detailId}
           className="min-w-0 flex-1 cursor-pointer py-2 pr-1 text-left"
         >
-          <span className="flex flex-wrap items-baseline gap-x-2">
+          {/* Phone card: the product leads, the customer is the second line
+              and the order number the third. On a 375px screen this is the
+              only view of an order most of the time, so it is the one that
+              most needed to stop opening with a reference string. */}
+          <ProductLead items={leadItems} size="md" />
+
+          <span className="mt-1 flex flex-wrap items-baseline gap-x-2">
             <span className="min-w-0 max-w-full truncate text-sm font-medium">
               {o.customerName}
             </span>
@@ -875,6 +926,17 @@ function ItemRow({ item: it }: { item: AdminOrderItem }) {
 
   return (
     <li className="flex gap-2.5 px-2.5 py-1.5">
+      {/* The expanded detail already named the product and linked it twice;
+          what it never did was show it. Linked to the store page rather than
+          the editor, to match the name beside it. */}
+      <AdminProductThumb
+        item={{
+          name: it.name,
+          image: it.image ?? null,
+          href: live ? `/product/${it.slug}` : null,
+        }}
+        size="sm"
+      />
       <div className="min-w-0 flex-1">
         <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
           {live ? (

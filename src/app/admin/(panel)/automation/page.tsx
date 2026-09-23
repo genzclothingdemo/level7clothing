@@ -2,12 +2,14 @@ import Link from "next/link";
 import { ArrowUpRight, Mail, Plus, Zap } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import {
+  DIRECT_MAIL,
   describeConditions,
   jobBacklog,
   readConditions,
   recipientLabel,
   triggerLabel,
 } from "@/lib/automation";
+import { emailHealth } from "@/lib/email";
 import {
   CONFIRM_MODE_LABEL,
   DISPATCH_MODE_DETAIL,
@@ -23,6 +25,12 @@ import {
 } from "@/components/admin/automation-summary";
 import { AutomationRowActions } from "@/components/admin/automation-row-actions";
 import { AutomationQueue, type JobRow } from "@/components/admin/automation-queue";
+import {
+  DirectMailCard,
+  EmailHealthCard,
+  type QueueOutcome,
+} from "@/components/admin/automation-health";
+import { AutomationRestoreButton } from "@/components/admin/automation-restore";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Automation" };
@@ -35,18 +43,27 @@ export const metadata = { title: "Automation" };
  * does not own. So the page has three registers, and the difference between
  * them is the point:
  *
- * 1. **Rules** — created, edited and paused here.
+ * 1. **Rules** — created, edited and paused here. Since the hardcoded senders
+ *    in `lib/email.ts` were retired, this list is not a *subset* of what the
+ *    store emails on an event — it is the whole of it. Pausing a rule now
+ *    genuinely stops that message, which is the only thing that makes the
+ *    switch worth having.
  * 2. **The order pipeline** — read-only, with a link. Those columns belong to
  *    Settings → Orders and stay there. CLAUDE.md records exactly what happens
  *    when a setting gets a second editable control: `defaultReturnsInfo` had
  *    two writers, and two tabs open meant a silent lost update with no error
  *    anywhere. Showing a value is not owning it; **never add an input here.**
- * 3. **Scheduled jobs** — the three Vercel crons, stated as facts. They are
+ * 3. **Scheduled jobs** — the Vercel crons, stated as facts. They are
  *    automation by any reading, and an owner hunting for "why did that happen
  *    at 2am" has nowhere else to look.
+ *
+ * Above all three sits the **email health card**, because none of the rest
+ * means anything if mail cannot leave the building. See the note on that
+ * component for the weeks-long silent outage it exists to make impossible.
  */
 export default async function AdminAutomation() {
-  const [rules, settingsRow, backlog, jobs] = await Promise.all([
+  const [rules, settingsRow, backlog, jobs, lastSentJob, lastFailedJob, failedCount] =
+    await Promise.all([
     prisma.automationRule
       .findMany({
         orderBy: [{ isActive: "desc" }, { createdAt: "asc" }],
@@ -65,7 +82,35 @@ export default async function AdminAutomation() {
         include: { rule: { select: { name: true } } },
       })
       .catch(() => []),
+    // The durable half of the health card. `AutomationJob` is the only record
+    // of a send that survives a deploy — `lib/email.ts`'s own last-send memory
+    // dies with the instance.
+    prisma.automationJob
+      .findFirst({
+        where: { status: "sent" },
+        orderBy: { sentAt: "desc" },
+        select: { sentAt: true, rule: { select: { name: true } } },
+      })
+      .catch(() => null),
+    prisma.automationJob
+      .findFirst({
+        where: { status: "failed" },
+        orderBy: { createdAt: "desc" },
+        select: { createdAt: true, error: true, rule: { select: { name: true } } },
+      })
+      .catch(() => null),
+    prisma.automationJob.count({ where: { status: "failed" } }).catch(() => 0),
   ]);
+
+  const health = emailHealth();
+  const queueOutcome: QueueOutcome = {
+    lastSentAt: lastSentJob?.sentAt?.toISOString() ?? null,
+    lastSentRule: lastSentJob?.rule.name ?? null,
+    lastFailedAt: lastFailedJob?.createdAt.toISOString() ?? null,
+    lastFailedRule: lastFailedJob?.rule.name ?? null,
+    lastFailedError: lastFailedJob?.error ?? null,
+    failedCount,
+  };
 
   const pipeline = normalisePipelineSettings(settingsRow);
   const dispatch = dispatchModeOf(pipeline);
@@ -129,12 +174,22 @@ export default async function AdminAutomation() {
         </div>
       </div>
 
+      {/* ---------------- Can we send at all? ---------------- */}
+      <EmailHealthCard health={health} queue={queueOutcome} />
+
       {/* ---------------- Rules ---------------- */}
       <section className="min-w-0">
-        <h2 className="font-serif text-xl">Your rules</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          When something happens, and your conditions match, send an email.
-        </p>
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="font-serif text-xl">Your rules</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              When something happens, and your conditions match, send an email.
+              Every message your store sends on an event is one of these — pause
+              one and that message genuinely stops.
+            </p>
+          </div>
+          <AutomationRestoreButton />
+        </div>
 
         {rules.length === 0 ? (
           <div className="mt-4 rounded-2xl border border-dashed border-border p-10 text-center sm:p-12">
@@ -339,29 +394,39 @@ export default async function AdminAutomation() {
           </p>
         </div>
 
+        {/* ---- Mail that is not a rule ---- */}
+        <DirectMailCard items={DIRECT_MAIL} />
+
         {/* ---- The crons ---- */}
         <div className="mt-3 min-w-0 rounded-2xl border border-border bg-card p-4 sm:p-5">
           <h3 className="font-serif text-lg">Scheduled jobs</h3>
           <p className="mt-1 text-sm text-muted-foreground">
-            Run by the host on a timer, defined in{" "}
-            <code className="font-mono text-xs">vercel.json</code>. Changing a
-            schedule is a code change, not a setting.
+            Called from <strong className="font-medium">cron-job.org</strong>,
+            not from this app — so a schedule is changed there, not in the code.
+            Each is a URL guarded by <code className="font-mono text-xs">CRON_SECRET</code>;
+            if that is unset every call is refused and nothing runs.
           </p>
           <ul className="mt-4 divide-y divide-border text-sm">
             {[
               {
-                name: "Drain the automation queue",
-                when: "Daily, 02:30",
-                what: "Sends every delayed message whose time has come — the rules above.",
+                // Scheduling lives outside the app on purpose. Vercel's free
+                // plan allows two cron entries at a daily maximum — and a third
+                // entry does not merely fail to run, it fails the whole
+                // DEPLOYMENT, which once left a day's work pushed and un-shipped
+                // with nothing on screen to say so. `vercel.json` therefore
+                // carries no `crons` key at all.
+                name: "Run the automation pass",
+                when: "Every 15–30 minutes",
+                what: "Sends every delayed message whose time has come — the 24-hour cart nudge, and any return the courier moved.",
               },
               {
                 name: "Sync with NimbusPost",
-                when: "Daily, midnight",
+                when: "Every 30–60 minutes",
                 what: "Pulls AWBs and courier scans back for orders and return pickups.",
               },
               {
                 name: "Purge unused media",
-                when: "Weekly, Sunday midnight",
+                when: "Weekly",
                 what: "Clears uploaded photos nothing points at any more.",
               },
             ].map((job) => (

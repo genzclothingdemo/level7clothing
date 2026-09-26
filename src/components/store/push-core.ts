@@ -49,6 +49,30 @@ function urlBase64ToUint8Array(base64String: string) {
   return output;
 }
 
+/**
+ * Was this subscription minted with the key this deployment signs with?
+ *
+ * Rotating VAPID keys does not invalidate the subscriptions a browser already
+ * holds — `getSubscription()` keeps returning one signed for the *old* key, the
+ * UI keeps saying notifications are on, and every send is rejected by the push
+ * service with a 403 that nobody sees. That is a silent, total outage on every
+ * device that subscribed before the rotation.
+ *
+ * So a mismatch is treated as "not subscribed": pressing Turn on drops the dead
+ * subscription and mints a fresh one.
+ *
+ * Safari does not always expose `options.applicationServerKey`. A missing key
+ * is answered `true` — refusing to trust a subscription we cannot check would
+ * re-subscribe an iPhone on every single visit.
+ */
+function appServerKeyMatches(sub: PushSubscription, expected: Uint8Array): boolean {
+  const raw = sub.options?.applicationServerKey;
+  if (!raw) return true;
+  const have = new Uint8Array(raw);
+  if (have.length !== expected.length) return false;
+  return have.every((byte, i) => byte === expected[i]);
+}
+
 /** True for iPhone/iPad, including iPadOS, which reports itself as a Mac. */
 function isApplePhoneOrTablet(): boolean {
   const ua = navigator.userAgent;
@@ -71,6 +95,13 @@ export type PushSupport =
   | "ready"
   /** iOS Safari: push exists, but only once the app is on the home screen. */
   | "needs-install"
+  /**
+   * An **installed** iPhone app whose iOS is older than 16.4 — Apple shipped
+   * web push in that release and not before. The shopper has already done the
+   * one thing `needs-install` asks for, so telling them to install again would
+   * be a dead end; the only way forward is a system update.
+   */
+  | "needs-ios-update"
   /** No keys on this deployment, or the browser has no Push API at all. */
   | "unsupported";
 
@@ -118,6 +149,45 @@ async function activeRegistration(): Promise<ServiceWorkerRegistration | null> {
   ]);
 }
 
+/**
+ * The registration to subscribe against, registering the worker if it is not
+ * there yet.
+ *
+ * **This closes a first-visit race.** `PwaRegister` registers `/sw.js` on the
+ * `load` event, deliberately, to keep the worker off the critical path for
+ * first paint. But the bell renders as soon as React mounts, which is *before*
+ * `load` — so a shopper who arrives and presses Turn on straight away hit
+ * "The app isn't ready yet. Reload and try again." on a perfectly healthy
+ * store. Asking for notifications is a deliberate act; it should not depend on
+ * how fast someone taps.
+ *
+ * Registering here is safe to duplicate: `register()` with the same script and
+ * scope resolves to the registration that already exists rather than making a
+ * second one.
+ *
+ * **Production only**, matching `PwaRegister`. In dev that file unregisters the
+ * worker on every mount — it sits in front of Turbopack's HMR assets and serves
+ * stale chunks — so self-registering here would fight it and break the dev
+ * server instead of fixing anything. `enable()` says so in words rather than
+ * failing with a shrug.
+ */
+async function ensureRegistration(): Promise<ServiceWorkerRegistration | null> {
+  const existing = await activeRegistration();
+  if (existing) return existing;
+  if (process.env.NODE_ENV !== "production") return null;
+
+  try {
+    await navigator.serviceWorker.register("/sw.js", {
+      scope: "/",
+      updateViaCache: "none",
+    });
+  } catch {
+    return null; // blocked by policy, private mode, or no worker available
+  }
+
+  return activeRegistration();
+}
+
 export function usePush(): PushControls {
   const [state, setState] = useState<PushState>({
     support: "unknown",
@@ -146,10 +216,16 @@ export function usePush(): PushControls {
         "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 
       if (!hasApi || !VAPID_PUBLIC_KEY) {
+        // Three different "no" answers, because only one of them is final.
         // On iOS the Push API genuinely appears only after installation, so
-        // "install first" is the truthful message rather than "unsupported".
-        const support: PushSupport =
-          apple && !standalone && VAPID_PUBLIC_KEY ? "needs-install" : "unsupported";
+        // "install first" is the truthful message rather than "unsupported" —
+        // and an iPhone that is *already* installed and still has no
+        // PushManager is running something older than iOS 16.4, where the way
+        // out is a system update, not another install.
+        let support: PushSupport = "unsupported";
+        if (VAPID_PUBLIC_KEY && apple) {
+          support = standalone ? "needs-ios-update" : "needs-install";
+        }
         if (!cancelled) patch({ support, standalone, apple });
         return;
       }
@@ -161,19 +237,27 @@ export function usePush(): PushControls {
 
       if (cancelled) return;
 
+      // A subscription signed for a key this deployment no longer holds is a
+      // dead subscription, however healthy it looks — see `appServerKeyMatches`.
+      // Reporting it as "on" would leave the shopper with a switch that is
+      // already in the position they want and a phone that never rings.
+      const live =
+        existing !== null &&
+        appServerKeyMatches(existing, urlBase64ToUint8Array(VAPID_PUBLIC_KEY));
+
       patch({
         support: "ready",
         permission: readPermission(),
         standalone,
         apple,
-        subscribed: Boolean(existing),
+        subscribed: live,
       });
 
       // Keep the stored row alive and correctly attributed: a customer who
       // subscribed as a guest and later signed in gets their subscription
       // claimed onto the account here. Once per tab, so this never becomes a
       // database write on every navigation.
-      if (existing && readPermission() === "granted") {
+      if (existing && live && readPermission() === "granted") {
         try {
           if (sessionStorage.getItem(RESYNC_KEY) === "1") return;
           sessionStorage.setItem(RESYNC_KEY, "1");
@@ -213,19 +297,40 @@ export function usePush(): PushControls {
     }
 
     try {
-      const registration = await activeRegistration();
+      const registration = await ensureRegistration();
       if (!registration) {
-        patch({ busy: false, error: "The app isn't ready yet. Reload and try again." });
+        patch({
+          busy: false,
+          error:
+            process.env.NODE_ENV === "production"
+              ? "The app isn't ready yet. Reload and try again."
+              : // Dev has no service worker on purpose (PwaRegister unregisters
+                // it), so this is not a fault to go hunting for.
+                "Notifications need a production build — run `next build && next start`.",
+        });
         return;
       }
 
+      const serverKey = urlBase64ToUint8Array(VAPID_PUBLIC_KEY);
+
       // Reuse an existing subscription rather than rotating it — a fresh
-      // endpoint would orphan the row already stored for this device.
+      // endpoint would orphan the row already stored for this device. The one
+      // exception is a subscription minted for a different VAPID key: that one
+      // is unusable, so it is dropped here *and* at the server, otherwise the
+      // dead row sits in the table failing every broadcast forever.
+      let existing = await registration.pushManager.getSubscription();
+      if (existing && !appServerKeyMatches(existing, serverKey)) {
+        const stale = existing.endpoint;
+        await existing.unsubscribe().catch(() => {});
+        await unsubscribeFromPush(stale).catch(() => {});
+        existing = null;
+      }
+
       const subscription =
-        (await registration.pushManager.getSubscription()) ??
+        existing ??
         (await registration.pushManager.subscribe({
           userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+          applicationServerKey: serverKey,
         }));
 
       const result = await subscribeToPush(subscription.toJSON());

@@ -22,14 +22,29 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
-import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { Download, Eye, EyeOff, Image as ImageIcon, Loader2, Star } from "lucide-react";
+import {
+  Download,
+  Eye,
+  EyeOff,
+  Images,
+  Loader2,
+  MousePointerClick,
+  RefreshCw,
+  Star,
+  Text,
+} from "lucide-react";
 import { Card, Field, Segmented, SwitchRow } from "@/components/admin/form-kit";
-import { PhotoPicker } from "@/components/admin/photo-picker";
+import { Disclosure } from "@/components/store/disclosure";
+import {
+  PortfolioExtraPhotos,
+  PortfolioThumbnail,
+} from "@/components/admin/portfolio-media";
 import {
   createPortfolioItem,
   importSocialPost,
+  previewPortfolioBody,
+  refreshPortfolioItem,
   updatePortfolioItem,
 } from "@/app/actions/portfolio";
 import type { PortfolioKind } from "@/lib/portfolio";
@@ -50,6 +65,16 @@ export type PortfolioFormValues = {
   imageUrl: string;
   embedHtml: string;
   productId: string;
+  /**
+   * Pasted markup for a written page. **Never rendered in this component** —
+   * the preview goes through `previewPortfolioBody`, which is the same
+   * sanitiser the save runs, so what the owner is shown is what gets stored.
+   */
+  bodyHtml: string;
+  /** Extra photos beyond the cover, in the order they are shown. */
+  images: string[];
+  ctaLabel: string;
+  ctaUrl: string;
   /** Comma-separated in the form; split and de-duplicated server-side. */
   tags: string;
   sortOrder: string;
@@ -67,6 +92,10 @@ export const EMPTY_PORTFOLIO_ITEM: PortfolioFormValues = {
   imageUrl: "",
   embedHtml: "",
   productId: "",
+  bodyHtml: "",
+  images: [],
+  ctaLabel: "",
+  ctaUrl: "",
   tags: "",
   sortOrder: "0",
   isFeatured: false,
@@ -142,12 +171,22 @@ export function PortfolioForm({
   itemId,
   initial,
   products,
+  harvestedFrom,
 }: {
   /** Absent when creating. */
   itemId?: string;
   initial: PortfolioFormValues;
   /** Active products offered in the "about one product" picker. */
   products: { id: string; name: string }[];
+  /**
+   * The product this row was harvested from, when it was.
+   *
+   * A plain string resolved on the server, not the id: `sourceProductId` is
+   * not offered as an input anywhere and `toRow()` deliberately leaves the
+   * column out of every write, so this is here to *say* where the row came
+   * from and to put Refresh beside it — never to edit it.
+   */
+  harvestedFrom?: { productName: string | null } | null;
 }) {
   const router = useRouter();
   const [v, setV] = useState<PortfolioFormValues>(initial);
@@ -264,9 +303,54 @@ export function PortfolioForm({
     };
   }, [v.isActive, section, v.embedHtml, v.url]);
 
+  /* ---- The written page ------------------------------------------------
+     `bodyHtml` is markup the owner pasted, so what they typed and what will
+     be stored are two different strings. Rather than let them find that out
+     on the live page, Preview runs the *same* sanitiser the save runs
+     (`previewPortfolioBody` is a thin wrapper on it) and prints both the
+     result and a list of what went. A second, client-side cleaner would be a
+     second answer to "what is safe", and the two would drift. */
+  const [preview, setPreview] = useState<{
+    html: string;
+    removed: string[];
+  } | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+
+  const runPreview = useCallback(async () => {
+    setPreviewing(true);
+    const res = await previewPortfolioBody(v.bodyHtml);
+    setPreviewing(false);
+    setPreview(res);
+  }, [v.bodyHtml]);
+
+  /* ---- Refresh a harvested piece from its link ---- */
+  const [refreshing, setRefreshing] = useState(false);
+  const runRefresh = useCallback(async () => {
+    if (!itemId) return;
+    setRefreshing(true);
+    setError(null);
+    const res = await refreshPortfolioItem(itemId);
+    setRefreshing(false);
+    if (res.success) {
+      // Everything it rewrote is server-side; re-reading is the only way this
+      // form sees it without a second source of truth for the same columns.
+      router.refresh();
+    } else {
+      setError(res.error ?? "Couldn't refresh this piece.");
+    }
+  }, [itemId, router]);
+
   /** Nothing to show = a title on a grey box. Mirrored server-side. */
   const emptyPiece =
-    !v.imageUrl.trim() && !v.url.trim() && !v.embedHtml.trim() && !v.productId;
+    !v.imageUrl.trim() &&
+    !v.url.trim() &&
+    !v.embedHtml.trim() &&
+    !v.productId &&
+    !v.bodyHtml.trim() &&
+    v.images.length === 0;
+
+  /** Half a CTA is a button that does nothing, or no button at all. */
+  const halfCta = Boolean(v.ctaLabel.trim()) !== Boolean(v.ctaUrl.trim());
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -281,6 +365,12 @@ export function PortfolioForm({
     fd.append("imageUrl", v.imageUrl);
     fd.append("embedHtml", v.embedHtml);
     fd.append("productId", v.productId);
+    fd.append("bodyHtml", v.bodyHtml);
+    // One entry per photo: a blob filename can contain very nearly anything,
+    // and choosing a separator is choosing a filename that splits in two.
+    for (const url of v.images) fd.append("images", url);
+    fd.append("ctaLabel", v.ctaLabel);
+    fd.append("ctaUrl", v.ctaUrl);
     fd.append("tags", v.tags);
     fd.append("sortOrder", v.sortOrder);
     fd.append("isFeatured", String(v.isFeatured));
@@ -315,6 +405,41 @@ export function PortfolioForm({
           {verdict.line}
         </p>
       </div>
+
+      {/* ---- Where this row came from ----
+           Only for a harvested row, and read-only: `sourceProductId` is the
+           harvester's own record and no form writes it. Refresh sits here
+           rather than in the sweep because it *overwrites* the title, the
+           cover and the player — a background sweep doing that would quietly
+           undo an afternoon's editing, so it is one deliberate press on one
+           piece. It leaves the description, tags, section and position alone. */}
+      {harvestedFrom && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border bg-muted/30 p-4 sm:p-5">
+          <p className="min-w-0 text-sm text-muted-foreground">
+            Added automatically from a video link on{" "}
+            <span className="text-foreground">
+              {harvestedFrom.productName ?? "a product that has since gone"}
+            </span>
+            . It is an ordinary piece now — edit it, hide it or delete it, and
+            re-harvesting will not bring it back or overwrite what you change.
+          </p>
+          {v.url.trim() && (
+            <button
+              type="button"
+              onClick={runRefresh}
+              disabled={refreshing}
+              className="inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-border px-3 text-[11px] font-medium uppercase tracking-widest transition-colors hover:bg-muted disabled:opacity-50 sm:min-h-10"
+            >
+              {refreshing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+              )}
+              {refreshing ? "Refreshing…" : "Refresh from the link"}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* ---- The piece ---- */}
       <Card
@@ -513,70 +638,194 @@ export function PortfolioForm({
         )}
       </Card>
 
-      {/* ---- Photo ---- */}
+      {/* ---- Cover photo ---- */}
       <Card
-        title="Photo"
-        tip="The still shown in the grid. Instagram and YouTube links usually supply their own, so this is only needed when they don't — or when you want a better one."
+        title="Cover photo"
+        tip="The still shown in the grid. Instagram and YouTube links usually supply their own, so this is only needed when they don't — or when you want a better one. A piece with no cover still works."
       >
-        {v.imageUrl ? (
-          <div className="flex items-center gap-3">
-            <span className="relative grid h-20 w-20 shrink-0 place-items-center overflow-hidden rounded-lg bg-muted">
-              {/* `next/image` only for hosts `next.config.ts` allows; anything
-                  else 400s through the optimiser. Admin thumbs stay square. */}
-              {v.imageUrl.startsWith("/") ? (
-                <Image
-                  src={decodeURI(v.imageUrl)}
-                  alt=""
-                  fill
-                  sizes="80px"
-                  className="object-cover"
-                />
-              ) : (
-                // eslint-disable-next-line @next/next/no-img-element -- arbitrary host
-                <img
-                  src={v.imageUrl}
-                  alt=""
-                  className="absolute inset-0 h-full w-full object-cover"
+        <PortfolioThumbnail
+          value={v.imageUrl}
+          onChange={(next) => set("imageUrl", next)}
+          /* Every link on this form is offered as a source, in the order they
+             are worth trying. The button names the host rather than the
+             field, because "use the photo from instagram.com" is a sentence
+             and "use the photo from the link" is a riddle. */
+          sources={[
+            { label: "the link", url: v.url },
+            { label: "the button link", url: v.ctaUrl },
+          ]}
+          onResolved={({ title, embedHtml }) => {
+            // Fetching a cover also resolved the caption and the player. Take
+            // them, but never over a title the owner has already written.
+            setV((prev) => ({
+              ...prev,
+              title: prev.title.trim() || title || prev.title,
+              embedHtml: prev.embedHtml.trim() || embedHtml || prev.embedHtml,
+            }));
+          }}
+        />
+      </Card>
+
+      {/* ---- The written page ----
+           Folded away, because most pieces are a link and a photo and never
+           need any of this. It opens itself for a piece that already has a
+           body, extra photos or a button, so an existing page is never
+           hidden behind a closed panel the owner has to find. */}
+      <Card
+        title="Write a page"
+        tip="Optional. Give the piece a body and it becomes something to read rather than a tile to click through — which is what an achievement, a press mention or a bulk-order write-up needs. You can paste formatted text or HTML; anything unsafe is removed before it is saved, and Preview shows you exactly what will be kept."
+      >
+        <Disclosure
+          label="Page body"
+          icon={<Text className="h-3.5 w-3.5" />}
+          summary={
+            v.bodyHtml.trim()
+              ? `${v.bodyHtml.trim().length.toLocaleString()} characters`
+              : "Empty"
+          }
+          defaultOpen={Boolean(initial.bodyHtml.trim())}
+        >
+          <div className="space-y-3 pt-1">
+            <textarea
+              value={v.bodyHtml}
+              onChange={(e) => {
+                set("bodyHtml", e.target.value);
+                // A preview of markup that has since been edited is a lie.
+                setPreview(null);
+              }}
+              rows={10}
+              maxLength={60_000}
+              aria-label="Page body"
+              placeholder={
+                "<h2>250 pieces in eleven days</h2>\n<p>Two rounds of proofing, one rail, and a deadline that did not move.</p>\n<ul><li>240 GSM cotton</li><li>Two-pass screen print</li></ul>"
+              }
+              className="input min-h-48 font-mono text-xs leading-relaxed"
+            />
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={runPreview}
+                disabled={previewing || !v.bodyHtml.trim()}
+                className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-accent/40 bg-accent/5 px-3 text-[11px] font-semibold uppercase tracking-wider text-accent transition-colors hover:bg-accent/10 disabled:opacity-50 sm:min-h-10"
+              >
+                {previewing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                ) : (
+                  <Eye className="h-3.5 w-3.5" aria-hidden />
+                )}
+                {previewing ? "Checking…" : "Preview what will be saved"}
+              </button>
+              {preview && (
+                <button
+                  type="button"
+                  onClick={() => setPreview(null)}
+                  className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border px-3 text-[11px] font-medium uppercase tracking-widest transition-colors hover:bg-muted sm:min-h-10"
+                >
+                  Close preview
+                </button>
+              )}
+            </div>
+
+            {preview && (
+              <div className="space-y-2">
+                {preview.removed.length > 0 && (
+                  <p className="rounded-lg border border-orange-500/30 bg-orange-500/5 px-3 py-2 text-xs text-orange-600 dark:text-orange-400">
+                    Removed: {preview.removed.join(", ")}. Formatting that
+                    isn&rsquo;t on the safe list is taken out — the words inside
+                    it are kept.
+                  </p>
+                )}
+                {preview.html ? (
+                  <div className="rounded-xl border border-border bg-muted/20 p-4">
+                    <p className="eyebrow mb-2 text-muted-foreground">
+                      How it will read
+                    </p>
+                    {/*
+                      The one `dangerouslySetInnerHTML` in this admin, and it is
+                      safe for a specific reason rather than by convention: this
+                      string did not come from the textarea, it came back from
+                      the server's own sanitiser — the same function that runs
+                      on save. Rendering `v.bodyHtml` here instead would be a
+                      live XSS hole in the editor.
+                    */}
+                    <div
+                      className="portfolio-body space-y-2 text-sm leading-relaxed [&_a]:text-accent [&_a]:underline [&_h2]:font-serif [&_h2]:text-lg [&_h3]:font-serif [&_img]:max-w-full [&_img]:rounded-lg [&_li]:ml-4 [&_li]:list-disc"
+                      dangerouslySetInnerHTML={{ __html: preview.html }}
+                    />
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Nothing survived the clean-up — there is no readable text in
+                    what you pasted.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        </Disclosure>
+
+        <Disclosure
+          label="Extra photos"
+          icon={<Images className="h-3.5 w-3.5" />}
+          summary={v.images.length ? `${v.images.length} chosen` : "None"}
+          defaultOpen={initial.images.length > 0}
+        >
+          <div className="pt-1">
+            <PortfolioExtraPhotos
+              value={v.images}
+              onChange={(next) => set("images", next)}
+            />
+          </div>
+        </Disclosure>
+
+        <Disclosure
+          label="Button"
+          icon={<MousePointerClick className="h-3.5 w-3.5" />}
+          summary={v.ctaLabel.trim() || "None"}
+          defaultOpen={Boolean(initial.ctaLabel.trim() || initial.ctaUrl.trim())}
+        >
+          <div className="space-y-4 pt-1">
+            <Field
+              label="Button label"
+              tip="What the button says. Keep it a verb — 'Get a quote', 'Read the write-up'. Leave both fields empty for no button."
+            >
+              {(id) => (
+                <input
+                  id={id}
+                  value={v.ctaLabel}
+                  onChange={(e) => set("ctaLabel", e.target.value)}
+                  maxLength={40}
+                  placeholder="Get a quote"
+                  className="input"
                 />
               )}
-            </span>
-            <button
-              type="button"
-              onClick={() => set("imageUrl", "")}
-              className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-border px-4 text-[11px] font-medium uppercase tracking-widest transition-colors hover:bg-muted"
+            </Field>
+            <Field
+              label="Button link"
+              tip="Where it goes. A path inside this store (/contact) or a full https:// address."
             >
-              Remove photo
-            </button>
+              {(id) => (
+                <input
+                  id={id}
+                  type="url"
+                  inputMode="url"
+                  value={v.ctaUrl}
+                  onChange={(e) => set("ctaUrl", e.target.value)}
+                  placeholder="/contact"
+                  className="input"
+                />
+              )}
+            </Field>
+            {halfCta && (
+              <p className="text-xs text-danger">
+                {v.ctaLabel.trim()
+                  ? "Give the button somewhere to go, or clear its label."
+                  : "Give the button a label, or clear its address."}
+              </p>
+            )}
           </div>
-        ) : (
-          <p className="flex items-center gap-2 text-sm text-muted-foreground">
-            <ImageIcon className="h-4 w-4 shrink-0" aria-hidden />
-            No photo chosen — we&rsquo;ll use the link&rsquo;s own still if it has one.
-          </p>
-        )}
-
-        <PhotoPicker
-          selected={v.imageUrl ? [v.imageUrl] : []}
-          onChange={(next) => set("imageUrl", next[0] ?? "")}
-          max={1}
-        />
-
-        <Field
-          label="…or paste an image address"
-          tip="For a still that isn't in the photo library. It has to be a full https:// address. Pictures from hosts we don't optimise still work — they're just served as-is."
-        >
-          {(id) => (
-            <input
-              id={id}
-              type="url"
-              inputMode="url"
-              value={v.imageUrl}
-              onChange={(e) => set("imageUrl", e.target.value)}
-              placeholder="https://…"
-              className="input"
-            />
-          )}
-        </Field>
+        </Disclosure>
       </Card>
 
       {/* ---- Placement ---- */}
@@ -625,8 +874,8 @@ export function PortfolioForm({
 
       {emptyPiece && (
         <p className="text-xs text-danger">
-          Give this piece something to show: a photo, a link, an embed, or a
-          product.
+          Give this piece something to show: a photo, a link, an embed, a
+          product, or a written page.
         </p>
       )}
       {error && (
@@ -646,7 +895,7 @@ export function PortfolioForm({
         </button>
         <button
           type="submit"
-          disabled={saving || emptyPiece}
+          disabled={saving || emptyPiece || halfCta}
           className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-lg bg-foreground px-6 text-[11px] font-medium uppercase tracking-widest text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {saving ? "Saving…" : itemId ? "Save changes" : "Add to portfolio"}

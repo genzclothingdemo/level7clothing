@@ -4,7 +4,8 @@ import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { getAdminSession } from "@/lib/auth";
+import { requireAdminWrite } from "@/lib/auth";
+import { AdminReadOnlyError } from "@/lib/temp-admin";
 import { fromStoreDateTimeInput, normaliseCode } from "@/lib/coupons";
 
 /**
@@ -17,9 +18,8 @@ import { fromStoreDateTimeInput, normaliseCode } from "@/lib/coupons";
  * this is about telling the admin, not about safety.
  */
 
-async function requireAdmin() {
-  const session = await getAdminSession();
-  if (!session) throw new Error("Unauthorized");
+async function requireAdmin(what: string) {
+  const session = await requireAdminWrite(what);
   return session;
 }
 
@@ -136,6 +136,7 @@ function explain(error: unknown): string {
   ) {
     return "A coupon with that code already exists.";
   }
+  if (error instanceof AdminReadOnlyError) return error.message;
   if (error instanceof Error && error.message === "Unauthorized") {
     return "Your session expired. Sign in again.";
   }
@@ -145,7 +146,7 @@ function explain(error: unknown): string {
 
 export async function createCoupon(formData: FormData): Promise<CouponActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("createCoupon");
     const parsed = couponInput.parse(read(formData));
     await prisma.coupon.create({ data: toRow(parsed) });
     revalidatePath("/admin/coupons");
@@ -160,7 +161,7 @@ export async function updateCoupon(
   formData: FormData
 ): Promise<CouponActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("updateCoupon");
     const parsed = couponInput.parse(read(formData));
     // `usedCount` is never written from the form — it belongs to the
     // redemption ledger, and editing it would let the admin hand out a used-up
@@ -179,7 +180,7 @@ export async function setCouponActive(
   isActive: boolean
 ): Promise<CouponActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("setCouponActive");
     await prisma.coupon.update({ where: { id }, data: { isActive } });
     revalidatePath("/admin/coupons");
     return { success: true };
@@ -190,7 +191,7 @@ export async function setCouponActive(
 
 export async function deleteCoupon(id: string): Promise<CouponActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("deleteCoupon");
     // Redemptions cascade with the coupon, so a code that has been used should
     // be switched off rather than deleted — deleting it takes the record of
     // who redeemed it with it. The confirm in the UI says so.

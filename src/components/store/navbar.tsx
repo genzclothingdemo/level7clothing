@@ -12,11 +12,22 @@ import { ChatLauncherButton, useChatUnread } from "@/components/store/chat-widge
 import { useKeyboardOpen } from "@/hooks/use-keyboard-open";
 import { cn } from "@/lib/utils";
 
-// Desktop nav links (all pages)
+/*
+ * Desktop nav links (all pages).
+ *
+ * Portfolio sits where About used to, matching the mobile bottom bar — which
+ * has carried a Portfolio tab for a while, so the two navigations no longer
+ * disagree about what the fourth destination is.
+ *
+ * **`/about` is not orphaned by this.** It is still linked from the footer
+ * ("Company" column), from the home page twice, from the account page, and it
+ * stays in the sitemap. Removing the last link to a page is how a page quietly
+ * dies; this only moves which one is in the header.
+ */
 const desktopLinks = [
   { href: "/", label: "Home" },
   { href: "/shop", label: "Shop" },
-  { href: "/about", label: "About" },
+  { href: "/portfolio", label: "Portfolio" },
   { href: "/contact", label: "Contact" },
 ];
 

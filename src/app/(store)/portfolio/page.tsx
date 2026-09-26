@@ -3,113 +3,131 @@ import { ArrowUpRight } from "lucide-react";
 import { InstagramIcon } from "@/components/store/instagram-icon";
 import { ButtonLink } from "@/components/ui/button";
 import { InfoTip } from "@/components/store/info-tip";
-import { PortfolioGrid } from "@/components/store/portfolio-grid";
 import {
-  PortfolioNotes,
-  PortfolioQuotes,
-  PortfolioStats,
-} from "@/components/store/portfolio-cards";
-import {
-  PortfolioTabs,
-  type PortfolioNavItem,
-} from "@/components/store/portfolio-tabs";
-import { Pagination, paginate, parsePageParam } from "@/components/store/pagination";
+  PortfolioSocial,
+  type ReelGroup,
+} from "@/components/store/portfolio-grid";
+import { PortfolioPages } from "@/components/store/portfolio-cards";
 import { getSettings } from "@/lib/settings";
 import {
-  asPortfolioSection,
   getPortfolio,
   instagramHandle,
-  type PortfolioSectionGroup,
+  type PortfolioEntry,
 } from "@/lib/portfolio";
 
 export const dynamic = "force-dynamic";
 
 /**
- * /portfolio — a **brand page**, not a second shop.
+ * /portfolio — **exactly two sections**, and one interaction.
  *
- * The owner's brief: *"improve portfolio section. it shows big achievement,
- * who are we, and instagram reels etc. product waha pe nahi chahiye. kuchh
- * reels, happy customer or some achievement except insta reel"*. So the
- * organising idea is what the work says about the label — who we are,
- * milestones, reels, happy customers, collaborations, bulk work — and a
- * garment is at most a footnote on a card. See the header of
- * `lib/portfolio.ts` for the shelf list and how a row is placed on one.
+ * ── What this replaced ──────────────────────────────────────────────────────
  *
- * ── Why the whole page by default, and a `?section=` narrowing ───────────────
+ * Six shelves (`who we are · milestones · reels · happy customers ·
+ * collaborations · bulk`), a chip nav that narrowed to one of them via
+ * `?section=`, and pagination inside a narrowed shelf. It was a taxonomy the
+ * visitor had to learn before seeing anything, and it put the reels — the only
+ * thing anyone comes here for — four chips and a scroll away.
  *
- * The two tabs this replaces forced a choice before the visitor had seen
- * anything. A brand page has to be *read down*, so the default — and the
- * canonical URL — is every shelf in order. The chips narrow to one shelf, which
- * is a real crawlable URL, and that is also the answer to "the owner has fifty
- * reels": each shelf caps at `PREVIEW` on the full page and the chip opens the
- * paginated rest.
+ * It is now:
  *
- * ── Why `?page=` only exists inside a section ────────────────────────────────
+ *   1. **Social** — reels and films, in three groups: the ones attached to a
+ *      product, the ones the owner added by hand, and everything on YouTube.
+ *   2. **Pages** — the write-ups, achievements and bulk-order work.
  *
- * Paginating six stacked shelves at once has no honest meaning — page 2 of
- * *what*? On the full page every shelf shows its first `PREVIEW` entries and
- * says how many more there are; pagination only appears once a single shelf is
- * selected, where "page 2" means exactly one thing.
+ * ── Why the grouping is decided here and not in `lib/portfolio.ts` ──────────
+ *
+ * `lib/portfolio.ts` is another agent's file, and it still models the six
+ * shelves. Rather than depend on a taxonomy that is being rewritten
+ * underneath, this page flattens whatever shelves it is handed and re-groups
+ * them on facts that are stable properties of an entry: does it have an
+ * embed, what provider is it, and where did it come from. If the shelves move
+ * again, this page keeps working.
+ *
+ * ── The split rule, in one line each ────────────────────────────────────────
+ *
+ * - **Social is `embedUrl !== null`.** Not "kind is instagram", not "it is on
+ *   the reels shelf" — a thing belongs in the reel viewer exactly when there
+ *   is something for the viewer to play. That makes the viewer's contract
+ *   total: every tile in that grid opens and plays, with no dead ends.
+ * - **Pages is everything else**, which is the same set the owner writes by
+ *   hand: notes, milestones, testimonials, bulk-order work.
+ *
+ * ── `?section=` and `?page=` are gone ───────────────────────────────────────
+ *
+ * With two sections there is nothing worth narrowing to, so there is exactly
+ * one canonical URL for this page. Old `?section=reels` / `?view=products`
+ * links still return **200 with the whole page**, which is the right answer
+ * for a shelf that no longer exists — better than a 404 on a URL Google has
+ * already indexed.
  */
+
+/* ------------------------------------------------------------------ */
+/*  Grouping                                                           */
+/* ------------------------------------------------------------------ */
 
 /**
- * 12 in one shelf — three full rows of the 4-up desktop grid, six of the 2-up
- * phone grid, so a page never ends on a ragged half-row.
+ * Source ids that mean **"this reel's URL came from a product's video links"**.
  *
- * `PREVIEW` is deliberately smaller: on the full page a shelf is an
- * invitation, not the archive.
+ * A `Set<string>` rather than a comparison against `PortfolioSource`, and that
+ * is the point: `lib/portfolio.ts` currently exports
+ * `PortfolioSource = "portfolio" | "instagram-api"` and has **no marker at all
+ * for a product-derived reel** — `productVideoEntries()` was removed, and the
+ * owner of that module is adding it back. Written this way the lookup
+ * typechecks against today's narrow union and starts working the moment the
+ * union widens, whichever of these spellings lands, with no edit here.
+ *
+ * Until then the "shoppable" group is empty and hides itself, which is honest:
+ * an empty group is better than guessing, and guessing was available —
+ * `entry.product !== null` is *not* the same question. A reel the owner added
+ * by hand can also name a garment; that does not make it a product video.
  */
-const PER_PAGE = 12;
-const PREVIEW = 6;
+const PRODUCT_SOURCES: ReadonlySet<string> = new Set([
+  "product-video",
+  "product-videos",
+  "product",
+  "products",
+  "product-link",
+]);
 
-type SP = Promise<{ section?: string; page?: string; view?: string }>;
+type SocialGroupId = "shoppable" | "studio" | "youtube";
 
-/** Page 1 of a shelf is its bare URL, so it has one canonical address, not two. */
-function canonicalFor(section: string | null, page: number): string {
-  const base = section ? `/portfolio?section=${section}` : "/portfolio";
-  if (page <= 1) return base;
-  return `${base}${section ? "&" : "?"}page=${page}`;
+const SOCIAL_GROUP_META: Record<SocialGroupId, { label: string; blurb: string }> = {
+  shoppable: {
+    label: "Shot on a piece",
+    blurb: "Reels attached to something you can buy — the garment is one tap away.",
+  },
+  studio: {
+    label: "From the studio",
+    blurb: "Drops, shoots and behind the scenes, picked by us.",
+  },
+  youtube: {
+    label: "On YouTube",
+    blurb: "The longer cuts and the shorts, wherever they came from.",
+  },
+};
+
+/** YouTube wins over provenance — the brief asks for both sources together. */
+function socialGroupOf(entry: PortfolioEntry): SocialGroupId {
+  if (entry.provider === "youtube") return "youtube";
+  return PRODUCT_SOURCES.has(entry.source) ? "shoppable" : "studio";
 }
 
-export async function generateMetadata({
-  searchParams,
-}: {
-  searchParams: SP;
-}): Promise<Metadata> {
-  const sp = await searchParams;
-  const section = asPortfolioSection(sp.section);
-  const [s, data] = await Promise.all([getSettings(), getPortfolio()]);
+/* ------------------------------------------------------------------ */
+/*  Metadata                                                           */
+/* ------------------------------------------------------------------ */
 
-  const group = section ? data.sections.find((g) => g.id === section) ?? null : null;
-
-  // Clamped against the real page count, so an out-of-range `?page=99` — which
-  // renders the last page — doesn't advertise a canonical nobody can reach.
-  // `getPortfolio` is `cache()`d, so this costs the page body nothing.
-  const totalPages = group
-    ? Math.max(1, Math.ceil(group.entries.length / PER_PAGE))
-    : 1;
-  const page = Math.min(parsePageParam(sp.page), totalPages);
-
-  const title = group
-    ? page > 1
-      ? `${group.label} — Page ${page}`
-      : `${group.label} · Portfolio`
-    : page > 1
-      ? `Portfolio — Page ${page}`
-      : "Portfolio";
-
-  const description = group
-    ? `${group.blurb} — ${s.brandName}.`
-    : `Who ${s.brandName} is, what we have done, and the reels, customers and collaborations behind the label.`;
+export async function generateMetadata(): Promise<Metadata> {
+  const s = await getSettings();
+  const description = `Reels, films and the work behind ${s.brandName} — they play right here.`;
 
   return {
-    title,
+    title: "Portfolio",
     description,
-    alternates: { canonical: canonicalFor(section, page) },
+    alternates: { canonical: "/portfolio" },
     openGraph: {
-      title: `${group ? `${group.label} · ` : ""}Portfolio · ${s.brandName}`,
+      title: `Portfolio · ${s.brandName}`,
       description,
-      url: canonicalFor(section, page),
+      url: "/portfolio",
       siteName: s.brandName,
       type: "website",
       locale: "en_IN",
@@ -122,97 +140,45 @@ export async function generateMetadata({
   };
 }
 
-/**
- * One shelf, in whichever shape its `layout` calls for.
- *
- * The branch is on `layout`, not on `id`, so adding a seventh section is a row
- * in `PORTFOLIO_SECTION_META` and nothing here changes.
- */
-function Shelf({
-  group,
-  entries,
-  more,
-}: {
-  group: PortfolioSectionGroup;
-  entries: typeof group.entries;
-  /** How many were held back on the full page, and where to see them. */
-  more: number;
-}) {
-  return (
-    <section id={group.id} className="mt-14 scroll-mt-24 first:mt-10">
-      <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-1">
-        <div className="min-w-0">
-          <h2 className="font-serif text-2xl leading-tight sm:text-3xl">
-            {group.label}
-          </h2>
-          <p className="mt-1 max-w-xl text-sm leading-relaxed text-muted-foreground">
-            {group.blurb}
-          </p>
-        </div>
-        {more > 0 && (
-          <a
-            href={`/portfolio?section=${group.id}`}
-            className="link-underline inline-flex min-h-11 shrink-0 items-center gap-1.5 text-xs font-medium uppercase tracking-widest"
-          >
-            {more} more
-            <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
-          </a>
-        )}
-      </div>
+/* ------------------------------------------------------------------ */
+/*  Page                                                               */
+/* ------------------------------------------------------------------ */
 
-      {group.layout === "media" ? (
-        <PortfolioGrid entries={entries} />
-      ) : group.layout === "stat" ? (
-        <PortfolioStats entries={entries} />
-      ) : group.layout === "quote" ? (
-        <PortfolioQuotes entries={entries} />
-      ) : (
-        <PortfolioNotes entries={entries} />
-      )}
-    </section>
-  );
-}
-
-export default async function PortfolioPage({
-  searchParams,
-}: {
-  searchParams: SP;
-}) {
-  const sp = await searchParams;
-  const section = asPortfolioSection(sp.section);
-
+export default async function PortfolioPage() {
   const [s, data] = await Promise.all([getSettings(), getPortfolio()]);
   const handle = instagramHandle(s.instagram);
   const profileUrl = s.instagram || "https://instagram.com";
 
-  const group = section ? data.sections.find((g) => g.id === section) ?? null : null;
-  // A `?section=` naming a shelf with nothing on it falls back to the whole
-  // page rather than to an empty screen — the shelf is real, it is just empty
-  // today, and an empty screen reads as a broken link.
-  const showingOne = group !== null;
-  const paged = showingOne ? paginate(group.entries, sp.page, PER_PAGE) : null;
+  // Flatten whatever shelves `getPortfolio()` returns — an entry appears on
+  // exactly one of them, so this lists each once and keeps the order the owner
+  // arranged (featured first, then `sortOrder`).
+  const all = data.sections.flatMap((section) => section.entries);
 
-  const nav: PortfolioNavItem[] = [
-    { id: null, label: "All", count: data.total },
-    ...data.sections.map((g) => ({
-      id: g.id,
-      label: g.label,
-      count: g.entries.length,
-    })),
-  ];
+  const social = all.filter((entry) => Boolean(entry.embedUrl));
+  const pages = all.filter((entry) => !entry.embedUrl);
+
+  const groups: ReelGroup[] = (
+    ["shoppable", "studio", "youtube"] as const
+  ).map((id) => ({
+    id,
+    ...SOCIAL_GROUP_META[id],
+    entries: social.filter((entry) => socialGroupOf(entry) === id),
+  }));
+
+  const liveGroups = groups.filter((g) => g.entries.length > 0);
+  const empty = social.length === 0 && pages.length === 0;
 
   return (
     <div className="container-px mx-auto max-w-7xl py-14">
       {/* ---- Who we are ----------------------------------------------
-          The brand statement leads the page, not a shelf: it is the one thing
-          every visitor should read, and it comes from `SiteSettings` so the
-          owner edits it at Admin → Settings rather than here. CLAUDE.md:
-          don't hardcode brand strings.
+          The brand statement leads the page: it is the one thing every visitor
+          should read, and it comes from `SiteSettings` so the owner edits it
+          at Admin → Settings. CLAUDE.md: don't hardcode brand strings.
 
           A `<div>`, not a `<header>`: the store layout's navbar is already the
           page's `banner` landmark, and a second one leaves a screen-reader
           user with two "banner" regions and no way to tell which is the site
-          header. The version this replaces had that bug. */}
+          header. */}
       <div className="text-center">
         <p className="eyebrow">Our work</p>
         <h1 className="mt-2 font-serif text-4xl leading-tight md:text-5xl">
@@ -246,54 +212,82 @@ export default async function PortfolioPage({
           implying one — see the block comment on `fetchInstagramMedia` in
           lib/portfolio.ts. Individual posts *are* mirrored: the poster is
           copied into our own storage and the reel plays on this page.
+
+          Prose behind an (i), per the owner's rule about first impressions.
         */}
         <p className="mt-5 inline-flex items-center gap-1.5 text-xs text-muted-foreground">
           {data.live ? (
             <>Pulled live from Instagram, plus our own picks</>
           ) : (
-            <>Hand-picked by us, and it plays here</>
+            <>Tap any tile — it plays here, not on Instagram</>
           )}
           <InfoTip term={data.live ? "Live feed" : "How this works"}>
             {data.live
               ? "Recent posts come straight from the Instagram Graph API and refresh every few minutes. Anything we've written up ourselves keeps its own description and stays where we put it."
-              : "Every reel and film below plays on this page — we copy the cover image to our own storage when we add it, and the video itself streams from Instagram or YouTube only once you press play. Mirroring the whole account automatically would need an Instagram Graph API token tied to a Business account, which isn't connected."}
+              : "Every reel and film here opens full-screen on this page, and you can keep scrolling through them without going back. We copy the cover image to our own storage when we add a post; the video itself only streams from Instagram or YouTube once you open it. Mirroring the whole account automatically would need an Instagram Graph API token tied to a Business account, which isn't connected."}
           </InfoTip>
         </p>
       </div>
 
-      <PortfolioTabs items={nav} active={section} />
-
-      {data.sections.length === 0 ? (
+      {empty ? (
         <div className="mt-10 rounded-2xl border border-dashed border-border p-10 text-center sm:p-12">
           <p className="font-serif text-xl">Nothing here yet</p>
           <p className="mx-auto mt-2 max-w-sm text-sm text-muted-foreground">
-            Reels, milestones, customer notes and collaborations will show up
-            here as they happen.
+            Reels, milestones and customer notes will show up here as they
+            happen.
           </p>
           <ButtonLink href="/shop" className="mt-6">
             Browse the collection
           </ButtonLink>
         </div>
-      ) : showingOne && paged ? (
-        <>
-          <Shelf group={group} entries={paged.items} more={0} />
-          <Pagination
-            page={paged.page}
-            totalPages={paged.totalPages}
-            // `section` is carried through, `page` is rebuilt — see pagination.tsx.
-            params={{ section: group.id }}
-            basePath="/portfolio"
-          />
-        </>
       ) : (
-        data.sections.map((g) => (
-          <Shelf
-            key={g.id}
-            group={g}
-            entries={g.entries.slice(0, PREVIEW)}
-            more={Math.max(0, g.entries.length - PREVIEW)}
-          />
-        ))
+        <>
+          {/* Two sections is not a tab bar — these are jump links to what is
+              already on the page, so there is still exactly one URL and
+              nothing to hydrate. `role="tablist"` would lie to a screen reader
+              about what pressing them does. */}
+          {social.length > 0 && pages.length > 0 && (
+            <nav
+              aria-label="Jump to a section"
+              className="mt-8 flex flex-wrap justify-center gap-2"
+            >
+              <SectionChip href="#social" label="Social" count={social.length} />
+              <SectionChip href="#pages" label="Pages" count={pages.length} />
+            </nav>
+          )}
+
+          {social.length > 0 && (
+            <section id="social" className="mt-12 scroll-mt-24">
+              <div className="min-w-0">
+                <h2 className="font-serif text-2xl leading-tight sm:text-3xl">
+                  Social
+                </h2>
+                <p className="mt-1 max-w-xl text-sm leading-relaxed text-muted-foreground">
+                  Reels and films. Open one and keep scrolling — you never have
+                  to come back out.
+                </p>
+              </div>
+
+              <PortfolioSocial groups={liveGroups} />
+            </section>
+          )}
+
+          {pages.length > 0 && (
+            <section id="pages" className="mt-14 scroll-mt-24">
+              <div className="min-w-0">
+                <h2 className="font-serif text-2xl leading-tight sm:text-3xl">
+                  Pages
+                </h2>
+                <p className="mt-1 max-w-xl text-sm leading-relaxed text-muted-foreground">
+                  What the label has done, in our words and in our customers&rsquo;
+                  — plus the bulk and custom runs.
+                </p>
+              </div>
+
+              <PortfolioPages entries={pages} />
+            </section>
+          )}
+        </>
       )}
 
       <div className="rule mt-14" />
@@ -311,5 +305,34 @@ export default async function PortfolioPage({
         </div>
       </section>
     </div>
+  );
+}
+
+/**
+ * Squared, uppercase, wide-tracked; colour change only — no lift, no shadow,
+ * per the design system in CLAUDE.md.
+ *
+ * The `!` on the border colour guards against `globals.css`'s
+ * `* { border-color: var(--border) }`, which is inside `@layer base` today but
+ * has escaped that layer twice before. It costs nothing and the failure it
+ * prevents is silent.
+ */
+function SectionChip({
+  href,
+  label,
+  count,
+}: {
+  href: string;
+  label: string;
+  count: number;
+}) {
+  return (
+    <a
+      href={href}
+      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-border px-4 text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground transition-colors hover:border-accent! hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+    >
+      {label}
+      <span className="tabular-nums opacity-70">{count}</span>
+    </a>
   );
 }

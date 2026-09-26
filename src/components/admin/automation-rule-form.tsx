@@ -10,6 +10,16 @@
  * an owner can check what they have built without knowing what a "condition"
  * is.
  *
+ * ## ACTION is now a choice, and the two are not symmetrical
+ *
+ * Email reaches anybody who typed an address. A notification reaches a
+ * *device*, and a device is only linked to a person through a customer
+ * account — so on push, "Someone else" is not offered, the recipient's real
+ * reach is stated as a number before the rule is saved, and the template is
+ * previewed as the banner it will actually become. All three exist because the
+ * alternative is a rule that looks correct on this screen and quietly reaches
+ * nobody, which is the failure mode this whole screen was built to end.
+ *
  * ## Why the whole catalogue arrives as a prop
  *
  * The triggers, their condition fields and their tokens all live in
@@ -28,7 +38,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { CircleAlert, Clock, Mail, Zap } from "lucide-react";
+import { Bell, CircleAlert, Clock, Mail, Smartphone, Zap } from "lucide-react";
 import { Card, Field, Segmented, SwitchRow } from "@/components/admin/form-kit";
 import { DELAY_PRESETS, delaySummary } from "@/components/admin/automation-summary";
 import {
@@ -56,13 +66,49 @@ export type TriggerOptionDTO = {
   tokens: { token: string; describes: string }[];
 };
 
-export type TemplateOptionDTO = { id: string; name: string; subject: string };
+/**
+ * A template, plus **what it turns into on a phone**.
+ *
+ * `pushTitle` / `pushBody` are computed on the server by `pushCopyFrom`, not
+ * here, for the same reason the trigger catalogue arrives as a prop: that
+ * function lives in a `server-only` module. Recomputing it in the browser would
+ * mean two implementations of the extraction, and the preview would eventually
+ * stop matching what actually gets sent — which is the one thing a preview
+ * must never do.
+ */
+export type TemplateOptionDTO = {
+  id: string;
+  name: string;
+  subject: string;
+  /** The banner title this template would produce. */
+  pushTitle: string;
+  /** The banner body. **Empty is a real answer** — see the preview below. */
+  pushBody: string;
+};
+
+export type ChannelOptionDTO = {
+  key: string;
+  label: string;
+  short: string;
+  verb: string;
+  caveat: string;
+};
+
+/** What a push rule could reach *today*. Read once, on the server. */
+export type PushReachDTO = {
+  configured: boolean;
+  totalDevices: number;
+  reachableDevices: number;
+  adminEmail: string;
+  adminDevices: number;
+};
 
 export type RuleInitial = {
   id?: string;
   name: string;
   trigger: string;
   conditions: Record<string, string>;
+  action: string;
   templateId: string;
   recipient: string;
   delayMinutes: number;
@@ -74,10 +120,14 @@ type RecipientMode = "customer" | "admin" | "other";
 export function AutomationRuleForm({
   triggers,
   templates,
+  channels,
+  pushReach,
   initial,
 }: {
   triggers: TriggerOptionDTO[];
   templates: TemplateOptionDTO[];
+  channels: ChannelOptionDTO[];
+  pushReach: PushReachDTO;
   initial?: RuleInitial;
 }) {
   const router = useRouter();
@@ -87,6 +137,14 @@ export function AutomationRuleForm({
   const [trigger, setTrigger] = useState(initial?.trigger ?? triggers[0]?.key ?? "");
   const [conditions, setConditions] = useState<Record<string, string>>(
     initial?.conditions ?? {}
+  );
+  // A stored `action` this build cannot send (the column is an open string)
+  // falls back to the first channel rather than leaving the picker with no
+  // option selected. The save is refused by the schema either way.
+  const [action, setAction] = useState(
+    channels.some((c) => c.key === initial?.action)
+      ? (initial?.action as string)
+      : (channels[0]?.key ?? "email")
   );
   const [templateId, setTemplateId] = useState(initial?.templateId ?? "");
   const [delayMinutes, setDelayMinutes] = useState(initial?.delayMinutes ?? 0);
@@ -115,8 +173,27 @@ export function AutomationRuleForm({
     [triggers, trigger]
   );
 
+  const isPush = action === "push";
+  const channel =
+    channels.find((c) => c.key === action) ?? channels[0] ?? null;
+
   const recipient =
     recipientMode === "other" ? otherEmail.trim() : recipientMode;
+
+  /**
+   * Switching to push drops "Someone else".
+   *
+   * A literal address is not a weaker choice on this channel, it is an
+   * impossible one — there is no device behind an inbox — and the server
+   * refuses it outright. Moving the selection back to the customer is the only
+   * honest thing to do with a control that has just stopped meaning anything;
+   * leaving it selected and disabling Save would make the owner hunt for what
+   * was wrong.
+   */
+  function pickChannel(next: string) {
+    setAction(next);
+    if (next === "push" && recipientMode === "other") setRecipientMode("customer");
+  }
 
   /**
    * Switching trigger drops conditions that the new trigger does not declare.
@@ -166,10 +243,69 @@ export function AutomationRuleForm({
       : (spec?.label ?? "…");
     const delay =
       delayMinutes > 0 ? ` ${delaySummary(delayMinutes).toLowerCase()},` : "";
-    return `When ${when.charAt(0).toLowerCase()}${when.slice(1)},${delay} email ${who}${template ? ` the "${template.name}" template` : ""}.`;
-  }, [spec, conditionSummary, delayMinutes, recipientMode, otherEmail, template]);
+    const verb = channel?.verb ?? "email";
+    const what = template
+      ? isPush
+        ? ` from the "${template.name}" template`
+        : ` the "${template.name}" template`
+      : "";
+    return `When ${when.charAt(0).toLowerCase()}${when.slice(1)},${delay} ${verb} ${who}${what}.`;
+  }, [
+    spec,
+    conditionSummary,
+    delayMinutes,
+    recipientMode,
+    otherEmail,
+    template,
+    channel,
+    isPush,
+  ]);
 
   const missingTemplate = isActive && !templateId;
+
+  /**
+   * Who a rule may address.
+   *
+   * "Someone else" is dropped on push, because a literal address cannot have a
+   * device behind it. The option is removed rather than disabled: a disabled
+   * control invites the owner to work out *why*, and the answer is that the
+   * thing they wanted does not exist on this channel.
+   */
+  const recipientOptions: { value: RecipientMode; label: string }[] = [
+    { value: "customer", label: "The customer" },
+    { value: "admin", label: "You (admin)" },
+    ...(isPush
+      ? []
+      : [{ value: "other" as const, label: "Someone else" }]),
+  ];
+
+  /**
+   * The one number that decides whether a push rule will do anything, said
+   * before it is saved rather than discovered in the queue afterwards.
+   *
+   * `admin` is the sharp case on this store: the notify address is a Gmail
+   * account, and a device is linked to a *customer account*, so unless the
+   * owner signs their phone in with that address the rule is correctly built
+   * and reaches nobody. That is a configuration fact, not an error, so it is
+   * stated here and the save is still allowed.
+   */
+  const pushWarning = useMemo(() => {
+    if (!isPush) return null;
+    if (!pushReach.configured) {
+      return "Push isn't configured on this deployment — the VAPID keys are missing, so every job this rule creates will fail until they're set.";
+    }
+    if (recipientMode === "admin") {
+      return pushReach.adminDevices === 0
+        ? `No device can receive this yet. Notifications reach an account, and no account here uses ${pushReach.adminEmail} — sign in on your phone with that address and turn notifications on, or change the address in Settings → Store.`
+        : `${pushReach.adminDevices} of your devices would get this.`;
+    }
+    if (pushReach.reachableDevices === 0) {
+      return pushReach.totalDevices === 0
+        ? "No customer has turned notifications on yet, so this rule will be skipped every time until somebody does."
+        : `${pushReach.totalDevices} device${pushReach.totalDevices === 1 ? " is" : "s are"} subscribed, but none is signed in to an account. A notification needs an account to reach a device, so this rule can't reach them.`;
+    }
+    return `${pushReach.reachableDevices} customer device${pushReach.reachableDevices === 1 ? "" : "s"} could receive this. Anyone who hasn't installed the store and allowed notifications is skipped with a reason, not failed.`;
+  }, [isPush, pushReach, recipientMode]);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -179,7 +315,7 @@ export function AutomationRuleForm({
     const fd = new FormData();
     fd.append("name", name);
     fd.append("trigger", trigger);
-    fd.append("action", "email");
+    fd.append("action", action);
     fd.append("templateId", templateId);
     fd.append("recipient", recipient);
     fd.append("delayMinutes", String(delayMinutes));
@@ -334,66 +470,131 @@ export function AutomationRuleForm({
       {/* ---- What it does ---- */}
       <Card
         title="Then"
-        tip="Email is the only action this build can carry out. The column behind it is deliberately open, so another channel can be added later without a migration."
+        tip="The two channels run on the same engine — same trigger, same conditions, same delay, same protection against sending twice. Only the last step differs."
         aside={
           <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Mail className="h-3.5 w-3.5" />
-            Send an email
+            {isPush ? (
+              <Bell className="h-3.5 w-3.5" />
+            ) : (
+              <Mail className="h-3.5 w-3.5" />
+            )}
+            {channel?.label ?? "Send an email"}
           </span>
         }
       >
-        <Field
-          label="Template"
-          required
-          hint={
-            <>
-              Write and edit templates in{" "}
-              <Link
-                href="/admin/automation/templates"
-                className="underline underline-offset-2 hover:text-foreground"
-              >
-                Email templates
-              </Link>
-              .
-            </>
-          }
-        >
-          {(id) => (
-            <select
-              id={id}
-              value={templateId}
-              onChange={(e) => setTemplateId(e.target.value)}
-              className="input"
-            >
-              <option value="">Choose a template…</option>
-              {templates.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
-          )}
+        <Field label="Channel" required>
+          <Segmented
+            ariaLabel="Channel"
+            value={action}
+            onChange={pickChannel}
+            options={channels.map((c) => ({ value: c.key, label: c.short }))}
+          />
         </Field>
-        {template && (
-          <p className="mt-2 break-words text-sm text-muted-foreground">
-            Subject: <span className="text-foreground">{template.subject}</span>
-          </p>
+        {channel && (
+          <p className="mt-2 text-sm text-muted-foreground">{channel.caveat}</p>
         )}
 
         <div className="mt-4 border-t border-border pt-4">
-          <Field label="Send it to">
+          <Field
+            label="Template"
+            required
+            hint={
+              <>
+                Write and edit templates in{" "}
+                <Link
+                  href="/admin/automation/templates"
+                  className="underline underline-offset-2 hover:text-foreground"
+                >
+                  Email templates
+                </Link>
+                .{" "}
+                {isPush &&
+                  "A notification is built from the same one: the subject becomes the title, and the opening paragraph becomes the message."}
+              </>
+            }
+          >
+            {(id) => (
+              <select
+                id={id}
+                value={templateId}
+                onChange={(e) => setTemplateId(e.target.value)}
+                className="input"
+              >
+                <option value="">Choose a template…</option>
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
+          {template && !isPush && (
+            <p className="mt-2 break-words text-sm text-muted-foreground">
+              Subject: <span className="text-foreground">{template.subject}</span>
+            </p>
+          )}
+        </div>
+
+        {/*
+          What actually lands on the phone.
+
+          A push is two short lines and a link, and an email template is not
+          written to be either of those — it opens with "Hi Riya," and carries
+          its detail below. So this is not a nicety: it is the only place an
+          owner can see that a template they picked produces a banner with an
+          empty body, before a customer does.
+        */}
+        {isPush && template && (
+          <div className="mt-4 border-t border-border pt-4">
+            <p className="eyebrow flex items-center gap-1.5 text-muted-foreground">
+              <Smartphone className="h-3.5 w-3.5" />
+              On the phone
+            </p>
+            <div className="mt-2 min-w-0 rounded-xl border border-border bg-muted/40 p-3">
+              <p className="break-words text-sm font-medium leading-snug">
+                {template.pushTitle || "…"}
+              </p>
+              {template.pushBody ? (
+                <p className="mt-1 break-words text-sm leading-snug text-muted-foreground">
+                  {template.pushBody}
+                </p>
+              ) : (
+                <p className="mt-1 text-sm leading-snug text-danger">
+                  No message — this template&apos;s opening paragraph is only a
+                  greeting or a link, so the notification would be a title on its
+                  own. Edit the template, or pick another.
+                </p>
+              )}
+            </div>
+            {/*
+              This used to say "opens the order", written when orders were the
+              only thing a rule could notify about. A chat rule made it plainly
+              wrong on screen — and the honest wording is also the more useful
+              one, because "whatever this is about" is exactly the rule: the
+              collapse key is the subject, so two updates about one order (or
+              one conversation) replace each other and two different subjects
+              do not.
+            */}
+            <p className="mt-2 text-xs text-muted-foreground">
+              Shown with sample values. Tapping it opens whatever this rule is
+              about — the order, or the conversation — on the screen the person
+              being notified can act on. A later update about the same thing
+              replaces this one rather than stacking beneath it.
+            </p>
+          </div>
+        )}
+
+        <div className="mt-4 border-t border-border pt-4">
+          <Field label={isPush ? "Notify" : "Send it to"}>
             <Segmented
               ariaLabel="Recipient"
               value={recipientMode}
               onChange={(v) => setRecipientMode(v)}
-              options={[
-                { value: "customer", label: "The customer" },
-                { value: "admin", label: "You (admin)" },
-                { value: "other", label: "Someone else" },
-              ]}
+              options={recipientOptions}
             />
           </Field>
-          {recipientMode === "other" && (
+          {recipientMode === "other" && !isPush && (
             <div className="mt-3">
               <Field label="Email address">
                 {(id) => (
@@ -409,10 +610,21 @@ export function AutomationRuleForm({
               </Field>
             </div>
           )}
-          {recipientMode === "customer" && spec?.key === "cart.abandoned" && (
+          {pushWarning && (
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+              {pushWarning}
+            </p>
+          )}
+          {!isPush && recipientMode === "customer" && spec?.key === "cart.abandoned" && (
             <p className="mt-2 text-xs text-muted-foreground">
               A guest cart lead often has no email on it. Those jobs are skipped
               with a reason rather than failed.
+            </p>
+          )}
+          {isPush && spec?.key === "cart.abandoned" && (
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+              A cart lead has no account behind it, so this only reaches
+              somebody who already has an account on the same email address.
             </p>
           )}
         </div>
@@ -489,7 +701,7 @@ export function AutomationRuleForm({
           <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
           <span>
             {error ??
-              "Choose an email template, or switch the rule off before saving."}
+              "Choose a template, or switch the rule off before saving."}
           </span>
         </p>
       )}

@@ -24,7 +24,7 @@
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
-import { getAdminSession } from "@/lib/auth";
+import { requireAdminWrite } from "@/lib/auth";
 import {
   IMPLEMENTED_ACTIONS,
   TRIGGER_KEYS,
@@ -34,11 +34,16 @@ import {
   triggerSpec,
   type DrainReport,
 } from "@/lib/automation";
+import { isPushRecipient } from "@/lib/push-dispatch";
 
-async function requireAdmin() {
-  const session = await getAdminSession();
-  if (!session) throw new Error("Unauthorized");
-  return session;
+/**
+ * Identity **and** permission for every write in this module, routed through
+ * the one write gate in `lib/auth.ts`. See the long note there: it is also
+ * where a temporary admin's activity is recorded, so a new action that calls
+ * this is gated and logged without its author doing anything.
+ */
+async function requireAdmin(what?: string, opts?: { quiet?: boolean }) {
+  return requireAdminWrite(what, opts);
 }
 
 export type AutomationActionResult = { success: boolean; error?: string };
@@ -95,10 +100,9 @@ const ruleInput = z
       .refine(isTriggerKey, { message: "Pick what sets this rule off." }),
     action: z
       .string()
-      .refine(
-        (v) => (IMPLEMENTED_ACTIONS as readonly string[]).includes(v),
-        { message: "Only email actions can be saved in this build." }
-      ),
+      .refine((v) => (IMPLEMENTED_ACTIONS as readonly string[]).includes(v), {
+        message: "That channel isn't something this build can send.",
+      }),
     // "" from the select means "no template", which is only valid while the
     // rule is switched off — enforced in the superRefine below.
     templateId: z.string().trim(),
@@ -115,27 +119,48 @@ const ruleInput = z
     isActive: z.boolean(),
   })
   .superRefine((v, ctx) => {
-    // A literal recipient has to look like an address, or the job only fails
-    // at send time — hours later, on a screen nobody is watching.
-    if (
+    /**
+     * **A notification goes to a device, and a device belongs to an account.**
+     *
+     * So the two named recipients are the only ones a push rule can carry:
+     * `customer` resolves through the order's account (or the account holding
+     * its email), and `admin` through `adminNotifyEmail`. A literal address is
+     * refused here rather than at send time, because the alternative is a rule
+     * that looks configured, sits in the list looking healthy, and cancels
+     * every job it ever creates. The editor hides the option; this is what
+     * makes hiding it a rule — a server action is callable by id from
+     * anywhere, so a hidden control is not a constraint.
+     */
+    if (v.action === "push" && !isPushRecipient(v.recipient)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["recipient"],
+        message:
+          "A notification can only go to the customer or to you — an email address has no device behind it.",
+      });
+    } else if (
+      v.action !== "push" &&
       v.recipient !== "customer" &&
       v.recipient !== "admin" &&
       !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.recipient)
     ) {
+      // A literal recipient has to look like an address, or the job only fails
+      // at send time — hours later, on a screen nobody is watching.
       ctx.addIssue({
         code: "custom",
         path: ["recipient"],
         message: "Enter a valid email address, or pick the customer or yourself.",
       });
     }
-    // An active email rule with no template sends nothing and reports a failed
-    // job for every order. Refuse it up front; allow it while paused so a
+    // An active rule with no template sends nothing and reports a failed job
+    // for every order — on either channel, since push takes its title from the
+    // template's subject line. Refuse it up front; allow it while paused so a
     // half-built rule can be saved.
-    if (v.isActive && v.action === "email" && !v.templateId) {
+    if (v.isActive && !v.templateId) {
       ctx.addIssue({
         code: "custom",
         path: ["templateId"],
-        message: "Choose an email template, or save the rule switched off.",
+        message: "Choose a template, or save the rule switched off.",
       });
     }
   });
@@ -193,7 +218,7 @@ export async function createAutomationRule(
   formData: FormData
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("createAutomationRule");
     const parsed = ruleInput.parse(readRule(formData));
     const conditions = readConditionsFrom(formData, parsed.trigger);
     await prisma.automationRule.create({ data: ruleRow(parsed, conditions) });
@@ -209,7 +234,7 @@ export async function updateAutomationRule(
   formData: FormData
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("updateAutomationRule");
     const parsed = ruleInput.parse(readRule(formData));
     const conditions = readConditionsFrom(formData, parsed.trigger);
     await prisma.automationRule.update({
@@ -232,7 +257,7 @@ export async function setAutomationRuleActive(
   isActive: boolean
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("setAutomationRuleActive");
     await prisma.automationRule.update({ where: { id }, data: { isActive } });
     revalidateAutomation();
     return { success: true };
@@ -251,7 +276,7 @@ export async function deleteAutomationRule(
   id: string
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("deleteAutomationRule");
     await prisma.automationJob.updateMany({
       where: { ruleId: id, status: "pending" },
       data: { status: "cancelled", error: "Cancelled — the rule was deleted." },
@@ -323,7 +348,7 @@ export async function createEmailTemplate(
   formData: FormData
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("createEmailTemplate");
     const parsed = templateInput.parse(readTemplate(formData));
     await prisma.emailTemplate.create({
       data: { ...templateRow(parsed), key: keyFrom(parsed.name), isSystem: false },
@@ -341,7 +366,7 @@ export async function updateEmailTemplate(
   formData: FormData
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("updateEmailTemplate");
     const parsed = templateInput.parse(readTemplate(formData));
     await prisma.emailTemplate.update({ where: { id }, data: templateRow(parsed) });
     revalidateAutomation();
@@ -367,7 +392,7 @@ export async function deleteEmailTemplate(
   id: string
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("deleteEmailTemplate");
     const template = await prisma.emailTemplate.findUnique({
       where: { id },
       include: { rules: { select: { name: true } } },
@@ -412,7 +437,7 @@ export async function runDueAutomationJobs(): Promise<
   AutomationActionResult & { report?: DrainReport }
 > {
   try {
-    await requireAdmin();
+    await requireAdmin("runDueAutomationJobs");
     const report = await drainDueJobs();
     revalidateAutomation();
     return { success: true, report };
@@ -426,7 +451,7 @@ export async function cancelAutomationJob(
   id: string
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("cancelAutomationJob");
     // Scoped to `pending` so this can never rewrite a job that already sent.
     const res = await prisma.automationJob.updateMany({
       where: { id, status: "pending" },
@@ -447,7 +472,7 @@ export async function retryAutomationJob(
   id: string
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("retryAutomationJob");
     const res = await prisma.automationJob.updateMany({
       where: { id, status: { in: ["failed", "cancelled"] } },
       data: { status: "pending", runAt: new Date(), error: null, sentAt: null },
@@ -487,7 +512,7 @@ export async function restoreSystemAutomation(): Promise<
   AutomationActionResult & { summary?: string }
 > {
   try {
-    await requireAdmin();
+    await requireAdmin("restoreSystemAutomation");
     const report = await syncSystemAutomation();
     revalidateAutomation();
 

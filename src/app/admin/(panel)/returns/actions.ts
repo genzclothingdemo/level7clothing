@@ -2,12 +2,11 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
-import { getAdminSession } from "@/lib/auth";
+import { requireAdminWrite } from "@/lib/auth";
 import { isReturnStatus, RETURN_STATUS_LABEL } from "@/lib/returns";
 
 export async function setReturnStatus(id: string, status: string) {
-  const admin = await getAdminSession();
-  if (!admin) throw new Error("Unauthorized");
+  const admin = await requireAdminWrite("setReturnStatus");
   // Validated against the single RETURN_STATUSES vocabulary rather than a local
   // copy, so the dropdown, the storefront badge and this action can't drift.
   if (!isReturnStatus(status)) {

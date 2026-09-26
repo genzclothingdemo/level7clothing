@@ -9,6 +9,13 @@
  * way to tell whether the rule never matched, the job never drained, or Resend
  * refused it. Every one of those reads differently here.
  *
+ * **A `sent` row can carry a line of text too.** The `error` column is where a
+ * push job records what it actually did — "Delivered to 2 devices · 1 expired
+ * subscription removed" — because a send to three devices where one is dead is
+ * a success, and a count is the only way to tell that apart from a rule that
+ * reached nobody. The pill above it still reads Sent; the line underneath says
+ * how far it got.
+ *
  * "Run due jobs now" exists because the cron runs **once a day** (see
  * `vercel.json`), which is coarse for a 30-minute delay and far too slow for
  * "did that work?". Pressing it is safe at any time: it calls the same

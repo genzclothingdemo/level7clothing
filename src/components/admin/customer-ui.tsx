@@ -24,6 +24,7 @@ import {
 import { Badge } from "@/components/admin/order-ui";
 import { InfoTip } from "@/components/store/info-tip";
 import { cn } from "@/lib/utils";
+import { formatPhone } from "@/lib/phone";
 import {
   CUSTOMER_KIND_HELP,
   CUSTOMER_STATUS_HELP,
@@ -191,8 +192,10 @@ export function MergeTip({
           <b>{linkedBy.join(", ")}</b>.
         </>
       )}{" "}
-      Matching is on lowercased email first and phone number second. Two
-      registered accounts are never merged, even when they share a number.
+      Matching is on the mobile number first, then a lowercased email — but an
+      email shared by two accounts links nothing, because an inbox two people
+      use cannot say which of them a guest order belongs to. Two registered
+      accounts are never merged, whatever they share.
     </InfoTip>
   );
 }
@@ -307,10 +310,21 @@ export function SignalIcons({
 export function ContactActions({
   email,
   phone,
+  verification,
   className,
 }: {
   email?: string | null;
   phone?: string | null;
+  /**
+   * The account's confirmation state, or null for a guest.
+   *
+   * It rides in the `title` rather than adding a fourth mark to a row of three
+   * 32px buttons: this column is for *reaching* somebody, and whether their
+   * address is confirmed belongs on the detail page beside the address itself.
+   * Here it is one more sentence on a tooltip somebody is already reading to
+   * see the number.
+   */
+  verification?: { email: boolean; phone: boolean } | null;
   className?: string;
 }) {
   if (!email && !phone) {
@@ -327,29 +341,44 @@ export function ContactActions({
   const cls =
     "inline-grid h-8 w-8 place-items-center rounded-lg border border-border text-muted-foreground transition-colors hover:border-accent/40 hover:bg-accent/5 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
+  const mark = (ok: boolean | undefined) =>
+    ok === undefined ? "" : ok ? " · confirmed" : " · not confirmed";
+
   return (
+    // The number comes first: it is the identity on this store, and the column
+    // should read in the same order as the detail page it links to.
     <span className={cn("inline-flex items-center gap-1", className)}>
-      {email && (
-        <a href={`mailto:${email}`} title={email} aria-label={`Email ${email}`} className={cls}>
-          <Mail className="h-3.5 w-3.5" aria-hidden="true" />
-        </a>
-      )}
       {phone && (
         <>
-          <a href={`tel:${phone}`} title={phone} aria-label={`Call ${phone}`} className={cls}>
+          <a
+            href={`tel:${phone}`}
+            title={`${formatPhone(phone)}${mark(verification?.phone)}`}
+            aria-label={`Call ${phone}`}
+            className={cls}
+          >
             <Phone className="h-3.5 w-3.5" aria-hidden="true" />
           </a>
           <a
             href={`https://wa.me/${phone.replace(/\D/g, "")}`}
             target="_blank"
             rel="noreferrer"
-            title={`WhatsApp ${phone}`}
+            title={`WhatsApp ${formatPhone(phone)}`}
             aria-label={`WhatsApp ${phone}`}
             className={cls}
           >
             <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
           </a>
         </>
+      )}
+      {email && (
+        <a
+          href={`mailto:${email}`}
+          title={`${email}${mark(verification?.email)}`}
+          aria-label={`Email ${email}`}
+          className={cls}
+        >
+          <Mail className="h-3.5 w-3.5" aria-hidden="true" />
+        </a>
       )}
     </span>
   );

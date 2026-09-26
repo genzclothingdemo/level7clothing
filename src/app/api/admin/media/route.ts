@@ -110,7 +110,7 @@ export async function GET(req: Request) {
      * "used by nothing", was deleted without a second prompt, and left a
      * broken tile on a public page.
      *
-     * All five run together: they are independent, and the usage map is only
+     * All six run together: they are independent, and the usage map is only
      * built for the URLs on the current page, so each is a small bounded read.
      *
      * `Product.images` is queried as well as `ProductImage` because the string
@@ -132,8 +132,12 @@ export async function GET(req: Request) {
           select: { id: true, name: true, images: true },
         }),
         prisma.portfolioItem.findMany({
-          where: { imageUrl: { in: urls } },
-          select: { id: true, title: true, imageUrl: true },
+          // Two columns on the same row store media URLs: `imageUrl` is the
+          // cover and `images` (added 2026-09-26) is the page's extra photos.
+          where: {
+            OR: [{ imageUrl: { in: urls } }, { images: { hasSome: urls } }],
+          },
+          select: { id: true, title: true, imageUrl: true, images: true },
         }),
         prisma.subcategory.findMany({
           where: { images: { hasSome: urls } },
@@ -168,7 +172,25 @@ export async function GET(req: Request) {
     }
 
     for (const item of portfolio) {
-      if (item.imageUrl) add(item.imageUrl, { kind: "portfolio", id: item.id, name: item.title });
+      // The `onPage` test is not belt-and-braces here, it is load-bearing:
+      // the query now matches on `images` OR `imageUrl`, so a row can come
+      // back because of an extra photo while its cover is some other file
+      // that is not on this page at all. Without the check that cover would
+      // be added to a usage map it does not belong to.
+      if (item.imageUrl && onPage.has(item.imageUrl)) {
+        add(item.imageUrl, { kind: "portfolio", id: item.id, name: item.title });
+      }
+
+      // A photo used *only* as an extra photo on a portfolio page read as
+      // "used by nothing" and was deleted with no second prompt — the exact
+      // failure the block above was written to stop, reintroduced by a new
+      // column rather than by a new owner. Add a clause here whenever a
+      // column starts storing a media URL.
+      for (const url of item.images) {
+        if (!onPage.has(url)) continue;
+        if (usage[url]?.some((u) => u.kind === "portfolio" && u.id === item.id)) continue;
+        add(url, { kind: "portfolio", id: item.id, name: item.title, slot: "photo" });
+      }
     }
 
     for (const s of subcategories) {

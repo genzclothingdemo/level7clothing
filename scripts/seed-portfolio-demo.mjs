@@ -17,6 +17,26 @@
  * and all four card shapes (`media`, `stat`, `quote`, `note`), because each
  * shape has its own way of falling over.
  *
+ * Since a portfolio row can now also **be a page**, the set also covers the
+ * four columns that make one — `bodyHtml`, `images`, `ctaLabel`, `ctaUrl` —
+ * in two shapes that fail differently: a bulk-order write-up with a gallery
+ * and a button (row 10), and a milestone with a body and a button and no
+ * photos at all (row 10b).
+ *
+ * And row 3 carries `sourceProductId`, which is what the harvester writes and
+ * what makes `lib/portfolio.ts` report `source: "product-video"`. `main()`
+ * puts the matching link on that product so the row is genuinely harvested
+ * rather than merely labelled — see the note on `HARVEST_SOURCE`.
+ *
+ * ── The bodies are written straight through Prisma, and that is the point ────
+ *
+ * Nothing here goes through `actions/portfolio.ts`, so no sanitiser runs on
+ * the way in — exactly like every row written before the sanitiser existed.
+ * `lib/portfolio.ts` sanitises again on the way **out**, which is the only
+ * reason the storefront may render a body with `dangerouslySetInnerHTML`.
+ * Row 10's body carries a `<section class="lede">` that must not survive to
+ * the page; if it ever does, that second pass has been removed.
+ *
  * Placement is by tag, not by column — `section:<id>` is explicit, and a row
  * without one is placed from its plain tags (see `sectionOf` in
  * `lib/portfolio.ts`). A tag containing a colon is internal and never rendered,
@@ -154,7 +174,17 @@ async function build() {
 
     /* 3. Our own reel, no explicit section tag and no section keyword in its
           tags — it lands on Reels & films purely because it is playable,
-          which is the fallback rule in `sectionOf`. */
+          which is the fallback rule in `sectionOf`.
+
+          **This is also the harvested row.** `sourceProductId` is what
+          `lib/portfolio-harvest.ts` writes when it pulls a reel out of a
+          product's `videos`, and it is what makes `lib/portfolio.ts` report
+          `source: "product-video"` — the marker the storefront's catalogue
+          shelf matches on. `main()` below puts the matching link on that
+          product, so this is a *coherent* harvested row rather than a
+          decorative one: run the harvest panel against this data and it says
+          "already in the portfolio" instead of offering a duplicate, and the
+          orphan list stays empty. `--clean` takes the link off again. */
     {
       title: teaser?.title ?? "#level7coming",
       description: "The drop teaser.",
@@ -163,6 +193,7 @@ async function build() {
       imageUrl: PHOTO.planet,
       embedHtml: igEmbed("DBvh3MeyZ7x"),
       productId: PRODUCT.planet,
+      sourceProductId: PRODUCT.planet,
       tags: [DEMO_TAG, "teaser"],
       sortOrder: 30,
       isFeatured: false,
@@ -287,9 +318,25 @@ async function build() {
       isActive: true,
     },
 
-    /* 10. Bulk work: a long title and a lot of tags. Layout stress at 320px —
-           the title must wrap rather than push the page sideways, and only the
-           first two chips are shown. */
+    /* 10. Bulk work, and the **full admin-authored page**: a body, extra
+           photos and a call to action on top of the tile's own fields. This is
+           the row that exercises `bodyHtml` + `images` + `ctaLabel`/`ctaUrl`
+           together, which is what an achievement or bulk-order write-up
+           actually needs.
+
+           Also a layout stress at 320px — a long title and seven tags: the
+           title must wrap rather than push the page sideways, and only the
+           first two chips are shown.
+
+           **Note the `<section class="lede">` in the body.** It is there on
+           purpose. This script writes through Prisma and never touches
+           `actions/portfolio.ts`, so nothing sanitises this markup on the way
+           in — exactly like every row written before the sanitiser existed.
+           `lib/portfolio.ts` runs `sanitisePortfolioBody` again on the way
+           **out**, so what reaches the page is the paragraph with the wrapper
+           and its class removed. That second pass is the only reason the
+           storefront may render this with `dangerouslySetInnerHTML`, and this
+           row is here to keep proving it. */
     {
       title:
         "Bulk order — 250 pieces for a college fest, printed, packed and delivered inside eleven days",
@@ -300,9 +347,56 @@ async function build() {
       imageUrl: PHOTO.reserve,
       embedHtml: null,
       productId: PRODUCT.reserve,
+      bodyHtml: [
+        "<h2>What a 250-piece run actually looks like</h2>",
+        '<section class="lede"><p>The brief arrived on a Tuesday with a logo, a',
+        "deadline and no size breakdown. We quoted the same 240 GSM cotton we",
+        "put on the shelf, because a fest tee that goes shapeless is a fest tee",
+        "nobody wears twice.</p></section>",
+        "<ul><li>Two rounds of digital proofing, both inside 24 hours</li>",
+        "<li>Screen print, two passes, cured and checked by hand</li>",
+        "<li>Packed in size-sorted bundles so nobody sorted them at 2am</li></ul>",
+        "<p>Eleven days, start to finish. We keep a rail of every run we have",
+        "done — this one is still on it.</p>",
+      ].join(" "),
+      images: [PHOTO.location, PHOTO.walk, PHOTO.field],
+      ctaLabel: "Get a quote",
+      ctaUrl: "/contact",
       tags: [DEMO_TAG, "bulk order", "corporate", "campus", "printing", "wholesale", "b2b"],
       sortOrder: 100,
       isFeatured: true,
+      isActive: true,
+    },
+
+    /* 10b. A milestone that is **also a page**, with a button but no extra
+            photos — so the page layout is exercised without a gallery, and the
+            `stat` card shape is exercised with `hasBody` true. Proves the two
+            are independent: a shelf's card shape comes from its section, not
+            from whether the piece has a body. */
+    {
+      title: "3 years of the same 240 GSM cotton",
+      description:
+        "The fabric has not been quietly downgraded, and here is what that has cost and bought us.",
+      kind: "link",
+      url: null,
+      imageUrl: PHOTO.portrait,
+      embedHtml: null,
+      productId: null,
+      bodyHtml: [
+        "<h2>Why we never switched mills</h2>",
+        "<p>Every year a cheaper roll turns up. It is always 20&ndash;30 GSM",
+        "lighter and always described as &ldquo;the same hand&rdquo;. It is not",
+        "the same hand after three washes, which is the only test that counts.</p>",
+        "<blockquote>The tee you keep is cheaper than the two you replace.</blockquote>",
+        "<p>So the margin is thinner and the tee outlives the season. That is",
+        "the whole trade, and we would make it again.</p>",
+      ].join(" "),
+      images: [],
+      ctaLabel: "See what we make it into",
+      ctaUrl: "/shop",
+      tags: [DEMO_TAG, "milestone"],
+      sortOrder: 105,
+      isFeatured: false,
       isActive: true,
     },
 
@@ -368,14 +462,73 @@ const demoWhere = {
   OR: [{ tags: { has: DEMO_TAG } }, { tags: { has: LEGACY_TAG } }],
 };
 
+/**
+ * Every column this script writes, at its "not set" value.
+ *
+ * Spread under each row before it is written, so a field a row does not
+ * mention is written as empty rather than left alone. Without this, a re-run
+ * after a row *stopped* carrying a body would silently keep the old body —
+ * Prisma reads an absent key in an `update` as "leave this column alone", and
+ * the demo would stop converging on what this file says. Same discipline as
+ * `toRow()` in `actions/portfolio.ts`: one column list, no second place to
+ * forget a field.
+ */
+const BLANK = {
+  description: null,
+  url: null,
+  imageUrl: null,
+  embedHtml: null,
+  productId: null,
+  bodyHtml: null,
+  images: [],
+  ctaLabel: null,
+  ctaUrl: null,
+  sourceProductId: null,
+  isFeatured: false,
+  isActive: true,
+};
+
+/**
+ * The demo's one harvested row needs the link to actually be on the product,
+ * or the harvest panel reports it as an orphan ("the link was removed from
+ * …") and the demo contradicts itself. So the seeder owns both halves.
+ *
+ * This is the only place this script touches a product, it writes one column,
+ * and `--clean` empties it again.
+ */
+const HARVEST_SOURCE = {
+  productId: PRODUCT.planet,
+  videos: [{ title: "Instagram", url: IG.teaser }],
+};
+
+async function setProductVideos(videos) {
+  try {
+    await prisma.product.update({
+      where: { id: HARVEST_SOURCE.productId },
+      data: { videos },
+    });
+    console.log(
+      videos.length
+        ? `linked the teaser reel on the demo's source product`
+        : `cleared the demo's video link from its source product`
+    );
+  } catch {
+    // A missing product must not fail the seed — the portfolio rows are the
+    // point and a dangling `sourceProductId` degrades to "a product that has
+    // since gone", which is itself one of the cases worth demonstrating.
+    console.log("(source product not found — skipping the video link)");
+  }
+}
+
 async function main() {
   if (process.argv.includes("--clean")) {
     const { count } = await prisma.portfolioItem.deleteMany({ where: demoWhere });
+    await setProductVideos([]);
     console.log(`removed ${count} demo portfolio rows`);
     return;
   }
 
-  const rows = await build();
+  const rows = (await build()).map((r) => ({ ...BLANK, ...r }));
   const titles = new Set(rows.map((r) => r.title));
 
   let created = 0;
@@ -409,6 +562,8 @@ async function main() {
     });
     for (const o of orphans) console.log(`removed stale demo row: "${o.title}"`);
   }
+
+  await setProductVideos(HARVEST_SOURCE.videos);
 
   const total = await prisma.portfolioItem.count();
   console.log(

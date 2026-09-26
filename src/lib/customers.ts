@@ -11,27 +11,56 @@
  *
  * ── The identity rule ────────────────────────────────────────────────────────
  *
- * Every row contributes contact **tokens**:
+ * Every row contributes contact **tokens**, and an account contributes one of
+ * its own:
  *
  *   `e:<lowercased email>`   `p:<digits, normalised to E.164-ish>`
+ *   `a:<userId>`  — the account itself, and the only token that is unique
  *
  * 1. Tokens that appear **together on one row** are joined — that is what makes
  *    a guest order and a later account with the same email one person, and what
  *    catches an email-less lead whose phone matches an order.
- * 2. A row carrying a `userId` is joined to that **account's** tokens, so an
+ * 2. A row carrying a `userId` is joined to that **account's** token, so an
  *    order placed from a signed-in session belongs to the account even when the
  *    shipping email differs from the login email. The account is the strongest
  *    identity there is.
  * 3. **Two registered accounts are never merged**, even when they share a phone
- *    (families do share one). The phone link is dropped rather than the two
- *    people being welded together; the account that claimed the number first —
- *    by `createdAt` — keeps it.
+ *    (families do share one) — and, since 2026-09-26, even when they share an
+ *    email. The link is dropped rather than the two people being welded
+ *    together; the account that claimed the contact first — by `createdAt` —
+ *    keeps it.
  * 4. The group's **canonical key** is its account email, else its lowest email,
- *    else its lowest phone. `id` is that key, base64url-encoded, because a URL
- *    is the only handle a table-less record can have.
+ *    else its lowest phone, else the account id. `id` is that key,
+ *    base64url-encoded, because a URL is the only handle a table-less record
+ *    can have.
  * 5. Lookup by `id` matches **any** token in the group, not just the canonical
  *    key — so a bookmarked link to a phone-only customer still resolves after
  *    they register and the key becomes their email.
+ *
+ * ── Why an account is its own token, and not its email ───────────────────────
+ *
+ * It used to be its email: the account's node in the graph *was* `e:<email>`,
+ * and that node was marked as claimed so a second account could not be dragged
+ * into it. That worked for exactly as long as `User.email` was unique.
+ *
+ * On 2026-09-26 it stopped being unique — two people may now share one inbox —
+ * and the old rule broke in the worst possible way. Two accounts on one address
+ * produced **one** `e:` token, so they were not merely linked, they were the
+ * same node from the first line of the pass: rule 3 never even got a chance to
+ * refuse, because there was nothing to refuse. Two different people, one
+ * record, one lifetime-spend figure, one set of addresses.
+ *
+ * So the account's identity is now `a:<userId>`, which cannot collide. Its
+ * phone joins it as before. Its **email joins it only when no other account
+ * holds that address**; when the address is shared it is left out of both
+ * groups, because an address two people use cannot say which of them a guest
+ * order belongs to. Contact rows still reach the right person by their phone or
+ * by their `userId`, which is the strong link anyway.
+ *
+ * A guest row carrying *only* a shared address is a genuine ambiguity. It joins
+ * whichever account's group claimed that address first — the same
+ * first-by-`createdAt` tie-break rule 3 already uses for a shared phone — and
+ * never both.
  *
  * Rows with neither a usable email nor a usable phone (an anonymous cart lead,
  * a guest chat that never left a name) identify nobody and are counted, not
@@ -107,9 +136,9 @@ export const CUSTOMER_KIND_LABEL: Record<CustomerKind, string> = {
 
 export const CUSTOMER_KIND_HELP: Record<CustomerKind, string> = {
   customer:
-    "Has an account on the store. Anything they did before signing up — guest orders, carts, chats — is folded into the same record, matched on email then phone.",
+    "Has an account on the store. Anything they did before signing up — guest orders, carts, chats — is folded into the same record, matched on the mobile number first and then on an email, unless that email is shared with another account.",
   guest:
-    "No account. We know them only from a contact detail they left: the mini sign-up at add-to-cart, a guest checkout, or a chat. The moment they sign up with the same email or phone they move to Customers and take their history with them.",
+    "No account. We know them only from a contact detail they left: the mini sign-up at add-to-cart, a guest checkout, or a chat. The moment they sign up with the same mobile number or email they move to Customers and take their history with them.",
 };
 
 /** The one partition. Every count and every list on the screen uses it. */
@@ -188,8 +217,13 @@ export function isCustomerSort(v: string): v is CustomerSort {
 export type CustomerAccount = {
   id: string;
   name: string;
+  /** Contact information. **Not** unique — two accounts may share an inbox. */
   email: string;
+  /** The identity: unique, canonical E.164. Null only on pre-2026-09-26 rows. */
   phone: string | null;
+  /** When each channel was confirmed with a one-time code. Null = never. */
+  emailVerifiedAt: Date | null;
+  phoneVerifiedAt: Date | null;
   address: string | null;
   city: string | null;
   state: string | null;
@@ -354,6 +388,18 @@ export type CustomerRecord = {
    */
   kind: CustomerKind;
   status: CustomerStatus;
+  /**
+   * Whether the account's two channels have been confirmed with a one-time
+   * code. **Null for a guest**, which is not the same as "not confirmed":
+   * there is no account, so there is nothing that could have been confirmed,
+   * and a red cross against a guest would be a criticism of a record that
+   * cannot be fixed.
+   *
+   * Read off the oldest account, the same one every other primary contact field
+   * comes from, so the marks and the contacts they sit beside always describe
+   * the same row.
+   */
+  verification: { email: boolean; phone: boolean } | null;
   accounts: CustomerAccount[];
   orders: CustomerOrder[];
   leads: CustomerLead[];
@@ -404,6 +450,15 @@ export type CustomerDirectory = {
 
 const EMAIL = "e:";
 const PHONE = "p:";
+/**
+ * An account's own node. Unique by construction, which is the whole point: it
+ * is the one token that cannot be shared, so it is what keeps two people on one
+ * email address apart. Never encoded into a URL unless nothing else can
+ * identify the record.
+ */
+const ACCOUNT = "a:";
+
+const accountToken = (userId: string) => ACCOUNT + userId;
 
 function emailToken(raw: string | null | undefined): string | null {
   const v = (raw ?? "").trim().toLowerCase();
@@ -523,7 +578,9 @@ export function decodeCustomerId(id: string): string | null {
   try {
     const key = Buffer.from(id, "base64url").toString("utf8");
     // base64url decoding never throws on garbage, it just produces garbage.
-    return key.startsWith(EMAIL) || key.startsWith(PHONE) ? key : null;
+    return key.startsWith(EMAIL) || key.startsWith(PHONE) || key.startsWith(ACCOUNT)
+      ? key
+      : null;
   } catch {
     return null;
   }
@@ -645,6 +702,11 @@ export const getCustomers = cache(async (): Promise<CustomerDirectory> => {
           name: true,
           email: true,
           phone: true,
+          // The two verification stamps. Read here rather than by the screens,
+          // so "is this contact confirmed" is answered once, in the same place
+          // the rest of the record is assembled.
+          emailVerifiedAt: true,
+          phoneVerifiedAt: true,
           address: true,
           city: true,
           state: true,
@@ -749,22 +811,44 @@ export const getCustomers = cache(async (): Promise<CustomerDirectory> => {
 
   const ids = new Identities();
 
-  // Accounts first, so every other row can be pulled onto an account rather
-  // than the account being pulled onto a stray guest record.
-  const userTokens = new Map<string, string>(); // userId → its email token
+  // How many accounts hold each address. One means the address identifies a
+  // person; more than one means it identifies an inbox, and an inbox is not a
+  // customer.
+  const accountsPerEmail = new Map<string, number>();
   for (const u of users) {
     const et = emailToken(u.email);
-    if (!et) continue; // `User.email` is required and unique; belt and braces.
-    ids.add(et);
-    ids.claimFor(et, tokenValue(et));
-    userTokens.set(u.id, et);
-    // The account's own phone joins its email — blocked only if another
-    // account already claimed that number.
+    if (et) accountsPerEmail.set(et, (accountsPerEmail.get(et) ?? 0) + 1);
+  }
+  /** Addresses that cannot, on their own, name a person. */
+  const sharedEmails = new Set(
+    [...accountsPerEmail].filter(([, n]) => n > 1).map(([t]) => tokenValue(t))
+  );
+
+  // Accounts first, so every other row can be pulled onto an account rather
+  // than the account being pulled onto a stray guest record.
+  const userTokens = new Map<string, string>(); // userId → its account token
+  for (const u of users) {
+    const at = accountToken(u.id);
+    ids.add(at);
+    // Claimed by the account id, not by the email: two accounts on one address
+    // would claim under the same string and the "never merge two accounts"
+    // rule would wave them straight through.
+    ids.claimFor(at, u.id);
+    userTokens.set(u.id, at);
+
+    // The account's own phone joins it — blocked only if another account
+    // already claimed that number.
     const pt = phoneToken(u.phone);
-    if (pt) ids.union(et, pt);
+    if (pt) ids.union(at, pt);
+
+    // The address joins it only while it belongs to this account alone. A
+    // shared address is left unattached: it cannot tell two people apart, and
+    // welding them together on it is the exact failure this guards.
+    const et = emailToken(u.email);
+    if (et && !sharedEmails.has(tokenValue(et))) ids.union(at, et);
   }
 
-  /** A row's tokens, with its account's email token first when it has one. */
+  /** A row's tokens, with its account's own token first when it has one. */
   const rowTokens = (row: {
     userId?: string | null;
     email?: string | null;
@@ -789,14 +873,16 @@ export const getCustomers = cache(async (): Promise<CustomerDirectory> => {
   const ANON_LEADS_SHOWN = 12;
 
   for (const u of users) {
-    const et = userTokens.get(u.id);
-    if (!et) continue;
-    const b = bucket(buckets, ids.find(et));
+    const at = userTokens.get(u.id);
+    if (!at) continue;
+    const b = bucket(buckets, ids.find(at));
     b.accounts.push({
       id: u.id,
       name: u.name,
       email: u.email,
       phone: u.phone,
+      emailVerifiedAt: u.emailVerifiedAt,
+      phoneVerifiedAt: u.phoneVerifiedAt,
       address: u.address,
       city: u.city,
       state: u.state,
@@ -939,7 +1025,9 @@ export const getCustomers = cache(async (): Promise<CustomerDirectory> => {
 
   const customers: CustomerRecord[] = [];
   for (const b of buckets.values()) {
-    customers.push(buildRecord(b, tokensByRoot.get(b.root) ?? [b.root]));
+    customers.push(
+      buildRecord(b, tokensByRoot.get(b.root) ?? [b.root], sharedEmails)
+    );
   }
 
   // Default order: whoever did something most recently is at the top.
@@ -950,7 +1038,12 @@ export const getCustomers = cache(async (): Promise<CustomerDirectory> => {
   return { customers, anonymous };
 });
 
-function buildRecord(b: Bucket, tokens: string[]): CustomerRecord {
+function buildRecord(
+  b: Bucket,
+  tokens: string[],
+  /** Addresses held by more than one account — see the header. */
+  sharedEmails: Set<string>
+): CustomerRecord {
   const accounts = [...b.accounts].sort(
     (x, y) => x.createdAt.getTime() - y.createdAt.getTime()
   );
@@ -958,8 +1051,25 @@ function buildRecord(b: Bucket, tokens: string[]): CustomerRecord {
   const orders = b.orders;
   const newestOrder = orders[0] ?? null;
 
-  const emails = [...new Set(tokens.filter((t) => t.startsWith(EMAIL)).map(tokenValue))].sort();
-  const phones = [...new Set(tokens.filter((t) => t.startsWith(PHONE)).map(tokenValue))].sort();
+  // The group's tokens **plus the accounts' own contacts**. A shared address is
+  // deliberately not a token of either account's group, so reading these off
+  // the graph alone would drop it from the record entirely — and with it from
+  // the search index, which is where somebody types an address to find who it
+  // belongs to. Both people legitimately list it.
+  const emails = [
+    ...new Set([
+      ...tokens.filter((t) => t.startsWith(EMAIL)).map(tokenValue),
+      ...accounts.map((a) => a.email.trim().toLowerCase()).filter(Boolean),
+    ]),
+  ].sort();
+  const phones = [
+    ...new Set([
+      ...tokens.filter((t) => t.startsWith(PHONE)).map(tokenValue),
+      ...accounts
+        .map((a) => phoneToken(a.phone)?.slice(2))
+        .filter((v): v is string => !!v),
+    ]),
+  ].sort();
 
   // The account wins every contact field it has; after that the freshest
   // order, because that is the address a parcel actually went to.
@@ -974,11 +1084,32 @@ function buildRecord(b: Bucket, tokens: string[]): CustomerRecord {
     phones[0] ??
     null;
 
-  const key = primaryEmail
+  /**
+   * The key has to be unique per record, and an email stopped being unique the
+   * day two accounts were allowed to share one. Keying both of them on the
+   * shared address would give two different people the same URL — the list
+   * would show two rows that open the same page, and `getCustomer` would hand
+   * back whichever it found first.
+   *
+   * So a shared address is skipped and the number is used instead. That is the
+   * identity anyway, and because it only happens when the address is genuinely
+   * shared, **no existing customer's id changes**: every record whose address
+   * belongs to it alone keeps exactly the key it had. The account id is the
+   * last resort, for two accounts on one address with no number between them.
+   */
+  const emailUsable = primaryEmail && !sharedEmails.has(primaryEmail);
+  const firstUsableEmail = emails.find((e) => !sharedEmails.has(e));
+  const key = emailUsable
     ? EMAIL + primaryEmail
-    : emails[0]
-      ? EMAIL + emails[0]
-      : PHONE + (primaryPhone ?? phones[0] ?? "unknown");
+    : primaryPhone
+      ? PHONE + primaryPhone
+      : firstUsableEmail
+        ? EMAIL + firstUsableEmail
+        : accounts[0]
+          ? ACCOUNT + accounts[0].id
+          : primaryEmail
+            ? EMAIL + primaryEmail
+            : PHONE + (phones[0] ?? "unknown");
 
   const name = accounts[0]?.name?.trim() || b.names[0] || null;
 
@@ -1087,6 +1218,12 @@ function buildRecord(b: Bucket, tokens: string[]): CustomerRecord {
     phones,
     kind,
     status,
+    verification: accounts[0]
+      ? {
+          email: !!accounts[0].emailVerifiedAt,
+          phone: !!accounts[0].phoneVerifiedAt,
+        }
+      : null,
     accounts,
     orders,
     leads: b.leads,

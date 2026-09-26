@@ -68,18 +68,49 @@ import "server-only";
  *    send that then fails is flipped to `failed` with the error recorded, where
  *    a human can see it.
  *
+ * ### The same index also does the *batching*
+ *
+ * `chat.message_received` / `chat.reply_sent` arrived on 2026-09-26 and are the
+ * first subject here that is not a row moving through states — a conversation
+ * is a stream, and somebody typing five messages in a minute must not produce
+ * five banners.
+ *
+ * Nothing new was built for that. The dedupe key became
+ * `<threadId>:<burstAnchor>` ({@link chatBurst}), so the five enqueues collapse
+ * to one at the same unique index that stops an order emailing twice, and the
+ * next message an hour later gets its own. **There is no debounce, no
+ * `lastNotifiedAt` column and no second pass** — which matters, because a
+ * serverless function cannot hold a timer and the cron that would otherwise do
+ * the collapsing runs every 15–60 minutes, far too late for a chat.
+ *
  * **Every send goes through a claimed job row, including `delayMinutes: 0`.**
  * An inline rule enqueues with `runAt = now` and then drains that single job
  * through the same claim. There is no second, unprotected code path, so the
  * guarantee above covers inline sends too — calling
  * `runAutomationTrigger("order.created", …)` twice for one order sends once.
  *
- * ## `action` is open on purpose
+ * ## `action` is open on purpose — and now carries two channels
  *
  * `AutomationRule.action` is a free string defaulting to `"email"`. A rule
  * whose action this build does not implement is skipped and logged, never
- * executed as email — so a `"whatsapp"` action can be added later with no
- * migration and no risk that an unbuilt channel silently mails somebody.
+ * executed as email — so a channel can be added with no migration and no risk
+ * that an unbuilt one silently mails somebody.
+ *
+ * `"push"` was added that way on 2026-09-26, and the shape of the addition is
+ * the point: **it is a second action on this engine, not a second engine.** A
+ * push rule is enqueued by the same {@link runAutomationTrigger}, keyed by the
+ * same {@link dedupeKeyFor}, held off by the same `occurredAt` guard, delayed
+ * through the same `AutomationJob`, and claimed by the same compare-and-set in
+ * {@link deliverJob} before anything leaves. Everything the header above
+ * promises about an email is therefore true of a notification, including the
+ * one that matters most: **calling a trigger twice for one occurrence sends
+ * once.** A duplicate push is worse than a missing one — it arrives on a
+ * lock screen at two in the morning.
+ *
+ * Only the last step differs. `deliverJob` branches on `rule.action`, and
+ * everything push-shaped — who has a device, what fits in a banner, what
+ * counts as a failure — lives in `lib/push-dispatch.ts` so that adding it
+ * could not change how email behaves.
  */
 
 import { prisma } from "@/lib/prisma";
@@ -87,6 +118,7 @@ import { getSettings } from "@/lib/settings";
 import { sendAutomationEmail } from "@/lib/email";
 import { absoluteUrl } from "@/lib/site-url";
 import { formatINR } from "@/lib/utils";
+import { dispatchAutomationPush, pushCopyFrom } from "@/lib/push-dispatch";
 import type { Prisma } from "@prisma/client";
 
 /* ------------------------------------------------------------------ */
@@ -99,12 +131,14 @@ export const TRIGGER_KEYS = [
   "cart.abandoned",
   "return.requested",
   "return.status_changed",
+  "chat.message_received",
+  "chat.reply_sent",
 ] as const;
 
 export type TriggerKey = (typeof TRIGGER_KEYS)[number];
 
 /** What kind of row a job is about. Narrower than a string so the drain can switch. */
-export type SubjectType = "order" | "lead" | "return";
+export type SubjectType = "order" | "lead" | "return" | "chat";
 
 export function isTriggerKey(v: unknown): v is TriggerKey {
   return (TRIGGER_KEYS as readonly unknown[]).includes(v);
@@ -181,6 +215,23 @@ const RETURN_TOKENS: TokenSpec[] = [
   { token: "return.trackingNumber", describes: "Reverse AWB — blank until booked" },
   { token: "order.number", describes: "The order it came from" },
   { token: "order.url", describes: "Link to their order page" },
+];
+
+/**
+ * Tokens for a conversation, in either direction.
+ *
+ * `chat.url` is **not** direction-agnostic, and that is the interesting one. A
+ * conversation has two ends: the owner reads it at `/admin/messages`, the
+ * customer reads it in the widget on the storefront. So each of the two chat
+ * triggers resolves this token to its own end — see `resolveSubject`, which
+ * takes the direction from `context`. One token, two correct answers, decided
+ * by which trigger is firing rather than by who happens to be reading.
+ */
+const CHAT_TOKENS: TokenSpec[] = [
+  { token: "chat.message", describes: "What was just written" },
+  { token: "chat.unread", describes: "How many messages are waiting unread" },
+  { token: "chat.url", describes: "Link to the conversation, for whoever is being told" },
+  { token: "customer.phone", describes: "Their mobile, if the conversation has one" },
 ];
 
 const ORDER_STATUSES = [
@@ -334,6 +385,32 @@ export const TRIGGERS: TriggerSpec[] = [
       { token: "return.previousStatus", describes: "What it was before this change" },
     ],
   },
+  /* ---- Chat: the one event that is not about an order ---- */
+  //
+  // Neither of these has a condition, for the same reason `return.requested`
+  // has none: a chat message has no sub-kinds worth filtering on. The *burst*
+  // rule that stops five messages becoming five banners is not a condition
+  // either — it is the dedupe key, see `dedupeKeyFor`.
+  {
+    key: "chat.message_received",
+    label: "A customer writes in chat",
+    blurb:
+      "Somebody is waiting for you. A run of messages is one event, not five — you are told once, and again only if they come back after a quiet spell or after you have read them.",
+    subjectType: "chat",
+    firesFrom: "the customer's chat send route, once the message row exists",
+    conditions: [],
+    tokens: [...COMMON_TOKENS, ...CHAT_TOKENS],
+  },
+  {
+    key: "chat.reply_sent",
+    label: "You reply in chat",
+    blurb:
+      "Tells the customer you have written back. This is the one that matters when they have closed the tab — the chat panel polls, so it can only reach a browser that is still open.",
+    subjectType: "chat",
+    firesFrom: "the admin chat reply route, once the message row exists",
+    conditions: [],
+    tokens: [...COMMON_TOKENS, ...CHAT_TOKENS],
+  },
 ];
 
 export function triggerSpec(key: string): TriggerSpec | null {
@@ -357,11 +434,68 @@ export function recipientLabel(recipient: string): string {
   return recipient;
 }
 
-/** Only `email` is implemented. See the file header on why the column is open. */
-export const IMPLEMENTED_ACTIONS = ["email"] as const;
+/**
+ * The channels this build can actually carry out. See the file header on why
+ * the column behind it is an open string.
+ *
+ * Adding `"push"` here is what switches it on: the zod schema in
+ * `actions/automation.ts` refines against this list, and {@link deliverJob}
+ * cancels any job whose action is not in it. Both read the same constant, so a
+ * channel cannot be saveable and unsendable, or sendable and unsaveable.
+ */
+export const IMPLEMENTED_ACTIONS = ["email", "push"] as const;
+
+export type ActionKey = (typeof IMPLEMENTED_ACTIONS)[number];
+
+export function isActionKey(v: unknown): v is ActionKey {
+  return (IMPLEMENTED_ACTIONS as readonly unknown[]).includes(v);
+}
+
+/**
+ * What each channel is, in the owner's words.
+ *
+ * `caveat` is not decoration. Push has a real precondition that email does not
+ * — the customer must have installed the store to their home screen (the only
+ * way iOS delivers web push at all) and allowed notifications — and an owner
+ * who builds a push rule without being told that will read "0 sent" as a bug.
+ * The rule editor prints this line beside the choice.
+ */
+export type ActionSpec = {
+  key: ActionKey;
+  /** "Send an email" — the verb phrase, for a picker. */
+  label: string;
+  /** One word for a table cell. */
+  short: string;
+  /** The verb used in the rule's one-sentence summary. */
+  verb: string;
+  caveat: string;
+};
+
+export const ACTIONS: ActionSpec[] = [
+  {
+    key: "email",
+    label: "Send an email",
+    short: "Email",
+    verb: "email",
+    caveat:
+      "Reaches anyone who left an address — the only channel that works for a first-time guest.",
+  },
+  {
+    key: "push",
+    label: "Send a notification",
+    short: "Push",
+    verb: "notify",
+    caveat:
+      "Only reaches a customer who installed the store to their phone's home screen and allowed notifications, while signed in. Most won't have — those jobs are skipped with a reason, not failed.",
+  },
+];
+
+export function actionSpec(action: string): ActionSpec | null {
+  return ACTIONS.find((a) => a.key === action) ?? null;
+}
 
 export function actionLabel(action: string): string {
-  return action === "email" ? "Send an email" : action;
+  return actionSpec(action)?.label ?? action;
 }
 
 /* ------------------------------------------------------------------ */
@@ -440,6 +574,9 @@ export const SAMPLE_TOKENS: TokenBag = {
   "return.note": "Approved — we'll send a courier to collect it.",
   "return.courier": "Delhivery",
   "return.trackingNumber": "9876543210987",
+  "chat.message": "Hi — is the stone hoodie coming back in a medium?",
+  "chat.unread": "2",
+  "chat.url": "https://clothingdemoshop.vercel.app/admin/messages",
 };
 
 /** Every token any trigger offers, deduped — what a template may safely use. */
@@ -473,6 +610,113 @@ function firstNameOf(full: string): string {
   return full.trim().split(/\s+/)[0] ?? "";
 }
 
+/* ------------------------------------------------------------------ */
+/*  Chat bursts — how five messages stay one notification              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How long a conversation has to go quiet before the next message counts as a
+ * fresh approach rather than more of the same.
+ *
+ * Ten minutes, and the number matters less than the shape. Shorter and a
+ * normal typing pause ("…and one more thing") becomes a second banner; much
+ * longer and somebody who came back an hour later to ask again is met with
+ * silence, which for the owner's side is the failure that matters.
+ */
+const CHAT_QUIET_WINDOW_MS = 10 * 60_000;
+
+/**
+ * How far back a burst is traced.
+ *
+ * A bound, not a policy. A run longer than this is treated as broken, so a
+ * thirty-first message in one unbroken burst earns one more notification —
+ * which, for a conversation nobody has read in thirty messages, is the right
+ * way for the bound to fail.
+ */
+const CHAT_BURST_SCAN = 30;
+
+type ChatBurstRow = {
+  sender: string;
+  status: string;
+  body: string;
+  attachmentName: string | null;
+  createdAt: Date;
+};
+
+type ChatBurst = {
+  /** The newest message from this side — what the notification is about. */
+  head: ChatBurstRow;
+  /** The oldest message of the run. Its timestamp *is* the dedupe key. */
+  anchor: ChatBurstRow;
+  /** How many messages the run holds. */
+  size: number;
+};
+
+/**
+ * **The batching rule, and the reason it needs no timer, no column and no
+ * second pass.**
+ *
+ * The brief for a chat notification is "a five-message burst must not be five
+ * banners", and the tempting shapes for that are all expensive: debounce it
+ * (a serverless function has no timers — see the note on `AutomationJob`),
+ * queue it and collapse at drain time (the cron runs every 15–60 minutes, and
+ * a chat notification that late is worse than none), or store a
+ * `lastNotifiedAt` (a column, and this change is not allowed to migrate).
+ *
+ * So the batching is expressed as the **dedupe key** instead, and the engine's
+ * existing unique index does the work. `subjectId` becomes
+ * `<threadId>:<burst anchor>`, where the anchor is the first message of the
+ * run the newest message belongs to. Five messages in two minutes all resolve
+ * to the same anchor, so the second through fifth enqueue lose at
+ * `@@unique([ruleId, subjectType, subjectId])` exactly the way a repeated
+ * order-shipped event does. Nothing is counted, nothing is compared, nothing
+ * races.
+ *
+ * A run is broken by any of three things, and each answers a real case:
+ *
+ * - **The other side spoke.** A reply, then another message, is a new thing to
+ *   be told about — not more of the last thing.
+ * - **The recipient has read it** (`status === "seen"`, which only ever means
+ *   *the other party* has read it — see `markSeen`). Having caught up is what
+ *   makes the next message worth a banner again.
+ * - **The conversation went quiet** for {@link CHAT_QUIET_WINDOW_MS}. This is
+ *   the one that keeps the owner's side reliable: somebody who writes at ten
+ *   and again at three gets through twice, even though nobody read the first.
+ *
+ * The window is **rolling**, measured against the current oldest of the run
+ * rather than against its head. A steady drip stays one conversation, which is
+ * the honest reading of it — the unread badge in the admin is what says how
+ * much has piled up, and a notification is not a counter.
+ *
+ * `rows` must be newest-first.
+ */
+function chatBurst(rows: ChatBurstRow[], from: string): ChatBurst | null {
+  const headIndex = rows.findIndex((m) => m.sender === from);
+  if (headIndex === -1) return null;
+
+  const head = rows[headIndex];
+  let anchor = head;
+  let size = 1;
+
+  for (let i = headIndex + 1; i < rows.length; i += 1) {
+    const older = rows[i];
+    if (older.sender !== from) break;
+    if (older.status === "seen") break;
+    if (anchor.createdAt.getTime() - older.createdAt.getTime() > CHAT_QUIET_WINDOW_MS) break;
+    anchor = older;
+    size += 1;
+  }
+
+  return { head, anchor, size };
+}
+
+/** What a message says, in one line, for a subject or a banner. */
+function chatPreview(row: ChatBurstRow): string {
+  const text = row.body.replace(/\s+/g, " ").trim();
+  if (text) return text.slice(0, 200);
+  return row.attachmentName ? `Attachment: ${row.attachmentName}` : "(no text)";
+}
+
 /**
  * Everything a rule needs to decide and to send, resolved from the database at
  * **send** time rather than at enqueue time.
@@ -486,6 +730,46 @@ type Resolved = {
   tokens: TokenBag;
   /** For `recipient: "customer"`. Empty means there is nobody to write to. */
   customerEmail: string;
+  /**
+   * The account behind this subject, or `null` for a guest.
+   *
+   * Email never needed it — an address is an address. A **notification needs an
+   * account**, because `PushSubscription.userId` is the only link this schema
+   * has between a person and a device. See `lib/push-dispatch.ts`.
+   */
+  customerUserId: string | null;
+  /**
+   * Where a notification about this subject should open, as a same-origin
+   * path.
+   *
+   * Deliberately *not* derived from the `order.url` token: that one is absolute
+   * (it has to be, an email cannot follow a relative link), and `lib/push.ts`
+   * refuses an absolute URL in a payload so that nothing can turn a
+   * notification into an open redirect out of somebody's tray.
+   */
+  deepLink: string;
+  /**
+   * Where `recipient: "admin"` should land instead, when that is somewhere
+   * else entirely.
+   *
+   * A notification about an order sent to the *owner* used to open the
+   * customer's own order page, which is the one screen on which the owner can
+   * do nothing. A chat notification makes the split unavoidable rather than
+   * merely untidy: the conversation genuinely has two ends, `/admin/messages`
+   * and the widget on the storefront, and there is no address that serves
+   * both. Absent, the customer link is used for everybody — which is right for
+   * a cart lead, where the owner's screen is a list and not a thing.
+   */
+  adminDeepLink?: string;
+  /**
+   * Collapse key for a notification about this subject.
+   *
+   * Per *subject*, not per rule: two updates about one order should replace
+   * each other on the lock screen, because the older one is stale the moment
+   * the newer one is true. The service worker sets `renotify` alongside the
+   * tag, so a replacement still alerts — see the long note in `public/sw.js`.
+   */
+  pushTag: string;
   /** Condition inputs, matched case-insensitively against the rule. */
   facts: Record<string, string>;
   /** False ⇒ the job is no longer relevant and should be cancelled, not sent. */
@@ -512,6 +796,12 @@ async function resolveSubject(
     const { count, lines } = itemLines(order.items);
     return {
       customerEmail: order.email,
+      customerUserId: order.userId,
+      deepLink: `/order/${order.orderNumber}`,
+      // There is no `/admin/orders/[id]` route — the list is the screen, and
+      // it opens the row from there.
+      adminDeepLink: "/admin/orders",
+      pushTag: `l7-order-${order.orderNumber}`,
       facts: {
         status: order.status,
         paymentMethod: order.paymentMethod,
@@ -573,6 +863,12 @@ async function resolveSubject(
     const name = lead.name ?? "";
     return {
       customerEmail: lead.email ?? "",
+      // `Lead` has no account column at all — a cart lead is a visitor id and
+      // maybe an address. A push rule on this trigger therefore reaches only
+      // somebody who *also* holds an account for that address.
+      customerUserId: null,
+      deepLink: "/shop",
+      pushTag: `l7-cart-${lead.id}`,
       facts: { status: lead.status },
       applies,
       reason,
@@ -591,10 +887,107 @@ async function resolveSubject(
     };
   }
 
+  if (subjectType === "chat") {
+    const thread = await prisma.chatThread.findUnique({
+      where: { id: entityId },
+      select: {
+        id: true,
+        userId: true,
+        name: true,
+        email: true,
+        phone: true,
+        adminUnread: true,
+        userUnread: true,
+        // A guest thread carries whatever the shopper typed into the chat
+        // form; an account's thread may carry nothing, so the account is the
+        // fallback for both halves.
+        user: { select: { name: true, email: true } },
+      },
+    });
+    if (!thread) return null;
+
+    /**
+     * Which way this message is travelling.
+     *
+     * It comes from `context`, not from the newest row, because a *delayed*
+     * rule drains minutes or hours later and the newest message by then may
+     * be the reply. `context` is documented as the place for facts the
+     * database cannot supply, and "which event was this" is exactly one: the
+     * same thread produces both triggers.
+     */
+    const outbound = context.direction === "outbound";
+    const from = outbound ? "admin" : "user";
+
+    const rows = await prisma.chatMessage.findMany({
+      where: { threadId: thread.id },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: CHAT_BURST_SCAN,
+      select: {
+        sender: true,
+        status: true,
+        body: true,
+        attachmentName: true,
+        createdAt: true,
+      },
+    });
+    const burst = chatBurst(rows, from);
+
+    const name = thread.name ?? thread.user?.name ?? "";
+    const email = thread.email ?? thread.user?.email ?? "";
+    // The owner reads a conversation at /admin/messages; the customer reads
+    // the same conversation in the widget, which rides every storefront page
+    // and carries its own unread badge. There is no one address for both.
+    const readAt = outbound ? "/" : "/admin/messages";
+
+    return {
+      customerEmail: email,
+      customerUserId: thread.userId,
+      deepLink: outbound ? "/" : "/admin/messages",
+      adminDeepLink: "/admin/messages",
+      // Per thread, not per message: a later message about the same
+      // conversation should replace the earlier banner on a lock screen, not
+      // stack under it. `renotify` in the worker keeps the replacement audible.
+      pushTag: `l7-chat-${thread.id}`,
+      facts: {
+        direction: outbound ? "outbound" : "inbound",
+        // Not a condition anybody can set — the dedupe key reads it. See
+        // `chatBurst` for why the batching lives here.
+        burst: burst ? String(burst.anchor.createdAt.getTime()) : "none",
+      },
+      applies: Boolean(burst) && burst?.head.status !== "seen",
+      reason: !burst
+        ? "Cancelled — there is no message from that side of this conversation any more."
+        : burst.head.status === "seen"
+          ? "Cancelled — they had already read it by the time this was due."
+          : undefined,
+      tokens: {
+        ...base,
+        "customer.name": name,
+        // A chat often starts with no name at all. "Hi there" beats "Hi ,".
+        "customer.firstName": firstNameOf(name) || "there",
+        "customer.email": email,
+        "customer.phone": thread.phone ?? "",
+        "chat.message": burst ? chatPreview(burst.head) : "",
+        "chat.unread": String(outbound ? thread.userUnread : thread.adminUnread),
+        "chat.url": absoluteUrl(readAt),
+      },
+    };
+  }
+
   const ret = await prisma.returnRequest.findUnique({
     where: { id: entityId },
     include: {
-      order: { select: { orderNumber: true, customerName: true, email: true, phone: true } },
+      order: {
+        select: {
+          orderNumber: true,
+          customerName: true,
+          email: true,
+          phone: true,
+          // Only push needs this, and only through the order: a return has no
+          // account of its own.
+          userId: true,
+        },
+      },
     },
   });
   if (!ret) return null;
@@ -603,6 +996,12 @@ async function resolveSubject(
   const piece = [ret.productName, ret.variantLabel].filter(Boolean).join(" — ");
   return {
     customerEmail: ret.order.email,
+    customerUserId: ret.order.userId,
+    // The order page is where a return lives too — there is no return screen
+    // of its own to open.
+    deepLink: `/order/${ret.order.orderNumber}`,
+    adminDeepLink: "/admin/returns",
+    pushTag: `l7-return-${ret.requestNumber}`,
     facts: { status: ret.status },
     applies: true,
     tokens: {
@@ -696,6 +1095,8 @@ export function describeConditions(trigger: string, conditions: Record<string, s
  * | `cart.abandoned`         | `<leadId>`               | once per cart lead         |
  * | `return.requested`       | `<returnId>`             | once per return            |
  * | `return.status_changed`  | `<returnId>:<newStatus>` | once per return per status |
+ * | `chat.message_received`  | `<threadId>:<burstAnchor>` | once per run of messages |
+ * | `chat.reply_sent`        | `<threadId>:<burstAnchor>` | once per run of messages |
  *
  * The status variant is the interesting one and it is not an optimisation: with
  * a bare `<orderId>` a single "keep the customer posted" rule would email on
@@ -710,6 +1111,15 @@ export function describeConditions(trigger: string, conditions: Record<string, s
  * *and* from a sweep in every automation pass. Both land on
  * `<returnId>:approved`; the second one loses at the unique index. The same
  * property covers the six places an order status can change.
+ *
+ * **Chat is the same trick used for a different purpose.** A conversation is
+ * not a row that moves through states — it is a stream, and a bare
+ * `<threadId>` would mean one notification per person *ever*. The key is the
+ * thread plus the **burst anchor** ({@link chatBurst}), which makes the unique
+ * index do the batching: five messages in two minutes share an anchor and
+ * therefore one job, and the sixth message an hour later gets its own. The
+ * whole "don't be a nuisance" requirement is this one line, which is why it is
+ * a line and not a subsystem.
  */
 export function dedupeKeyFor(
   trigger: TriggerKey,
@@ -718,6 +1128,9 @@ export function dedupeKeyFor(
 ): string {
   if (trigger === "order.status_changed" || trigger === "return.status_changed") {
     return `${entityId}:${(facts.status ?? "").toLowerCase()}`;
+  }
+  if (trigger === "chat.message_received" || trigger === "chat.reply_sent") {
+    return `${entityId}:${facts.burst ?? "none"}`;
   }
   return entityId;
 }
@@ -938,15 +1351,37 @@ async function deliverJob(jobId: string): Promise<DeliveryResult> {
     return "skipped";
   };
 
+  /**
+   * Record what a *successful* send actually did, without disturbing the claim.
+   *
+   * The column is called `error`, and this writes a sentence that is not one —
+   * deliberately. "3 devices, 1 of them dead" is the difference between a push
+   * rule that works and one that only looks like it does, and an owner reading
+   * the queue has nowhere else to learn it. The queue renders this line under
+   * the rule name for every status, so a `sent` job carrying a note reads as a
+   * note; the pill above it still says Sent.
+   *
+   * It runs after the claim and never touches `status`, so it cannot resurrect
+   * or double-send anything.
+   */
+  const noteOnSent = async (message: string): Promise<DeliveryResult> => {
+    await prisma.automationJob
+      .update({ where: { id: jobId }, data: { error: message.slice(0, 900) } })
+      .catch(() => {});
+    return "sent";
+  };
+
   try {
     const rule = job.rule;
-    if (rule.action !== "email") {
+    if (!isActionKey(rule.action)) {
       return await cancel(
         `Action "${rule.action}" is not implemented in this build, so nothing was sent.`
       );
     }
     if (!rule.template) {
-      return await fail("The rule has no email template attached.");
+      // Both channels are built from the same template — push reads its subject
+      // as the banner title. See `pushCopyFrom`.
+      return await fail("The rule has no template attached.");
     }
 
     const subjectType = (job.subjectType as SubjectType) ?? "order";
@@ -963,6 +1398,38 @@ async function deliverJob(jobId: string): Promise<DeliveryResult> {
       return await cancel(
         "The rule's conditions no longer match — the subject changed during the delay."
       );
+    }
+
+    const subject = renderTemplate(rule.template.subject, resolved.tokens);
+    const bodyText = renderTemplate(rule.template.body, resolved.tokens);
+
+    /* ---- The one place the two channels differ ---- */
+    if (rule.action === "push") {
+      const outcome = await dispatchAutomationPush({
+        recipient: rule.recipient,
+        subject: {
+          userId: resolved.customerUserId,
+          email: resolved.customerEmail,
+        },
+        copy: pushCopyFrom(subject, bodyText),
+        // The owner and the customer read the same event on different
+        // screens. Tapping a banner has to land on the one you can act on —
+        // for a chat that is the difference between the admin inbox and the
+        // storefront widget, and there is no address that serves both.
+        url:
+          rule.recipient === "admin"
+            ? (resolved.adminDeepLink ?? resolved.deepLink)
+            : resolved.deepLink,
+        tag: resolved.pushTag,
+      });
+
+      // Three outcomes, three job states, and the middle one is the reason the
+      // union exists: **a customer with no device is not a failure.** Cancelled
+      // is terminal — the dedupe row stays, so this rule will not come back for
+      // this subject — and it reads as "Skipped" in the queue, which is true.
+      if (outcome.kind === "sent") return await noteOnSent(outcome.detail);
+      if (outcome.kind === "nobody") return await cancel(outcome.detail);
+      return await fail(outcome.detail);
     }
 
     const settings = await getSettings();
@@ -982,8 +1449,8 @@ async function deliverJob(jobId: string): Promise<DeliveryResult> {
 
     const res = await sendAutomationEmail(settings, {
       to,
-      subject: renderTemplate(rule.template.subject, resolved.tokens),
-      bodyText: renderTemplate(rule.template.body, resolved.tokens),
+      subject,
+      bodyText,
       title: rule.name,
     });
 
@@ -1324,6 +1791,20 @@ We'll review it and write back within 24 hours. Nothing to do at your end yet �
 {{store.name}}`,
   },
   {
+    key: "return-admin-new",
+    name: "A return was requested (to you)",
+    subject: "Return requested — {{return.number}} on {{order.number}}",
+    body: `{{customer.name}} wants to send something back.
+
+{{return.productName}} × {{return.quantity}}
+Reason given: {{return.reason}}
+
+Order {{order.number}}
+{{customer.email}} · {{customer.phone}}
+
+Approve or decline it in your admin, under Returns. Nothing moves until you do.`,
+  },
+  {
     key: "return-approved",
     name: "Return approved",
     subject: "Your return {{return.number}} is approved",
@@ -1338,6 +1819,50 @@ Please pack the piece as you received it. If we've booked a pickup, the courier 
 
 Courier: {{return.courier}}
 Pickup tracking: {{return.trackingNumber}}
+
+{{order.url}}
+
+{{store.name}}`,
+  },
+  //
+  // **The two endings a return can have that are not a refund**, and the pair
+  // this store had no words for at all. Both statuses were reachable — from
+  // `decideReturn` and from the admin's status control — and both raised
+  // `return.status_changed` perfectly well; there was simply no rule listening
+  // on either, so the trigger fired into an empty room and the customer heard
+  // nothing about a request they were waiting on. A refusal nobody is told
+  // about is worse than a refusal.
+  //
+  // Neither subject line says "rejected" or "cancelled". An inbox preview is
+  // read before the mail is opened, and a one-word verdict there is a worse
+  // way to learn this than a sentence inside.
+  {
+    key: "return-rejected",
+    name: "Return declined",
+    subject: "About your return request {{return.number}}",
+    body: `Hi {{customer.firstName}},
+
+We've looked at your request to return {{return.productName}} from order {{order.number}}, and we aren't able to accept it this time.
+
+{{return.note}}
+
+If you think we've got that wrong, reply to this email or write to {{store.email}} — a person reads it, and we'd rather sort it out than leave it.
+
+{{order.url}}
+
+{{store.name}}`,
+  },
+  {
+    key: "return-cancelled",
+    name: "Return closed",
+    subject: "Your return {{return.number}} has been closed",
+    body: `Hi {{customer.firstName}},
+
+Your request to return {{return.productName}} has been closed, and nothing further will happen with it. You keep the piece and nothing is owed either way.
+
+{{return.note}}
+
+If that isn't what you were expecting, write to {{store.email}} and we'll pick it back up.
 
 {{order.url}}
 
@@ -1391,6 +1916,46 @@ Depending on your bank it can take a few working days to appear. If it hasn't la
 Thanks for your patience.
 {{store.name}}`,
   },
+
+  /* ---- Chat: the only event here that is not about an order ---- */
+  //
+  // **Both of these open with the message itself, on its own paragraph, and
+  // that is deliberate.** `pushCopyFrom` takes the subject as the banner title
+  // and the *opening paragraph* as the banner body, so writing anything else
+  // first ("You have a new message.") would spend the one line a phone shows
+  // on something the title already said. Quoting it first means the banner
+  // carries what was actually written — which is the whole difference between
+  // a notification worth tapping and a notification worth muting.
+  //
+  // The quote marks are load-bearing too: they stop the greeting filter in
+  // `pushCopyFrom` from eating "Hi there," off the front of a real reply.
+  {
+    key: "chat-admin-new",
+    name: "Somebody wrote in chat (to you)",
+    subject: "New chat message on {{store.name}}",
+    body: `"{{chat.message}}"
+
+{{customer.name}}
+{{customer.email}} · {{customer.phone}}
+
+Messages waiting to be read: {{chat.unread}}
+
+Open the conversation:
+{{chat.url}}`,
+  },
+  {
+    key: "chat-reply",
+    name: "We replied in chat",
+    subject: "{{store.name}} replied to your message",
+    body: `"{{chat.message}}"
+
+That's our reply to the message you left in the chat on our site. Open the store and the chat panel picks up where you left off:
+{{chat.url}}
+
+If you'd rather write back by email, reach us at {{store.email}}.
+
+{{store.name}}`,
+  },
 ];
 
 /**
@@ -1418,6 +1983,8 @@ export type SystemRule = {
   recipient: RecipientChoice;
   delayMinutes: number;
   isActive: boolean;
+  /** Defaults to `"email"`; the shipped push rules set it explicitly. */
+  action?: ActionKey;
 };
 
 export const SYSTEM_RULES: SystemRule[] = [
@@ -1517,10 +2084,40 @@ export const SYSTEM_RULES: SystemRule[] = [
     isActive: true,
   },
   {
+    // The owner's own copy. A return is the one customer action that needs a
+    // decision from them before anything can move, and until this rule existed
+    // the only way to learn one had been raised was to open the screen.
+    name: "Tell me a return was requested",
+    trigger: "return.requested",
+    conditions: {},
+    templateKey: "return-admin-new",
+    recipient: "admin",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
     name: "Tell the customer their return is approved",
     trigger: "return.status_changed",
     conditions: { status: "approved" },
     templateKey: "return-approved",
+    recipient: "customer",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Tell the customer we couldn't accept their return",
+    trigger: "return.status_changed",
+    conditions: { status: "rejected" },
+    templateKey: "return-rejected",
+    recipient: "customer",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Tell the customer their return was closed",
+    trigger: "return.status_changed",
+    conditions: { status: "cancelled" },
+    templateKey: "return-cancelled",
     recipient: "customer",
     delayMinutes: 0,
     isActive: true,
@@ -1551,6 +2148,111 @@ export const SYSTEM_RULES: SystemRule[] = [
     recipient: "customer",
     delayMinutes: 0,
     isActive: true,
+  },
+
+  /* ---- Chat ---- */
+  //
+  // **Every chat rule has a zero delay, and that is not a default — it is the
+  // only correct value.** A delayed job waits for `/api/cron/automation`,
+  // which runs every 15–60 minutes; a notification telling somebody they have
+  // a message they received half an hour ago is worse than none, because they
+  // will have read it and learned the alert is always late. The batching that
+  // stops a burst becoming five banners is the dedupe key instead — see
+  // `chatBurst`, which needs no wait at all.
+  //
+  // The two directions are not symmetrical, so the defaults are not either:
+  //
+  // - **Somebody writing in** goes to the owner's own inbox, about their own
+  //   shop, and is the thing this whole trigger exists for. On by default.
+  // - **A reply going out** is customer-facing. Most replies land while the
+  //   panel is still open, where the customer can already see them — so it
+  //   ships off, for the owner to switch on if their shoppers tend to close
+  //   the tab. Switching it on is one tap and the burst rule protects them.
+  {
+    name: "Tell me when a customer writes in chat",
+    trigger: "chat.message_received",
+    conditions: {},
+    templateKey: "chat-admin-new",
+    recipient: "admin",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Email the customer when I reply in chat",
+    trigger: "chat.reply_sent",
+    conditions: {},
+    templateKey: "chat-reply",
+    recipient: "customer",
+    delayMinutes: 0,
+    isActive: false,
+  },
+
+  /* ---- The same events, on the phone ---- */
+  //
+  // The opt-in bar promises "the moment your order is packed and dispatched",
+  // and until these existed nothing in the store kept that promise — the only
+  // two senders were a self-test and an admin typing a broadcast by hand.
+  //
+  // Three things about these rows are deliberate:
+  //
+  // 1. **They point at the *email* templates**, not at push-only copies. One
+  //    event, one wording, two channels — `pushCopyFrom` takes the subject as
+  //    the banner title and the opening paragraph as the body. A second copy of
+  //    the same sentence is the `defaultReturnsInfo` trap in a new costume.
+  // 2. **They ship switched off.** A channel the owner has never seen should
+  //    not start notifying their customers because a deploy happened. Switching
+  //    one on is one tap in Admin → Automation, and `syncSystemAutomation`
+  //    never un-pauses anything, so that choice sticks.
+  // 3. **Only the moments that are worth a lock screen.** An order confirmed,
+  //    an order shipped, and a chat message in either direction. Cancelled,
+  //    refunded and "we've got your return request" are conversations, not
+  //    alerts, and they stay with email — a banner cannot hold the
+  //    explanation those need, and waking somebody to give them half of one
+  //    is worse than an email they read when they are ready.
+  //
+  // The chat pair is the one an owner is most likely to want on, because it is
+  // the only event in this store where somebody is *waiting*. It still ships
+  // off, for reason 2: the owner's phone should start buzzing because they
+  // chose it, not because a deploy happened.
+  {
+    name: "Notify the customer their order is confirmed",
+    trigger: "order.status_changed",
+    conditions: { status: "confirmed" },
+    templateKey: "order-confirmed",
+    recipient: "customer",
+    action: "push",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    name: "Notify the customer their order has shipped",
+    trigger: "order.status_changed",
+    conditions: { status: "shipped" },
+    templateKey: "order-shipped",
+    recipient: "customer",
+    action: "push",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    name: "Notify me when a customer writes in chat",
+    trigger: "chat.message_received",
+    conditions: {},
+    templateKey: "chat-admin-new",
+    recipient: "admin",
+    action: "push",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    name: "Notify the customer when I reply in chat",
+    trigger: "chat.reply_sent",
+    conditions: {},
+    templateKey: "chat-reply",
+    recipient: "customer",
+    action: "push",
+    delayMinutes: 0,
+    isActive: false,
   },
 ];
 
@@ -1631,7 +2333,7 @@ export async function syncSystemAutomation(): Promise<SeedReport> {
         name: r.name,
         trigger: r.trigger,
         conditions: r.conditions as Prisma.InputJsonValue,
-        action: "email",
+        action: r.action ?? "email",
         templateId,
         recipient: r.recipient,
         delayMinutes: r.delayMinutes,
@@ -1653,10 +2355,12 @@ export async function syncSystemAutomation(): Promise<SeedReport> {
  * Admin → Automation can show the **whole** mail inventory rather than only the
  * part it owns.
  *
- * Both are replies to something the customer just did, not notifications about
- * the store, and both would be dangerous behind a switch: a password reset that
- * can be paused locks people out of their accounts, and a contact form that can
- * be paused bins enquiries the sender believes were delivered.
+ * All three are replies to something the customer just did, not notifications
+ * about the store, and each would be dangerous behind a switch: a password
+ * reset that can be paused locks people out of their accounts, a one-time code
+ * that can be paused stops an account being created or an order being placed
+ * while the customer watches an input they can never fill, and a contact form
+ * that can be paused bins enquiries the sender believes were delivered.
  *
  * Nothing reads this at runtime — it is documentation with a render target. If
  * a third direct sender ever appears in `lib/email.ts`, add it here, or the
@@ -1667,6 +2371,11 @@ export const DIRECT_MAIL: { name: string; to: string; why: string }[] = [
     name: "Password reset link",
     to: "The customer",
     why: "Carries a one-time token and answers something they did seconds ago. A rule that could switch it off would lock people out of their own accounts.",
+  },
+  {
+    name: "One-time code (signup & verification)",
+    to: "The customer",
+    why: "A six-digit code that expires in ten minutes, waited for on a form. Sent only when Settings asks for email or mobile verification. A rule that could pause it would stop accounts being created and orders being placed, with the customer staring at an input nothing can fill.",
   },
   {
     name: "Contact form enquiry",

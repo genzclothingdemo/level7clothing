@@ -25,13 +25,16 @@
  * `Authorization: Bearer $CRON_SECRET` when CRON_SECRET is set on the project,
  * and **without the env var the route refuses everything rather than sitting
  * open**. Failing closed matters more here than it does for the sync — an open
- * drain is an endpoint a stranger can hit to make the store send its customers
- * email, on demand, at the store's expense.
+ * drain is an endpoint a stranger can hit to make the store email its
+ * customers, or push to their phones, on demand and at the store's expense.
+ * The push half raised the stakes rather than changing them: a stranger who
+ * could drain this queue could put a banner on a customer's lock screen.
  *
  * It cannot double-send. Every job is claimed with a compare-and-set on its
- * status before anything reaches Resend, so two overlapping invocations — a
- * cron run and the admin's "Run due jobs now" landing together — have exactly
- * one winner per job. The full argument is in the header of `lib/automation.ts`.
+ * status before anything reaches Resend or a push service, so two overlapping
+ * invocations — a cron run and the admin's "Run due jobs now" landing together
+ * — have exactly one winner per job. The full argument is in the header of
+ * `lib/automation.ts`.
  */
 
 import { NextRequest, NextResponse } from "next/server";

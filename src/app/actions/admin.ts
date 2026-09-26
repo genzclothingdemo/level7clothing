@@ -4,7 +4,11 @@ import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { runAutomationTrigger } from "@/lib/automation";
 import { prisma } from "@/lib/prisma";
-import { getAdminSession, hashPassword } from "@/lib/auth";
+import {
+  hashPassword,
+  requireAdminSession,
+  requireAdminWrite,
+} from "@/lib/auth";
 import { isLeadStatus } from "@/lib/leads";
 import { slugify } from "@/lib/utils";
 import { deriveVariantModel } from "@/lib/variants";
@@ -31,10 +35,33 @@ import {
   type BulkRowResult,
 } from "@/components/admin/order-types";
 
-async function requireAdmin() {
-  const session = await getAdminSession();
-  if (!session) throw new Error("Unauthorized");
-  return session;
+/**
+ * Identity **and** permission for every write in this module.
+ *
+ * It used to be "is anyone signed in?". It is now routed through
+ * `requireAdminWrite` in `lib/auth.ts`, which is the single place the admin
+ * decides whether a session may change anything — and the single place a
+ * temporary admin's activity is recorded. Keeping the local name means the
+ * forty call sites below are unchanged, and an action added tomorrow that
+ * writes `await requireAdmin()` out of habit is gated and logged for free.
+ *
+ * `what` is the action's own name. It is turned into a readable sentence by
+ * `humaniseAction`, so the owner's activity list says "Delete product" without
+ * anyone maintaining a table of phrases.
+ */
+async function requireAdmin(what?: string, opts?: { quiet?: boolean }) {
+  return requireAdminWrite(what, opts);
+}
+
+/**
+ * For the two actions here that only *read*.
+ *
+ * View-only access means "sees every screen and changes nothing". Gating a
+ * search or a courier quote on the write rule would break the first half of
+ * that promise, so these keep the old behaviour: signed in is enough.
+ */
+async function requireAdminRead() {
+  return requireAdminSession();
 }
 
 function revalidateStore() {
@@ -142,7 +169,7 @@ const productSchema = z.object({
 export type ProductInput = z.input<typeof productSchema>;
 
 export async function createProduct(input: ProductInput) {
-  await requireAdmin();
+  await requireAdmin("createProduct");
   const parsed = productSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
@@ -345,7 +372,7 @@ async function syncProductImages(productId: string, data: z.infer<typeof product
 }
 
 export async function updateProduct(id: string, input: ProductInput) {
-  await requireAdmin();
+  await requireAdmin("updateProduct");
   const parsed = productSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
@@ -407,14 +434,14 @@ export async function updateProduct(id: string, input: ProductInput) {
 }
 
 export async function deleteProduct(id: string) {
-  await requireAdmin();
+  await requireAdmin("deleteProduct");
   await prisma.product.delete({ where: { id } });
   revalidateStore();
   return { ok: true as const };
 }
 
 export async function setProductActive(id: string, isActive: boolean) {
-  await requireAdmin();
+  await requireAdmin("setProductActive");
   await prisma.product.update({ where: { id }, data: { isActive } });
   revalidateStore();
   return { ok: true as const };
@@ -441,7 +468,7 @@ async function ensureUniqueCategorySlug(name: string, ignoreId?: string) {
 }
 
 export async function createCategory(input: CategoryInput) {
-  await requireAdmin();
+  await requireAdmin("createCategory");
   const parsed = categorySchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
@@ -466,7 +493,7 @@ export async function createCategory(input: CategoryInput) {
 }
 
 export async function updateCategory(id: string, input: CategoryInput) {
-  await requireAdmin();
+  await requireAdmin("updateCategory");
   const parsed = categorySchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
@@ -492,7 +519,7 @@ export async function updateCategory(id: string, input: CategoryInput) {
 }
 
 export async function deleteCategory(id: string) {
-  await requireAdmin();
+  await requireAdmin("deleteCategory");
   try {
     await prisma.category.delete({ where: { id } });
     revalidateStore();
@@ -544,7 +571,7 @@ function revalidateSubcategories(categoryId: string) {
 }
 
 export async function createSubcategory(input: SubcategoryInput) {
-  await requireAdmin();
+  await requireAdmin("createSubcategory");
   const parsed = subcategorySchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
@@ -582,7 +609,7 @@ export async function createSubcategory(input: SubcategoryInput) {
 }
 
 export async function updateSubcategory(id: string, input: SubcategoryInput) {
-  await requireAdmin();
+  await requireAdmin("updateSubcategory");
   const parsed = subcategorySchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
@@ -626,7 +653,7 @@ export async function updateSubcategory(id: string, input: SubcategoryInput) {
 
 /** Products inside are not deleted — they fall back to sitting on the category page. */
 export async function deleteSubcategory(id: string) {
-  await requireAdmin();
+  await requireAdmin("deleteSubcategory");
   try {
     const sub = await prisma.subcategory.delete({ where: { id } });
     revalidateSubcategories(sub.categoryId);
@@ -644,7 +671,7 @@ export async function setProductSubcategory(
   productId: string,
   subcategoryId: string | null
 ) {
-  await requireAdmin();
+  await requireAdmin("setProductSubcategory");
   try {
     const product = await prisma.product.update({
       where: { id: productId },
@@ -799,7 +826,7 @@ const SETTINGS_FIELD_LABEL: Record<string, string> = {
 };
 
 export async function updateSettings(input: SettingsInput) {
-  await requireAdmin();
+  await requireAdmin("updateSettings");
 
   const parsed = settingsSchema.safeParse(input);
   if (!parsed.success) {
@@ -885,7 +912,7 @@ export async function updateOrderStatus(
   status: string,
   note?: string
 ) {
-  await requireAdmin();
+  await requireAdmin("updateOrderStatus");
   if (!ORDER_STATUSES.includes(status as (typeof ORDER_STATUSES)[number])) {
     return { ok: false as const, error: "Invalid status" };
   }
@@ -971,7 +998,7 @@ export async function updateOrderTracking(
   id: string,
   input: { courier?: string; trackingNumber?: string; trackingUrl?: string }
 ) {
-  await requireAdmin();
+  await requireAdmin("updateOrderTracking");
   const parsed = trackingSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
@@ -990,7 +1017,7 @@ export async function updateOrderTracking(
 }
 
 export async function updatePaymentStatus(id: string, paymentStatus: string) {
-  await requireAdmin();
+  await requireAdmin("updatePaymentStatus");
   await prisma.order.update({ where: { id }, data: { paymentStatus } });
   revalidatePath("/admin/orders");
   return { ok: true as const };
@@ -1002,7 +1029,7 @@ export async function updatePaymentStatus(id: string, paymentStatus: string) {
  * customer's order page reads.
  */
 export async function addOrderNote(id: string, note: string) {
-  await requireAdmin();
+  await requireAdmin("addOrderNote");
   const trimmed = note.trim();
   const order = await prisma.order.findUnique({
     where: { id },
@@ -1027,7 +1054,7 @@ export async function addOrderNote(id: string, note: string) {
  * columns.
  */
 export async function setCustomerNote(id: string, note: string) {
-  await requireAdmin();
+  await requireAdmin("setCustomerNote");
   const trimmed = note.trim();
   const order = await prisma.order.findUnique({
     where: { id },
@@ -1112,7 +1139,7 @@ async function confirmOneOrder(
 }
 
 export async function confirmOrder(id: string) {
-  await requireAdmin();
+  await requireAdmin("confirmOrder");
   const result = await confirmOneOrder(id);
   if (!result.ok) return { ok: false as const, error: result.error };
 
@@ -1151,7 +1178,7 @@ export async function shipOrderNowAction(
   courierId: string | null,
   courierName: string | null
 ) {
-  await requireAdmin();
+  await requireAdmin("shipOrderNowAction");
 
   const courier =
     courierId && courierName ? { id: courierId, name: courierName } : null;
@@ -1218,7 +1245,7 @@ export async function draftOrderInNimbusAction(
   courierId?: string | null,
   courierName?: string | null
 ) {
-  await requireAdmin();
+  await requireAdmin("draftOrderInNimbusAction");
 
   const result = await createDraftForOrder(
     id,
@@ -1254,7 +1281,7 @@ export async function draftOrderInNimbusAction(
  * anywhere.
  */
 export async function cancelOrderDraftAction(id: string) {
-  await requireAdmin();
+  await requireAdmin("cancelOrderDraftAction");
 
   const result = await cancelDraftForOrder(id);
   if (!result.ok) return { ok: false as const, error: result.error };
@@ -1266,7 +1293,7 @@ export async function cancelOrderDraftAction(id: string) {
 
 /** Couriers that will carry this order, with rates, for the admin to review. */
 export async function getCourierOptionsAction(orderId: string) {
-  await requireAdmin();
+  await requireAdminRead();
   return getCourierOptionsForOrder(orderId);
 }
 
@@ -1276,7 +1303,7 @@ export async function chooseCourierAction(
   courierId: string | null,
   courierName: string | null
 ) {
-  await requireAdmin();
+  await requireAdmin("chooseCourierAction");
   await chooseCourierForOrder(orderId, courierId, courierName);
   revalidatePath("/admin/orders");
   return { ok: true as const };
@@ -1284,7 +1311,7 @@ export async function chooseCourierAction(
 
 /** Run the automatic sync now, for every order still in flight. */
 export async function syncAllOrdersAction() {
-  await requireAdmin();
+  await requireAdmin("syncAllOrdersAction");
   const result = await syncAllOpenOrders();
   revalidatePath("/admin/orders");
   revalidatePath("/admin");
@@ -1335,7 +1362,7 @@ const AUTO_SYNC_MIN_AGE_MS = 15 * 60 * 1000;
  * someone stops using a screen.
  */
 export async function autoSyncOrderAction(id: string) {
-  await requireAdmin();
+  await requireAdmin("autoSyncOrderAction", { quiet: true });
 
   const order = await prisma.order
     .findUnique({
@@ -1397,7 +1424,7 @@ export async function autoSyncOrderAction(id: string) {
  * courier and tracking link land in our database and the customer gets notified.
  */
 export async function syncOrderFromNimbusAction(id: string) {
-  await requireAdmin();
+  await requireAdmin("syncOrderFromNimbusAction");
 
   const result = await syncOrderFromNimbus(id);
   if (!result.ok) return { ok: false as const, error: result.error };
@@ -1499,7 +1526,7 @@ async function cancelOneOrder(
 }
 
 export async function cancelAndRestoreStock(id: string) {
-  await requireAdmin();
+  await requireAdmin("cancelAndRestoreStock");
   const result = await cancelOneOrder(id);
   if (!result.ok) return { ok: false as const, error: result.error };
 
@@ -1545,7 +1572,7 @@ const bulkSchema = z.object({
  * be rate-limited halfway through a charge.
  */
 export async function bulkOrderAction(ids: string[], action: string) {
-  await requireAdmin();
+  await requireAdmin("bulkOrderAction");
 
   const parsed = bulkSchema.safeParse({ ids: [...new Set(ids)], action });
   if (!parsed.success) {
@@ -1764,7 +1791,7 @@ const pipelineSchema = z
 export type PipelineSettingsInput = z.input<typeof pipelineSchema>;
 
 export async function updateOrderPipelineSettings(input: PipelineSettingsInput) {
-  await requireAdmin();
+  await requireAdmin("updateOrderPipelineSettings");
   const parsed = pipelineSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
@@ -1801,7 +1828,7 @@ export async function updateOrderPipelineSettings(input: PipelineSettingsInput) 
 
 // -------- Messages --------
 export async function setMessageRead(id: string, isRead: boolean) {
-  await requireAdmin();
+  await requireAdmin("setMessageRead");
   await prisma.message.update({ where: { id }, data: { isRead } });
   revalidatePath("/admin/messages");
   revalidatePath("/admin");
@@ -1809,7 +1836,7 @@ export async function setMessageRead(id: string, isRead: boolean) {
 }
 
 export async function deleteMessage(id: string) {
-  await requireAdmin();
+  await requireAdmin("deleteMessage");
   await prisma.message.delete({ where: { id } });
   revalidatePath("/admin/messages");
   return { ok: true as const };
@@ -1817,7 +1844,7 @@ export async function deleteMessage(id: string) {
 
 // -------- Leads (interested customers) --------
 export async function updateLeadStatus(id: string, status: string) {
-  await requireAdmin();
+  await requireAdmin("updateLeadStatus");
   if (!isLeadStatus(status)) {
     return { ok: false as const, error: "Invalid status" };
   }
@@ -1828,7 +1855,7 @@ export async function updateLeadStatus(id: string, status: string) {
 }
 
 export async function updateLeadNotes(id: string, notes: string) {
-  await requireAdmin();
+  await requireAdmin("updateLeadNotes");
   await prisma.lead.update({
     where: { id },
     data: { notes: notes.trim() || null },
@@ -1838,7 +1865,7 @@ export async function updateLeadNotes(id: string, notes: string) {
 }
 
 export async function deleteLead(id: string) {
-  await requireAdmin();
+  await requireAdmin("deleteLead");
   await prisma.lead.delete({ where: { id } });
   revalidatePath("/admin/leads");
   return { ok: true as const };
@@ -1846,7 +1873,7 @@ export async function deleteLead(id: string) {
 
 // -------- Admin password change --------
 export async function changeAdminPassword(newPassword: string) {
-  const session = await requireAdmin();
+  const session = await requireAdmin("changeAdminPassword");
   if (newPassword.length < 6) {
     return { ok: false as const, error: "Password must be at least 6 characters" };
   }
@@ -1866,7 +1893,7 @@ export async function changeAdminPassword(newPassword: string) {
 
 // -------- Media Library Smart Tagging --------
 export async function searchProductsAction(query: string) {
-  await requireAdmin();
+  await requireAdminRead();
   if (!query || query.length < 2) return [];
 
   const products = await prisma.product.findMany({
@@ -1921,7 +1948,7 @@ export type ProductBulkAction = z.infer<typeof productBulkSchema>["action"];
  * and names the ones it could not remove.
  */
 export async function bulkProductAction(ids: string[], action: string) {
-  await requireAdmin();
+  await requireAdmin("bulkProductAction");
 
   const parsed = productBulkSchema.safeParse({ ids: [...new Set(ids)], action });
   if (!parsed.success) {

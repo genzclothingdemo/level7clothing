@@ -4,7 +4,7 @@ import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { runAutomationTrigger } from "@/lib/automation";
 import { prisma } from "@/lib/prisma";
-import { getAdminSession } from "@/lib/auth";
+import { requireAdminSession, requireAdminWrite } from "@/lib/auth";
 import { DEFAULT_SETTINGS } from "@/lib/settings";
 import { draftReturnPickup } from "@/lib/fulfilment";
 import {
@@ -45,10 +45,19 @@ import {
   type ReturnStatus,
 } from "@/lib/returns";
 
-async function requireAdmin() {
-  const session = await getAdminSession();
-  if (!session) throw new Error("Unauthorized");
-  return session;
+/**
+ * Identity **and** permission for every write in this module, routed through
+ * the one write gate in `lib/auth.ts`. See the long note there: it is also
+ * where a temporary admin's activity is recorded, so a new action that calls
+ * this is gated and logged without its author doing anything.
+ */
+async function requireAdmin(what?: string, opts?: { quiet?: boolean }) {
+  return requireAdminWrite(what, opts);
+}
+
+/** For the actions here that only read — view-only access may look at everything. */
+async function requireAdminRead() {
+  return requireAdminSession();
 }
 
 /* ------------------------------------------------------------ policy read */
@@ -635,7 +644,7 @@ export type DecideReturnInput = z.input<typeof decideSchema>;
  * tick hiding a broken pickup.
  */
 export async function decideReturn(input: DecideReturnInput) {
-  await requireAdmin();
+  await requireAdmin("decideReturn");
   const parsed = decideSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
@@ -886,7 +895,7 @@ export type MarkRefundPaidInput = z.input<typeof paidSchema>;
  * from the normal path.
  */
 export async function markRefundPaid(input: MarkRefundPaidInput) {
-  await requireAdmin();
+  await requireAdmin("markRefundPaid");
   const parsed = paidSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
@@ -1135,7 +1144,7 @@ export async function setReturnRefundUpi(input: SetRefundUpiInput) {
  * `markRefundPaid` is the only door to it.
  */
 export async function setReturnStatus(id: string, status: string, note?: string) {
-  await requireAdmin();
+  await requireAdmin("setReturnStatus");
   if (!isReturnStatus(status)) {
     return { ok: false as const, error: "Unknown status" };
   }
@@ -1187,7 +1196,7 @@ export async function setReturnStatus(id: string, status: string, note?: string)
  * leave us drafting a second one beside it.
  */
 export async function retryReturnPickup(id: string) {
-  await requireAdmin();
+  await requireAdmin("retryReturnPickup");
 
   const existing = await prisma.returnRequest.findUnique({
     where: { id },
@@ -1221,7 +1230,7 @@ export async function retryReturnPickup(id: string) {
  * than implied. Read-only — it books nothing.
  */
 export async function quoteReturnPickupAction(id: string) {
-  await requireAdmin();
+  await requireAdminRead();
   const res = await quoteReturnPickup(id);
   return res.ok
     ? { ok: true as const, quote: res.quote }
@@ -1237,7 +1246,7 @@ export async function quoteReturnPickupAction(id: string) {
  * `bookReturnPickup`, which refuses to create anything.
  */
 export async function bookReturnPickupAction(id: string, courierId?: string | null) {
-  await requireAdmin();
+  await requireAdmin("bookReturnPickupAction");
   const res = await bookReturnPickup(id, courierId ?? null);
   revalidateReturns();
   return res;
@@ -1253,7 +1262,7 @@ export async function bookReturnPickupAction(id: string, courierId?: string | nu
  * courier again.
  */
 export async function syncReturnPickupAction(id: string) {
-  await requireAdmin();
+  await requireAdmin("syncReturnPickupAction");
   const res = await syncReturnFromNimbus(id);
   revalidateReturns();
   return res;
@@ -1267,7 +1276,7 @@ export async function syncReturnPickupAction(id: string) {
  * too, this button is the way the queue catches up.
  */
 export async function syncAllReturnPickupsAction() {
-  await requireAdmin();
+  await requireAdmin("syncAllReturnPickupsAction");
   const res = await syncAllOpenReturns();
   revalidateReturns();
   return res;
@@ -1283,12 +1292,12 @@ export async function syncAllReturnPickupsAction() {
  * mentions them outside an analytics count.
  */
 export async function listRtoOrdersAction() {
-  await requireAdmin();
+  await requireAdminRead();
   return listRtoOrders();
 }
 
 export async function deleteReturnRequest(id: string) {
-  await requireAdmin();
+  await requireAdmin("deleteReturnRequest");
   await prisma.returnRequest.delete({ where: { id } });
   revalidateReturns();
   return { ok: true as const };
@@ -1339,7 +1348,7 @@ export type ReturnDefaultsInput = z.input<typeof defaultsSchema>;
  * `refundAmount`, so history is never rewritten by a settings change.
  */
 export async function updateReturnDefaults(input: ReturnDefaultsInput) {
-  await requireAdmin();
+  await requireAdmin("updateReturnDefaults");
   const parsed = defaultsSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error.issues[0].message };
@@ -1388,7 +1397,7 @@ export async function updateReturnDefaults(input: ReturnDefaultsInput) {
  * look identical on screen until the store default is later flipped.
  */
 export async function returnableBreakdown() {
-  await requireAdmin();
+  await requireAdminRead();
   const [inherit, yes, no] = await Promise.all([
     prisma.product.count({ where: { returnable: null } }),
     prisma.product.count({ where: { returnable: true } }),
@@ -1422,7 +1431,7 @@ export type ReturnableProduct = {
  * one that over-fetches 22 names.
  */
 export async function listReturnableProducts(): Promise<ReturnableProduct[]> {
-  await requireAdmin();
+  await requireAdminRead();
   try {
     return await prisma.product.findMany({
       orderBy: [{ category: "asc" }, { name: "asc" }],
@@ -1456,7 +1465,7 @@ export async function setReturnableForProducts(
   ids: string[],
   mode: ReturnableMode
 ) {
-  await requireAdmin();
+  await requireAdmin("setReturnableForProducts");
   if (mode !== "yes" && mode !== "no" && mode !== "inherit") {
     return { ok: false as const, error: "Unknown option" };
   }
@@ -1500,7 +1509,7 @@ export async function setReturnableForProducts(
  * to avoid.
  */
 export async function bulkSetReturnable(mode: ReturnableMode) {
-  await requireAdmin();
+  await requireAdmin("bulkSetReturnable");
   if (mode !== "yes" && mode !== "no" && mode !== "inherit") {
     return { ok: false as const, error: "Unknown option" };
   }
@@ -1522,7 +1531,7 @@ export async function bulkSetReturnable(mode: ReturnableMode) {
 
 /** Exposed for the admin filter tabs so the list and the UI can't drift. */
 export async function returnStatusCounts() {
-  await requireAdmin();
+  await requireAdminRead();
   const grouped = await prisma.returnRequest
     .groupBy({ by: ["status"], _count: { _all: true } })
     .catch(() => [] as { status: string; _count: { _all: number } }[]);

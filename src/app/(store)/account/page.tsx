@@ -63,6 +63,42 @@ export default async function AccountPage({
   // into a real `Address` row on this load. See src/app/actions/addresses.ts.
   const addresses = (await listMyAddresses()) ?? [];
 
+  /**
+   * ---- Which orders are this person's ----
+   *
+   * This used to be `{ OR: [{ userId }, { email: user.email }] }`, and that was
+   * correct for exactly as long as `User.email` was unique. It is not any more:
+   * two accounts may share one inbox, and the second one to sign in was shown
+   * the first one's orders — their addresses, their totals, and a Request a
+   * return button on goods they had never bought. **Reproduced on this store
+   * before it was fixed**, which is why the rule is now stated here rather than
+   * assumed.
+   *
+   * The email match existed to pick up orders placed as a *guest* before the
+   * account was created, so it is kept — but only on the two claims that can
+   * still identify one person:
+   *
+   * - the **mobile number**, which is the identity and is unique. An order's
+   *   `phone` column holds whatever was typed, so the claim is on the ten
+   *   national digits, the part every spelling has in common;
+   * - the **email**, and only while no other account holds it.
+   *
+   * Both are restricted to `userId: null`: an order already attached to an
+   * account belongs to that account, whatever contact details it carries.
+   */
+  const nationalDigits = user.phone ? user.phone.replace(/\D/g, "").slice(-10) : "";
+  const emailShared =
+    (await prisma.user
+      .count({ where: { email: user.email, id: { not: user.id } } })
+      .catch(() => 1)) > 0;
+
+  const guestClaims = [
+    ...(nationalDigits.length === 10
+      ? [{ phone: { endsWith: nationalDigits } }]
+      : []),
+    ...(emailShared ? [] : [{ email: user.email }]),
+  ];
+
   // Orders. `returnRequests` is included because the list offers returns now,
   // not just the order page — a customer who has just been told "delivered"
   // is on this screen, not on a confirmation page they closed a week ago.
@@ -70,7 +106,14 @@ export default async function AccountPage({
     getSettings(),
     prisma.order
       .findMany({
-        where: { OR: [{ userId: user.id }, { email: user.email }] },
+        where: {
+          OR: [
+            { userId: user.id },
+            ...(guestClaims.length
+              ? [{ userId: null, OR: guestClaims }]
+              : []),
+          ],
+        },
         orderBy: { createdAt: "desc" },
         include: { returnRequests: { orderBy: { createdAt: "desc" } } },
       })
@@ -253,7 +296,16 @@ export default async function AccountPage({
           `user.address / city / state / pincode` columns are legacy and must
           not reach the UI. Addresses come from the `Address` table only. */}
       <AccountView
-        user={{ name: user.name, email: user.email, phone: user.phone }}
+        user={{
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          // Booleans, not dates: the page only ever asks "is this confirmed",
+          // and a Date crossing to a client component is a serialisation
+          // detail nobody downstream needs.
+          emailVerified: !!user.emailVerifiedAt,
+          phoneVerified: !!user.phoneVerifiedAt,
+        }}
         orders={orders}
         reviews={reviews}
         addresses={addresses}

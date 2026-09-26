@@ -20,6 +20,7 @@ import {
   type ChosenAddress,
 } from "@/components/store/checkout-address-picker";
 import { InfoTip } from "@/components/store/info-tip";
+import { VerifyContactPanel } from "@/components/store/auth-code-panel";
 import type { PaymentMode } from "@/lib/types";
 
 /**
@@ -126,6 +127,20 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
   // Payment rules for the cart, loaded from the server (authoritative).
   const [ctx, setCtx] = useState<CheckoutContext | null>(null);
   const [method, setMethod] = useState<CheckoutMode | null>(null);
+
+  /**
+   * Set when `placeOrder` stops for an unconfirmed contact.
+   *
+   * Nothing asks for this up front: the gate is off in most stores, and a
+   * checkout that demanded a code before anyone had chosen how to pay would be
+   * a worse checkout for the sake of a setting almost nobody turns on. It
+   * appears only when the server actually refuses, and the refusal names the
+   * channel and the masked target so this component never has to guess.
+   */
+  const [verify, setVerify] = useState<{
+    channel: "email" | "sms";
+    shown: string;
+  } | null>(null);
 
   // Identity is seeded from the account; the delivery fields are filled by the
   // address picker below — never from `user.address`, which is the legacy
@@ -461,6 +476,15 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
       if ("requiresLogin" in res && res.requiresLogin) {
         toast.error("Please log in to confirm your order.");
         router.push("/account/login?next=/checkout");
+        return;
+      }
+      // The store wants this contact confirmed first. A panel appears above the
+      // button with the code exchange in it — the basket, the address and the
+      // chosen payment method are all untouched, so placing the order after
+      // confirming is one more press of the same button.
+      if ("requiresVerification" in res && res.requiresVerification) {
+        setVerify(res.requiresVerification);
+        toast.error(res.error || "Please confirm your contact details.");
         return;
       }
       toast.error(res.error || "Something went wrong");
@@ -834,6 +858,39 @@ export function CheckoutClient({ user }: { user: CheckoutUser }) {
               </p>
             )}
           </div>
+
+          {/* ---- The store wants this contact confirmed first ----
+              Above the button, not in a dialog: the basket and the total stay
+              on screen, so it reads as one more step rather than as the order
+              having failed. Confirming stamps the account, and the same button
+              underneath then places the order. */}
+          {verify && (
+            <div className="mt-6">
+              <VerifyContactPanel
+                channel={verify.channel}
+                heading={
+                  verify.channel === "sms"
+                    ? "Confirm your mobile number"
+                    : "Confirm your email address"
+                }
+                reason="This store asks for a confirmed contact before an order goes through. One code and you're done — your basket is safe."
+                shown={verify.shown}
+                /*
+                 * Deliberately NOT `setVerify(null)`.
+                 *
+                 * Clearing it unmounts the panel the instant the code is
+                 * accepted, so the only thing left is a toast that has already
+                 * started fading — and the shopper is looking at a button that
+                 * refused them ten seconds ago with nothing on screen saying
+                 * that has changed. The panel keeps its own "confirmed" state
+                 * and says so in green above the button. Nothing needs
+                 * clearing: the account is stamped, so the next press is not
+                 * refused, and a placed order navigates away.
+                 */
+                onVerified={() => {}}
+              />
+            </div>
+          )}
 
           {/* A saved address can be picked without touching a single input, so
               native `required` no longer guards the submit — check the fields

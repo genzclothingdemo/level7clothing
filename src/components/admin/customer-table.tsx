@@ -96,7 +96,7 @@ export function CustomerTable({
                   above the money. They are actions, so they are buttons now;
                   the address is in the `title` and on the detail page. */}
               <div className="mt-1 flex items-center gap-2">
-                <ContactActions email={c.email} phone={c.phone} />
+                <ContactActions email={c.email} phone={c.phone} verification={c.verification} />
                 {c.location && (
                   <p className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                     <MapPin className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
@@ -178,7 +178,7 @@ export function CustomerTable({
                   </td>
 
                   <td className="w-px whitespace-nowrap px-3 py-3">
-                    <ContactActions email={c.email} phone={c.phone} />
+                    <ContactActions email={c.email} phone={c.phone} verification={c.verification} />
                   </td>
 
                   <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums">

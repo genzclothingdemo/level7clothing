@@ -42,7 +42,10 @@ import { toast } from "sonner";
 import { updateOrderPipelineSettings, updateSettings } from "@/app/actions/admin";
 import { dispatchModeOf } from "@/lib/orders-pipeline";
 import { InfoTip } from "@/components/store/info-tip";
-import { updatePaymentFees } from "@/app/admin/(panel)/settings/actions";
+import {
+  updatePaymentFees,
+  updateVerificationSettings,
+} from "@/app/admin/(panel)/settings/actions";
 import {
   DEFAULT_TAB,
   FIELD_META,
@@ -53,6 +56,7 @@ import {
   countByTab,
   isFeeKey,
   isPipelineKey,
+  isVerifyKey,
   resolveTab,
   tabMeta,
   type DraftKey,
@@ -60,6 +64,7 @@ import {
   type TabKey,
 } from "@/components/admin/settings-ui";
 import {
+  AccessSection,
   IntegrationsSection,
   OrdersSection,
   PaymentsSection,
@@ -83,6 +88,7 @@ const SECTIONS: Record<TabKey, (p: SectionProps) => React.ReactElement> = {
   payments: PaymentsSection,
   integrations: IntegrationsSection,
   returns: ReturnsSection,
+  add_admin: AccessSection,
 };
 
 export function SettingsForm({
@@ -165,6 +171,25 @@ export function SettingsForm({
     if (dirty.length === 0 || saving) return;
 
     /**
+     * A view-only holder is refused here so they are told *before* three
+     * actions each refuse separately and toast three times.
+     *
+     * This is emphatically **not** the permission. All three writers route
+     * through `requireAdminWrite` on the server, which refuses and records the
+     * attempt whatever the browser chooses to send — a server action is a
+     * public endpoint addressable by its id, so a check in this function is
+     * worth exactly as much as a hidden button. It is here to give an honest
+     * message, not to enforce one.
+     */
+    if (facts.viewerMode !== "full") {
+      toast.error(
+        "View-only access: this account can read every screen but cannot change anything. Ask the store owner for full access.",
+        { duration: 10000 }
+      );
+      return;
+    }
+
+    /**
      * The one combination checkout cannot survive, refused before anything is
      * written.
      *
@@ -189,7 +214,10 @@ export function SettingsForm({
     // round-tripped "unchanged" through a writer that does not own it.
     const pipelineDirty = dirty.some(isPipelineKey);
     const feesDirty = dirty.some(isFeeKey);
-    const settingsDirty = dirty.some((k) => !isPipelineKey(k) && !isFeeKey(k));
+    const verifyDirty = dirty.some(isVerifyKey);
+    const settingsDirty = dirty.some(
+      (k) => !isPipelineKey(k) && !isFeeKey(k) && !isVerifyKey(k)
+    );
 
     // Starts as the last-known-good baseline. Each group that lands overwrites
     // its own slice, so a group that fails is simply left at its old value and
@@ -247,6 +275,23 @@ export function SettingsForm({
         };
       } else {
         failures.push(res.error || "Payment fees could not be saved");
+      }
+    }
+
+    if (verifyDirty) {
+      // Third writer, same rule: these four columns are not in
+      // `settingsSchema`, so sending them to `updateSettings` would be a green
+      // toast over a write that never happened.
+      const res = await updateVerificationSettings({
+        requireSignupEmailOtp: draft.requireSignupEmailOtp,
+        requireSignupPhoneOtp: draft.requireSignupPhoneOtp,
+        requireVerifiedEmailToOrder: draft.requireVerifiedEmailToOrder,
+        requireVerifiedPhoneToOrder: draft.requireVerifiedPhoneToOrder,
+      });
+      if (res.ok) {
+        next = { ...next, ...res.settings };
+      } else {
+        failures.push(res.error || "Verification settings could not be saved");
       }
     }
 

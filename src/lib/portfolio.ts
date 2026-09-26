@@ -47,6 +47,7 @@
 import { cache } from "react";
 import { prisma } from "@/lib/prisma";
 import { resolveVideo } from "@/lib/videos";
+import { sanitisePortfolioBody } from "@/lib/sanitise-html";
 
 /* ------------------------------------------------------------------ */
 /*  Shape                                                              */
@@ -270,6 +271,18 @@ export type PortfolioProductRef = {
 export type PortfolioSource =
   /** A `PortfolioItem` row the admin wrote. */
   | "portfolio"
+  /**
+   * A `PortfolioItem` row **harvested from a product's video links**
+   * (`lib/portfolio-harvest.ts`). Still an ordinary editable row — this says
+   * where it came from, not that it is derived or read-only.
+   *
+   * **`entry.product !== null` is not the same question** and must not be used
+   * as a stand-in: a hand-written piece can name a garment too ("Wearing …"),
+   * so `product` answers *what is in the shot* while this answers *who put
+   * this row here*. They were conflated once already, which is how the
+   * portfolio became a second shop.
+   */
+  | "product-video"
   /** Pulled live from the Instagram Graph API. Only possible with a token. */
   | "instagram-api";
 
@@ -281,6 +294,24 @@ export type PortfolioSource =
  * clean and makes the client branch a plain string compare.
  */
 export type PortfolioProvider = "instagram" | "youtube" | "facebook" | "other";
+
+/**
+ * A photo beyond the tile's poster, with the optimiser question already
+ * answered — same reason as `thumbnailOptimisable` below: the grid is a client
+ * component and this module imports Prisma, so `isOptimisableImage` cannot be
+ * called across that boundary at render time.
+ */
+export type PortfolioImage = { url: string; optimisable: boolean };
+
+/**
+ * The one button an admin-authored page may carry.
+ *
+ * `href` has already passed `isSafeHref`, and a CTA is only ever present when
+ * **both** halves are set — a label with nowhere to go is a button that does
+ * nothing, and a URL with no label is invisible. Resolving that here means the
+ * storefront renders `cta && <ButtonLink>` and never has to ask.
+ */
+export type PortfolioCta = { label: string; href: string };
 
 /** One tile. Everything the grid needs, already resolved — no lookups in render. */
 export type PortfolioEntry = {
@@ -311,7 +342,34 @@ export type PortfolioEntry = {
   isFeatured: boolean;
   product: PortfolioProductRef | null;
   source: PortfolioSource;
+
+  /* ---- admin-authored pages ---- */
+
+  /**
+   * True when this piece has a written body worth opening.
+   *
+   * A boolean rather than the markup itself, because every tile on the page
+   * would otherwise carry a page of HTML through the RSC payload for a grid
+   * that shows none of it. The body comes from `getPortfolioEntryById`.
+   */
+  hasBody: boolean;
+  /** Extra photos beyond `thumbnail`, in the order the admin arranged them. */
+  images: PortfolioImage[];
+  /** Both halves present and the address checked, or `null`. */
+  cta: PortfolioCta | null;
 };
+
+/**
+ * One piece, plus the body — what a `/portfolio/<id>` page renders.
+ *
+ * `bodyHtml` is **already sanitised** (`lib/sanitise-html.ts`) and is the one
+ * value in this module intended for `dangerouslySetInnerHTML`. It is cleaned
+ * on the way in by `actions/portfolio.ts` *and* again here on the way out,
+ * because storing is not the only way a row is written — the demo seeder goes
+ * straight through Prisma, and rows predating the sanitiser were never checked
+ * at all. `null` when the piece has no body.
+ */
+export type PortfolioEntryDetail = PortfolioEntry & { bodyHtml: string | null };
 
 /** One shelf, with its copy already resolved. */
 export type PortfolioSectionGroup = {
@@ -559,6 +617,12 @@ async function fetchInstagramMedia(): Promise<
         isFeatured: false,
         product: null,
         source: "instagram-api" as const,
+        // A live post is a mirror of somebody else's page: there is no row to
+        // write a body, extra photos or a CTA on. Present and empty rather
+        // than optional, so the storefront has one shape to render.
+        hasBody: false,
+        images: [],
+        cta: null,
       };
     });
 
@@ -600,20 +664,35 @@ async function resolveProducts(
   );
 }
 
+/**
+ * The columns `rowToEntry` reads.
+ *
+ * Written out rather than taken from Prisma's generated row type so that a
+ * `select` which forgets one is a type error at the call site instead of a
+ * field that silently reads `undefined` on the storefront — the same trap
+ * CLAUDE.md records for `resolveReturnPolicy` and `isCustomisable`.
+ */
+type PortfolioRowInput = {
+  id: string;
+  kind: string;
+  title: string;
+  description: string | null;
+  url: string | null;
+  imageUrl: string | null;
+  embedHtml: string | null;
+  productId: string | null;
+  bodyHtml: string | null;
+  images: string[];
+  ctaLabel: string | null;
+  ctaUrl: string | null;
+  sourceProductId: string | null;
+  tags: string[];
+  isFeatured: boolean;
+};
+
 /** A stored row → a tile, with the product already looked up. */
 function rowToEntry(
-  row: {
-    id: string;
-    kind: string;
-    title: string;
-    description: string | null;
-    url: string | null;
-    imageUrl: string | null;
-    embedHtml: string | null;
-    productId: string | null;
-    tags: string[];
-    isFeatured: boolean;
-  },
+  row: PortfolioRowInput,
   products: Map<string, PortfolioProductRef>
 ): PortfolioEntry {
   const kind = asPortfolioKind(row.kind);
@@ -661,8 +740,47 @@ function rowToEntry(
     tags: publicTags(row.tags),
     isFeatured: row.isFeatured,
     product,
-    source: "portfolio",
+    /*
+     * **The one home for "where did this row come from".**
+     *
+     * `sourceProductId` is the stored fact and this is the only thing derived
+     * from it that crosses to the storefront — there is deliberately no second
+     * `fromCatalogue` boolean saying the same thing in different words, which
+     * is the two-readers shape CLAUDE.md keeps recording. A shelf that wants
+     * catalogue reels matches `source === "product-video"`.
+     */
+    source: row.sourceProductId ? "product-video" : "portfolio",
+    hasBody: hasBody(row.bodyHtml),
+    images: portfolioImages(row.images),
+    cta: ctaOf(row.ctaLabel, row.ctaUrl),
   };
+}
+
+/**
+ * Is there a body worth opening?
+ *
+ * Runs the sanitiser, not a `Boolean()`, because the answer has to match what
+ * `getPortfolioEntryById` will actually render. A row holding
+ * `<script>…</script>` or `<p> </p>` sanitises to nothing, and a tile
+ * promising "Read more" that opens an empty page is worse than no tile.
+ */
+function hasBody(bodyHtml: string | null): boolean {
+  return Boolean(sanitisePortfolioBody(bodyHtml).html);
+}
+
+/** Drop anything unservable and answer the optimiser question once, here. */
+function portfolioImages(urls: string[]): PortfolioImage[] {
+  return urls
+    .filter((u) => typeof u === "string" && u.trim() && isSafeHref(u.trim()))
+    .map((u) => ({ url: u.trim(), optimisable: isOptimisableImage(u.trim()) }));
+}
+
+/** Both halves or nothing — see `PortfolioCta`. */
+function ctaOf(label: string | null, url: string | null): PortfolioCta | null {
+  const text = label?.trim();
+  const href = url?.trim();
+  if (!text || !href || !isSafeHref(href)) return null;
+  return { label: text, href };
 }
 
 /**
@@ -741,6 +859,41 @@ export const getPortfolio = cache(async function getPortfolio(): Promise<Portfol
     tokenConfigured: Boolean(process.env.INSTAGRAM_ACCESS_TOKEN?.trim()),
     liveError,
   };
+});
+
+/**
+ * One piece, with its body — the read behind a `/portfolio/<id>` page.
+ *
+ * Returns `null` for a missing or hidden row, so the caller turns that into
+ * `notFound()`. It deliberately does **not** swallow a database error: a
+ * thrown query must become a 500, not a 404, for exactly the reason
+ * `getProductBySlug` does not catch either (CLAUDE.md — a caught error told
+ * Google a live page was deleted). `getPortfolio` above can afford to
+ * fall back to an empty grid because a missing portfolio is not a missing URL;
+ * a single piece is.
+ *
+ * `cache()` for per-request dedup: `generateMetadata` and the page body will
+ * both ask for the same row, and without it that is two round trips to Mumbai
+ * per view.
+ */
+export const getPortfolioEntryById = cache(async function getPortfolioEntryById(
+  id: string
+): Promise<PortfolioEntryDetail | null> {
+  if (!id?.trim()) return null;
+
+  const row = await prisma.portfolioItem.findFirst({
+    where: { id: id.trim(), isActive: true },
+  });
+  if (!row) return null;
+
+  const products = await resolveProducts(row.productId ? [row.productId] : []);
+  const entry = rowToEntry(row, products);
+
+  // Sanitised here as well as on save — see `PortfolioEntryDetail`. `null`
+  // rather than `""` so `entry.bodyHtml && <div …>` is the whole render check.
+  const { html } = sanitisePortfolioBody(row.bodyHtml);
+
+  return { ...entry, bodyHtml: html || null };
 });
 
 /**

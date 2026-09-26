@@ -3,9 +3,17 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, MapPin, Plus, Smartphone } from "lucide-react";
+import {
+  BadgeCheck,
+  Loader2,
+  MapPin,
+  Plus,
+  ShieldAlert,
+  Smartphone,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { InfoTip } from "@/components/store/info-tip";
+import { VerifyContactPanel } from "@/components/store/auth-code-panel";
 import { updateProfile } from "@/app/actions/account";
 import type { SavedAddress } from "@/app/actions/addresses";
 import { AddressSummary } from "./address-card";
@@ -18,11 +26,23 @@ import { AddressSummary } from "./address-card";
  * address book wrote `Address` rows, so the two could disagree and neither
  * could be called correct. It now shows the default address as a SUMMARY and
  * sends every change to the Addresses tab. One editor, one source of truth.
+ *
+ * ## The mobile number reads first
+ *
+ * It is the identity — the unique column, the thing that signs this person in —
+ * so it is the first line of the summary and the email sits under it as contact
+ * detail. Each carries a small confirmed / not-confirmed mark, and the
+ * unconfirmed one offers to fix itself right there. That is not decoration: if
+ * the store ever switches on "confirm your email before ordering", this is the
+ * screen that makes it fixable *before* somebody meets it at checkout with a
+ * full basket.
  */
 export function AccountProfile({
   name,
   email,
   phone,
+  emailVerified,
+  phoneVerified,
   defaultAddress,
   addressCount,
   onManageAddresses,
@@ -30,6 +50,8 @@ export function AccountProfile({
   name: string;
   email: string;
   phone: string | null;
+  emailVerified: boolean;
+  phoneVerified: boolean;
   /** The account's default `Address`, or null when the book is empty. */
   defaultAddress: SavedAddress | null;
   addressCount: number;
@@ -40,6 +62,7 @@ export function AccountProfile({
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name, phone: phone ?? "" });
   const [saving, setSaving] = useState(false);
+  const [verifying, setVerifying] = useState(false);
   const [, startTransition] = useTransition();
 
   async function onSave(e: React.FormEvent) {
@@ -52,6 +75,14 @@ export function AccountProfile({
       return;
     }
     toast.success("Profile updated");
+    // A changed number is a different number, so its old confirmation is gone.
+    // Said out loud, because the mark on the summary changes underneath them.
+    if ("unverified" in res && res.unverified) {
+      toast.warning(
+        "Your new number isn't confirmed yet — the old confirmation was for the old number.",
+        { duration: 10000 }
+      );
+    }
     setEditing(false);
     startTransition(() => router.refresh());
   }
@@ -90,24 +121,35 @@ export function AccountProfile({
               </label>
               <label className="block min-w-0">
                 <span className="mb-1.5 block text-sm text-muted-foreground">
-                  Phone
+                  Mobile number{" "}
+                  {phone && <span className="text-danger">*</span>}
                 </span>
-                <input
-                  type="tel"
-                  inputMode="tel"
-                  autoComplete="tel"
-                  value={form.phone}
-                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                  placeholder="Optional"
-                  className="input"
-                />
+                {/* The prefix is an affix, not an editable field — this store
+                    ships inside India only. See lib/phone.ts. */}
+                <div className="flex items-stretch gap-2">
+                  <span className="inline-flex h-11 shrink-0 items-center rounded-lg border border-border bg-muted px-3 text-sm text-muted-foreground">
+                    +91
+                  </span>
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    autoComplete="tel-national"
+                    maxLength={10}
+                    value={form.phone.replace(/^\+?91/, "")}
+                    onChange={(e) =>
+                      setForm({ ...form, phone: e.target.value.replace(/\D/g, "") })
+                    }
+                    placeholder="98765 43210"
+                    className="input"
+                  />
+                </div>
               </label>
             </div>
-            {/* Email is the account key and the login, so it is shown but not
-                editable here — changing it would orphan past orders. */}
+            {/* The email is contact information, not the login, and it is not
+                editable here — every past order was confirmed to it. */}
             <p className="text-xs text-muted-foreground">
-              Signed in as {email}. Contact us to change the email on your
-              account.
+              We write to {email}. Contact us to change the email on your
+              account; your mobile number is what signs you in.
             </p>
             <div className="flex flex-wrap gap-2">
               <Button type="submit" disabled={saving}>
@@ -133,11 +175,56 @@ export function AccountProfile({
             </div>
           </form>
         ) : (
-          <dl className="mt-4 space-y-3 text-sm">
-            <Row term="Name" desc={name} />
-            <Row term="Email" desc={email} />
-            <Row term="Phone" desc={phone || "Not added"} />
-          </dl>
+          <>
+            {/* Mobile first — it is the identity. Each contact carries its own
+                confirmed mark rather than one badge for the account, because
+                the two channels are confirmed separately and a single mark
+                could not say which. */}
+            <dl className="mt-4 space-y-3 text-sm">
+              <Row term="Name" desc={name} />
+              <Row
+                term="Mobile"
+                desc={phone || "Not added"}
+                mark={
+                  phone ? (
+                    <VerifiedMark verified={phoneVerified} />
+                  ) : undefined
+                }
+              />
+              <Row
+                term="Email"
+                desc={email}
+                mark={<VerifiedMark verified={emailVerified} />}
+              />
+            </dl>
+
+            {/* One offer at a time, and only for the channel that can actually
+                be confirmed today: there is no SMS gateway, so a "confirm your
+                mobile" button would send nothing. `sendMyCode` refuses it on
+                the server too — this just avoids offering it. */}
+            {!emailVerified && (
+              <div className="mt-4">
+                {verifying ? (
+                  <VerifyContactPanel
+                    channel="email"
+                    heading="Confirm your email"
+                    reason="It takes one code and means order updates definitely reach you. Some stores also ask for it before an order can be placed."
+                    shown={email}
+                    onVerified={() => startTransition(() => router.refresh())}
+                  />
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setVerifying(true)}
+                  >
+                    <BadgeCheck className="h-4 w-4" /> Confirm my email
+                  </Button>
+                )}
+              </div>
+            )}
+          </>
         )}
       </section>
 
@@ -215,7 +302,36 @@ export function AccountProfile({
   );
 }
 
-function Row({ term, desc }: { term: string; desc: string }) {
+/** Confirmed / not yet — a mark, never a sentence. The offer is below. */
+function VerifiedMark({ verified }: { verified: boolean }) {
+  return verified ? (
+    <span
+      title="Confirmed with a one-time code"
+      className="inline-flex items-center gap-1 text-[11px] font-medium text-success"
+    >
+      <BadgeCheck className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+      Confirmed
+    </span>
+  ) : (
+    <span
+      title="Not confirmed yet"
+      className="inline-flex items-center gap-1 text-[11px] text-muted-foreground"
+    >
+      <ShieldAlert className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+      Not confirmed
+    </span>
+  );
+}
+
+function Row({
+  term,
+  desc,
+  mark,
+}: {
+  term: string;
+  desc: string;
+  mark?: React.ReactNode;
+}) {
   return (
     <div className="flex justify-between gap-3">
       <dt className="shrink-0 text-muted-foreground">{term}</dt>
@@ -227,7 +343,10 @@ function Row({ term, desc }: { term: string; desc: string }) {
         `overflow-wrap: break-word` will not split inside a long token that has
         no break opportunity at all, which is exactly what an email is.
       */}
-      <dd className="min-w-0 break-all text-right font-medium">{desc}</dd>
+      <dd className="min-w-0 text-right">
+        <span className="block break-all font-medium">{desc}</span>
+        {mark && <span className="mt-0.5 block">{mark}</span>}
+      </dd>
     </div>
   );
 }

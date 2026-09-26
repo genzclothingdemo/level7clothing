@@ -34,6 +34,8 @@ import {
   HandCoins,
   KeyRound,
   Loader2,
+  Mail,
+  Smartphone,
   Truck,
   Upload,
   X,
@@ -48,6 +50,10 @@ import {
   type ReturnPolicyFacts,
   type ReturnPolicyValues,
 } from "@/components/admin/return-policy-form";
+import { TempAdminPanel } from "@/components/admin/temp-admin-panel";
+// Types only. `lib/temp-admin.ts` is `server-only`; a type import is erased at
+// build time, so this file never gains a runtime edge into it.
+import type { AdminMode, TempAdminRow } from "@/lib/temp-admin";
 import {
   AreaField,
   LinesField,
@@ -113,6 +119,35 @@ export type SettingsFacts = {
   returnFacts: ReturnPolicyFacts;
   /** Today, stamped on the server so the "closes on" preview cannot hydrate-drift. */
   todayISO: string;
+
+  /**
+   * Whether a one-time code can be sent by text, from `smsGateway()`.
+   *
+   * An environment fact, like the two key-pair booleans above, and it is on
+   * this type for the same reason: the two phone switches must be able to say
+   * "not in force" **in the card where they are set**. A store owner who
+   * switches on "confirm the mobile" and is told nothing has a rule they do not
+   * have, and finds out from a customer who could not check out.
+   */
+  sms: { ready: boolean; detail: string };
+
+  /* ---- Access tab ---- */
+  /**
+   * Everyone who can sign in besides the owner, with their state and the newest
+   * lines of their activity. Never a password hash — the panel has no use for
+   * one and a secret rendered into a page is a secret that can be read from it.
+   */
+  tempAdmins: TempAdminRow[];
+  /**
+   * The **viewer's own** mode, not a setting.
+   *
+   * It decides whether this screen's controls are offered, and nothing more:
+   * the permission itself is `requireAdminWrite` on the server. Passing it down
+   * is what lets the UI reflect the rule instead of being it.
+   */
+  viewerMode: AdminMode;
+  /** Set when the viewer is themselves a temporary admin — they cannot act on their own row. */
+  viewerTempAdminId: string | null;
 };
 
 export type SectionProps = {
@@ -157,7 +192,7 @@ function anyDirty(isDirty: (k: DraftKey) => boolean, keys: DraftKey[]): boolean 
  * fields. Nothing else was regrouped — a fold that merges two unlike things to
  * save a row is how a summary stops being able to tell the truth.
  */
-export function StoreSection({ f, set, isDirty }: SectionProps) {
+export function StoreSection({ f, set, isDirty, facts }: SectionProps) {
   const [uploading, setUploading] = useState(false);
 
   async function onLogo(e: React.ChangeEvent<HTMLInputElement>) {
@@ -458,6 +493,9 @@ export function StoreSection({ f, set, isDirty }: SectionProps) {
         />
       </SetOnce>
 
+      {/* ---- Set once: what the store asks people to prove ---- */}
+      <VerificationFold f={f} set={set} isDirty={isDirty} facts={facts} />
+
       {/* ---- Set once: where the store writes to YOU (was the Email tab) ----
           Deliberately the last fold and deliberately on this tab: it is one
           address, it is set once, and its whole meaning is "not the contact
@@ -513,6 +551,155 @@ export function StoreSection({ f, set, isDirty }: SectionProps) {
         </div>
       </SetOnce>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  1b. Verification — what the store asks people to prove             */
+/* ------------------------------------------------------------------ */
+
+const VERIFY_KEYS_LOCAL = [
+  "requireSignupEmailOtp",
+  "requireSignupPhoneOtp",
+  "requireVerifiedEmailToOrder",
+  "requireVerifiedPhoneToOrder",
+] as const satisfies readonly DraftKey[];
+
+/**
+ * Four switches, two channels, two moments — and one printed warning.
+ *
+ * ## Why all four are in one fold
+ *
+ * They are one question asked twice: *does this store want a code before it
+ * believes a contact detail, at signup and again at checkout?* Splitting the
+ * order-time pair onto the Orders tab would put half an answer on each of two
+ * screens, and neither could then state what the store actually asks for. The
+ * summary line on the closed fold is the whole policy in a few words.
+ *
+ * ## The warning is printed, not behind an (i)
+ *
+ * There is no SMS gateway. A mobile switch left on with nothing to send it
+ * with is the one state that silently means something other than what it says,
+ * so it is stated in red, in this card, the moment it applies — the same
+ * treatment the fully-unattended dispatch combination gets on the Orders tab,
+ * and for the same reason: a warning behind an (i) is a warning nobody reads.
+ *
+ * What "not in force" actually means is decided once, in `lib/otp.ts`, and
+ * this card only reports it. `orderVerificationGate` does not block an order on
+ * a channel that cannot deliver — refusing every sale with no action the
+ * shopper could take is not a gate, it is an outage.
+ */
+function VerificationFold({ f, set, isDirty, facts }: SectionProps) {
+  const dirty = anyDirty(isDirty, [...VERIFY_KEYS_LOCAL]);
+  const smsReady = facts.sms.ready;
+
+  const asks = [
+    f.requireSignupEmailOtp && "email at signup",
+    f.requireSignupPhoneOtp && "mobile at signup",
+    f.requireVerifiedEmailToOrder && "email before ordering",
+    f.requireVerifiedPhoneToOrder && "mobile before ordering",
+  ].filter((v): v is string => typeof v === "string");
+
+  const phoneOn = f.requireSignupPhoneOtp || f.requireVerifiedPhoneToOrder;
+
+  return (
+    <SetOnce
+      label="Confirming contact details"
+      summary={
+        asks.length === 0 ? (
+          "Nothing is asked"
+        ) : phoneOn && !smsReady ? (
+          <span className="font-medium text-danger">
+            {asks.length} asked · mobile cannot be sent
+          </span>
+        ) : (
+          `Asks for ${asks.join(", ")}`
+        )
+      }
+      tip="Whether the store makes people prove a contact detail with a six-digit code, and when. A code is sent the moment it is needed and expires in ten minutes. Both are off to begin with: every account that already exists was created without one, and switching these on never invalidates an account — it only asks for a code the next time that moment comes round."
+      dirty={dirty}
+    >
+      <div className="space-y-3">
+        <div className="space-y-1.5">
+          <p className="eyebrow text-muted-foreground">
+            When someone creates an account
+          </p>
+          <SwitchRow
+            label="Confirm the email address"
+            checked={f.requireSignupEmailOtp}
+            onChange={(v) => set("requireSignupEmailOtp", v)}
+            icon={<Mail className="h-4 w-4 text-muted-foreground" />}
+            detail={
+              f.requireSignupEmailOtp
+                ? "A code is emailed before the account is created."
+                : "Anyone can sign up with any address."
+            }
+            tip="The account is not created until the code checks out, so nothing half-made is ever written. It also means a typo in an address is caught at the one moment the customer is still looking at it."
+          />
+          <SwitchRow
+            label="Confirm the mobile number"
+            checked={f.requireSignupPhoneOtp}
+            onChange={(v) => set("requireSignupPhoneOtp", v)}
+            icon={<Smartphone className="h-4 w-4 text-muted-foreground" />}
+            detail={
+              !f.requireSignupPhoneOtp
+                ? "The number is saved but not confirmed."
+                : smsReady
+                  ? "A code is texted before the account is created."
+                  : "Nothing to send it with — signup continues unconfirmed."
+            }
+            tip="The mobile number is the identity on this store, so confirming it is the strongest check available — once there is something to text with."
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <p className="eyebrow text-muted-foreground">
+            Before an order can be placed
+          </p>
+          <SwitchRow
+            label="Require a confirmed email"
+            checked={f.requireVerifiedEmailToOrder}
+            onChange={(v) => set("requireVerifiedEmailToOrder", v)}
+            icon={<Mail className="h-4 w-4 text-muted-foreground" />}
+            detail={
+              f.requireVerifiedEmailToOrder
+                ? "Checkout stops and offers a code. The basket is kept."
+                : "No check at checkout."
+            }
+            tip="Checkout does not dead-end: the order is held, a panel appears above the button with the code in it, and the same button places the order a minute later. Existing customers are asked once, the first time they order after you switch this on."
+          />
+          <SwitchRow
+            label="Require a confirmed mobile"
+            checked={f.requireVerifiedPhoneToOrder}
+            onChange={(v) => set("requireVerifiedPhoneToOrder", v)}
+            icon={<Smartphone className="h-4 w-4 text-muted-foreground" />}
+            detail={
+              !f.requireVerifiedPhoneToOrder
+                ? "No check at checkout."
+                : smsReady
+                  ? "Checkout stops and offers a code. The basket is kept."
+                  : "Not in force — orders are not blocked."
+            }
+            tip="A code has to be sendable for this to mean anything. With no SMS gateway it is deliberately NOT enforced: blocking every order over a code that cannot be sent would close the store, and there would be nothing the customer could do about it."
+          />
+        </div>
+
+        {/* The one state that means something other than what it says. */}
+        {phoneOn && !smsReady && (
+          <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5">
+            <p className="flex items-start gap-1.5 text-xs font-medium text-danger">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              <span>Mobile codes cannot be sent.</span>
+            </p>
+            <p className="mt-1 pl-5 text-xs leading-relaxed text-foreground">
+              {facts.sms.detail} Signup carries on and says the number is
+              unconfirmed; checkout is not blocked. Switch these back off, or
+              connect a gateway — the code path is already built for it.
+            </p>
+          </div>
+        )}
+      </div>
+    </SetOnce>
   );
 }
 
@@ -1266,7 +1453,33 @@ export function ReturnsSection({ facts }: SectionProps) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  6. Storefront copy & product defaults                              */
+/*  6. Access — temporary admins                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * ════════════════════════════════════════════════════════════════════
+ *  MOUNT POINT — temporary admins and their activity
+ * ════════════════════════════════════════════════════════════════════
+ *
+ * `TempAdminPanel` carries its own state and its own writers
+ * (`app/actions/temp-admin.ts`), exactly as `ReturnPolicyCard` does above, so
+ * none of these columns are part of `SettingsDraft` and the shared save bar can
+ * never write them. There is nothing here for it to save: every control on the
+ * panel acts immediately and says so.
+ */
+export function AccessSection({ facts }: SectionProps) {
+  return (
+    <TempAdminPanel
+      admins={facts.tempAdmins}
+      viewerMode={facts.viewerMode}
+      viewerTempAdminId={facts.viewerTempAdminId}
+      todayISO={facts.todayISO}
+    />
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  7. Storefront copy & product defaults                              */
 /* ------------------------------------------------------------------ */
 
 export function StorefrontSection({ f, set, isDirty }: SectionProps) {

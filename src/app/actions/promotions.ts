@@ -23,13 +23,13 @@
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
-import { getAdminSession } from "@/lib/auth";
+import { requireAdminWrite } from "@/lib/auth";
+import { AdminReadOnlyError } from "@/lib/temp-admin";
 import { fromStoreDateTimeInput } from "@/lib/coupons";
 import { PROMOTION_KINDS, type PromotionKind } from "@/lib/promotions";
 
-async function requireAdmin() {
-  const session = await getAdminSession();
-  if (!session) throw new Error("Unauthorized");
+async function requireAdmin(what: string) {
+  const session = await requireAdminWrite(what);
   return session;
 }
 
@@ -202,6 +202,7 @@ function explain(error: unknown): string {
   if (error instanceof z.ZodError) {
     return error.issues[0]?.message ?? "Check the fields and try again.";
   }
+  if (error instanceof AdminReadOnlyError) return error.message;
   if (error instanceof Error && error.message === "Unauthorized") {
     return "Your session expired. Sign in again.";
   }
@@ -217,7 +218,7 @@ export async function createPromotion(
   formData: FormData
 ): Promise<PromotionActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("createPromotion");
     const parsed = promotionInput.parse(read(formData));
     await prisma.promotion.create({ data: toRow(parsed) });
     revalidateEverywhere();
@@ -232,7 +233,7 @@ export async function updatePromotion(
   formData: FormData
 ): Promise<PromotionActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("updatePromotion");
     const parsed = promotionInput.parse(read(formData));
     await prisma.promotion.update({ where: { id }, data: toRow(parsed) });
     revalidateEverywhere();
@@ -251,7 +252,7 @@ export async function setPromotionActive(
   isActive: boolean
 ): Promise<PromotionActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("setPromotionActive");
     await prisma.promotion.update({ where: { id }, data: { isActive } });
     revalidateEverywhere();
     return { success: true };
@@ -262,7 +263,7 @@ export async function setPromotionActive(
 
 export async function deletePromotion(id: string): Promise<PromotionActionResult> {
   try {
-    await requireAdmin();
+    await requireAdmin("deletePromotion");
     await prisma.promotion.delete({ where: { id } });
     revalidateEverywhere();
     return { success: true };

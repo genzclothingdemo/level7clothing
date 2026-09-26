@@ -6,6 +6,7 @@ import { runAutomationTrigger } from "@/lib/automation";
 import { prisma } from "@/lib/prisma";
 import { getPaymentFees, getSettings } from "@/lib/settings";
 import { getUserSession, setUserCookie } from "@/lib/user-auth";
+import { getVerificationSettings, orderVerificationGate } from "@/lib/otp";
 
 import { priceForSelection, repairSelection, imagesForSelection } from "@/lib/variants";
 import { comboKey } from "@/lib/options";
@@ -189,6 +190,49 @@ export async function placeOrder(input: PlaceOrderInput) {
   }
   // Active shopper — refresh the login cookie so it keeps sliding forward.
   await setUserCookie(user).catch(() => {});
+
+  /* ---- Identity verification, when the store asks for it -------------- */
+  //
+  // Two switches in Admin → Settings can require a confirmed email or a
+  // confirmed mobile before an order is accepted. Both are off by default, and
+  // the rule that shapes this is in `orderVerificationGate`: **a gate is only a
+  // gate when the customer can get through it.** A requirement whose channel
+  // cannot deliver is not enforced here — it would refuse every order with no
+  // action the shopper could take — and the settings screen says so beside the
+  // switch rather than leaving it to be discovered from a lost sale.
+  //
+  // `requiresVerification` is what makes this a stop rather than a dead end:
+  // checkout mounts the code panel on it and the order can be placed a minute
+  // later, without losing the basket.
+  const [rules, account] = await Promise.all([
+    getVerificationSettings(),
+    prisma.user
+      .findUnique({
+        where: { id: user.id },
+        select: {
+          email: true,
+          phone: true,
+          emailVerifiedAt: true,
+          phoneVerifiedAt: true,
+        },
+      })
+      .catch(() => null),
+  ]);
+  // No readable account row means the database is in trouble; the order is
+  // about to fail on its own merits. Inventing a verification refusal here
+  // would only mislabel that.
+  const gate = account ? orderVerificationGate(account, rules) : null;
+  if (gate) {
+    return {
+      ok: false as const,
+      error: gate.message,
+      requiresVerification: {
+        channel: gate.channel,
+        /** Masked for a number, plain for an address — safe to render. */
+        shown: gate.shown,
+      },
+    };
+  }
 
   const parsed = inputSchema.safeParse(input);
   if (!parsed.success) {

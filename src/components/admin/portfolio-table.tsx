@@ -85,6 +85,12 @@ export type PortfolioRow = {
   sortOrder: number;
   isFeatured: boolean;
   isActive: boolean;
+  /** Harvested from a product's video links rather than typed by hand. */
+  fromCatalogue: boolean;
+  /** Has a written page body, so it is something to read and not just a tile. */
+  hasBody: boolean;
+  /** Photos beyond the cover. */
+  extraPhotos: number;
 };
 
 const KIND_LABEL: Record<PortfolioKind, string> = {
@@ -355,8 +361,9 @@ export function PortfolioTable({
                       className="object-cover"
                     />
                   ) : (
-                    // eslint-disable-next-line @next/next/no-img-element -- host
-                    // isn't in next.config.ts remotePatterns; the optimiser 400s.
+                    // The host isn't in next.config.ts remotePatterns, and the
+                    // optimiser answers 400 rather than degrading.
+                    // eslint-disable-next-line @next/next/no-img-element
                     <img
                       src={row.thumbnail}
                       alt=""
@@ -379,6 +386,25 @@ export function PortfolioTable({
                       Hidden
                     </span>
                   )}
+                  {/* What a row *is*, without opening it. Both are plain
+                      column reads resolved on the server — see the note on
+                      `PortfolioRow`. */}
+                  {row.fromCatalogue && (
+                    <span
+                      title="Added automatically from a product's video link"
+                      className="rounded-full border border-accent/40 px-1.5 text-[10px] uppercase tracking-widest text-accent"
+                    >
+                      Catalogue
+                    </span>
+                  )}
+                  {row.hasBody && (
+                    <span
+                      title="Has a written page"
+                      className="rounded-full border border-border px-1.5 text-[10px] uppercase tracking-widest text-muted-foreground"
+                    >
+                      Page
+                    </span>
+                  )}
                 </p>
 
                 <p className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
@@ -389,6 +415,14 @@ export function PortfolioTable({
                   <span>{KIND_LABEL[row.kind]}</span>
                   <span aria-hidden>·</span>
                   <span className="tabular-nums">#{row.sortOrder}</span>
+                  {row.extraPhotos > 0 && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span>
+                        +{row.extraPhotos} photo{row.extraPhotos === 1 ? "" : "s"}
+                      </span>
+                    </>
+                  )}
                   {row.productSlug && (
                     <>
                       <span aria-hidden>·</span>

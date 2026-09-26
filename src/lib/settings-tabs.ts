@@ -129,6 +129,18 @@ export const TABS = [
     guide:
       "The return window, the reasons a customer may pick, and how a refund is worked out. This is the one owner of those columns: Admin → Returns shows the same policy read-only and links here. Everything on this tab has its own Save, separate from the bar at the foot of the screen.",
   },
+  {
+    // The key IS the `?tab=` value and is deliberately `add_admin` rather than
+    // `access`: it is what the brief named, and a tab key is a URL people
+    // bookmark. Last in the row because it is the tab opened least — once when
+    // someone is hired, once when they leave.
+    key: "add_admin",
+    label: "Access",
+    heading: "Temporary admins",
+    blurb: "Extra people who can sign in, and what they did",
+    guide:
+      "Give someone their own sign-in to this admin, for as long as you want them to have it. View-only access lets them open every screen and change nothing — that is enforced by the server on every write, not by hiding buttons, so it holds even for someone who knows how the site is built. Full access is the same as your own. Switch an account off or delete it and the person stops working on their very next click, without waiting for anything to expire. Their activity is listed underneath them, and deleting the account deletes that list with it.",
+  },
 ] as const;
 
 export type TabKey = (typeof TABS)[number]["key"];

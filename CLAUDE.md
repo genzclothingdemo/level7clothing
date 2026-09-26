@@ -159,6 +159,107 @@ So: **the edit page must `include: { productImages: { include: { media } } }`**
 and the form must rehydrate from `slot`/`variantValue`/`sortOrder`. The legacy
 mirror path is kept only as a fallback for rows saved before ProductImage existed.
 
+## The mobile number is the identity — email is contact information
+
+Changed on 2026-09-26, and it inverts an assumption most of this codebase was
+written under.
+
+- **`User.email` is NOT unique.** Two accounts may share one inbox. Any
+  `where: { email }` is now either a type error or a lie.
+- **`User.phone` IS unique**, and it is what signs you in.
+- **`phone` is nullable-but-unique on purpose.** One live account predates the
+  change and has no number; Postgres permits many NULLs under a unique index,
+  so that account keeps an email sign-in path while every new signup must give
+  a mobile. Do not "tidy" this into `String @unique` — it locks that person out.
+
+**Every phone write and every phone lookup goes through `src/lib/phone.ts`.**
+Store E.164 (`+919104499432`), display grouped, compare only the canonical
+form. The live database held four spellings of the same thing before this
+(`"+91 90000 11111"`, `"09313112610"`, `"9104499432"`, `null`), and a
+`findUnique` on any one of them missed the other three.
+
+Three places the old assumption had already leaked:
+
+- **`prisma/seed.ts`** keyed the demo customer on `email`. That stopped
+  typechecking *and* stopped identifying anybody. It also wrote the
+  un-normalised `"+91 90000 11111"` — reseeding would quietly reintroduce the
+  mess the migration cleaned up. It keys on `phone` now.
+- **`lib/customers.ts`** made an account's node *be* its `e:<email>` token, so
+  two accounts on one inbox were the same node before the "never merge two
+  accounts" rule was even consulted — one record, one combined lifetime-spend
+  figure, both people's addresses. An account is now `a:<userId>`; its email
+  joins it **only when no other account holds that address**.
+- **`account/page.tsx`** fetched orders with `{ OR: [{ userId }, { email }] }`,
+  correct only while email was unique. A second account on a shared address
+  **saw the other holder's orders**, with a *Request a return* button on goods
+  they had never bought.
+
+### OTP — email today, SMS behind one seam
+
+`OtpCode` carries `channel` (`"email"` | `"sms"`). Issue, hash, expiry, the
+attempt cap and verification are **already channel-agnostic**; only delivery
+differs, and `deliverSms()` / `smsGateway()` in `lib/otp.ts` are the single
+place a gateway lands. Codes are 6 digits, 10 minutes, 5 attempts, single use,
+HMAC-SHA256 under `AUTH_SECRET`.
+
+An OTP is **not** an automation event. A rule that could be paused or deleted
+would lock people out of their own accounts, so OTPs go direct — the same
+precedent as the password reset. Both are listed read-only on the automation
+screen so the mail inventory stays honest.
+
+Four switches in Settings, all `false` by default:
+
+| Switch | What it does today |
+|---|---|
+| `requireSignupEmailOtp` | New signups only. **No user row is created until the code checks out.** |
+| `requireSignupPhoneOtp` | Not enforceable — no gateway. The account is created, `phoneVerifiedAt` stays null, and the form says so. |
+| `requireVerifiedEmailToOrder` | Every existing user has `emailVerifiedAt: null`, so each is asked once at their next checkout. **Only safe while Resend actually delivers** — a rejected send means that customer cannot get through. |
+| `requireVerifiedPhoneToOrder` | Nothing. No gateway ⇒ not enforced, because refusing every order over a code that cannot be sent is an outage, not a gate. |
+
+## Temporary admins, and the one gate every admin write goes through
+
+`TempAdmin` + `AdminActivityLog`, managed at **Settings → Access**
+(`?tab=add_admin`). Two modes: `full`, and `readonly` which sees every screen
+and changes nothing.
+
+**`requireAdminWrite()` in `lib/auth.ts` is the permission.** A server action is
+a public endpoint addressable by its id — hiding a button removes the
+convenient way to call it and none of the others. Every admin write routes
+through it, and the log line is written inside it, so an action added tomorrow
+is gated and logged without its author doing anything.
+
+That property only holds if new write surfaces actually use it. Eight did not
+when the feature first landed — chat, promotions, both review action files,
+coupons, returns, the push broadcast, and the `upload` / `media/[id]` /
+`chat/admin` route handlers — and a view-only holder could reach all of them.
+`guardAdminWriteRoute()` is the route-handler shape (401 means sign in, 403
+means you are signed in and still may not). **Grep for `getAdminSession` before
+believing a write is gated**; it is the read-only helper and every remaining
+call site should be a read.
+
+Two things that look wrong and are not:
+
+- **`src/proxy.ts` also refuses mutating `/api/admin/*` and `/api/upload`** on a
+  `readonly` cookie payload. That is an optimistic net, not the permission — it
+  reads a token it deliberately does not verify, and it cannot see a
+  **demotion**, where the holder's token still says `full` because you changed
+  their mode after they signed in. Only the route's own guard catches that one.
+- **The dev bypass no longer wins over a real cookie.** It used to be checked
+  first, which made a view-only account untestable locally without editing
+  `.env`. The rule now: *the bypass stands in for not having signed in.* No
+  cookie, or one that does not verify, falls through to it; a cookie that
+  verifies decides, **including deciding the holder is signed out** — a
+  switched-off temporary admin must not silently become the owner.
+
+`getAdminSession` re-reads the `TempAdmin` row on every request that carries a
+`tempAdminId`, so disabling or demoting somebody takes effect on their very
+next request. The owner's token has no `tempAdminId`, so this costs them
+nothing.
+
+**Deleting a temp admin deletes their logs** (`onDelete: Cascade`). That is what
+was asked for, and it makes this an operational log for the owner's oversight,
+**not an audit record**. The screen says so before you delete.
+
 ## Zod strips anything not in the schema — silently
 
 `returnable` was missing from `productSchema` in `src/app/actions/admin.ts`, so it
@@ -194,8 +295,10 @@ check for this file before believing the database is down.
 ## SiteSettings — Admin → Settings is now the only editor
 
 This used to say "three editors, keep them apart". It is now **one**, at
-`/admin/settings`, in seven tabs: `store · orders · payments · integrations ·
-returns · storefront · email`. **Shipping is gone** — the only thing left in it
+`/admin/settings`, in six tabs: `store · orders · payments · integrations ·
+returns · add_admin`. **`storefront` and `email` were folded into `store`** —
+three screens asking about one brand — and `add_admin` (labelled **Access**) is
+the temporary-admin tab. **Shipping is gone** — the only thing left in it
 was the free-shipping threshold, which is a checkout charge and moved to
 Payments beside the cash fees; the courier credentials moved to Integrations.
 A stale `?tab=shipping` bookmark falls back to Store. Returns and Order
@@ -284,6 +387,18 @@ A "use server" file can only export async functions, found object
 and found only by loading checkout. Constants shared with a client belong in
 `lib/`, or stay module-private.
 
+**A type *re-export* breaks it too**, which is much less obvious:
+
+```ts
+export type { HarvestPlan, HarvestOutcome };   // ✗ ReferenceError at runtime
+type HarvestPlan = { … }                       // ✓ a declaration is erased
+```
+
+The action transform enumerates a module's exports into a runtime table, and a
+re-exported name lands there as a live binding even though the type itself is
+erased — so `HarvestPlan is not defined` takes down **every** action in the
+file. Declare types in place, or move them to a module with no directive.
+
 ## RSC boundary traps — neither is caught by tsc or `next build`
 
 Both of these took down live admin pages on 2026-09-22, and both have since
@@ -328,6 +443,70 @@ directory. Turbopack finds it while walking up for a lockfile and infers
 with `ENOENT .next/server/pages-manifest.json` (an App-Router-only app never
 emits that file). `next.config.ts` pins `turbopack: { root: __dirname }`. Don't
 remove it.
+
+## Portfolio — two storefront sections, four admin kinds
+
+The customer sees exactly **two** sections. Admin holds more, and the mapping is
+deliberate:
+
+- **Social** — one feed, three groups: reels harvested from a **product's**
+  video links, reels added by hand, and **all** YouTube from both sources.
+- **Pages** — admin-authored pages, achievements and bulk-order write-ups.
+
+**Social membership is `embedUrl !== null`**, not "kind is instagram". That
+makes the viewer's contract total: every tile in that feed opens and plays.
+
+**The grid mounts zero iframes.** Thumbnails only; the player mounts on open for
+the reel in view plus its immediate neighbours, and unmounts to zero on close.
+The iframe carries `key={src}` — mutating an existing iframe's `src` pushes
+session-history entries and quietly breaks Back after a few swipes.
+
+**Instagram's `/embed` has no autoplay parameter.** Nothing cross-origin can
+start it, so a non-YouTube slide shows a play mark. YouTube gets `autoplay=1`
+and really does play. Muting would make autoplay reliable at the cost of every
+reel being silent. The only real fix is the Graph API, which needs a token.
+
+### Harvest identity is the provider's id, never the URL string
+
+`instagram:<shortcode>` / `youtube:<videoId>`, read from the **URL**, never from
+the label — the product editor's Instagram/YouTube/Custom labels exist to make
+the owner's intent clear, and nothing downstream trusts them.
+
+1. **The sweep only ever creates.** There is no update branch.
+2. **A key any row already carries is covered** — harvested or hand-typed,
+   active or hidden. Hiding a tile must not resurrect it as a duplicate.
+3. **Orphans are reported, never deleted.**
+4. **Refresh is a separate, per-row, deliberate press**, touching only
+   url/title/cover/embed — never description, tags, section or position.
+
+`toRow()` deliberately **omits** `sourceProductId` — the one place an absent key
+is correct, so a form save cannot orphan a harvested row from its product.
+
+### `bodyHtml` is pasted markup — sanitised in *and* out
+
+`lib/sanitise-html.ts` is an allow-list: a tag survives only if listed, an
+attribute only if listed *for that tag*, a URL only if its scheme is listed.
+There is **no `on*` check anywhere in it** — handlers are never allowed rather
+than blocked, so an attribute invented tomorrow is dropped by default. Output is
+*assembled* from values that passed, not the input with bad parts spliced out.
+
+- **No `<iframe>`, ever** — embedding is solved more narrowly by `embedHtml` +
+  `EMBED_HOSTS`; an iframe in a body is a second, weaker door with no host check.
+- **No `style`** — it is not cosmetic, it is
+  `position:fixed;inset:0;z-index:9999` over the checkout button, a working
+  clickjack with no script involved.
+- Unknown tags are **unwrapped, not deleted** — the tag goes, the words stay.
+
+Sanitised on write **and** on read, because storing is not the only writer: the
+demo seeder goes straight through Prisma, and rows saved before the sanitiser
+existed were never checked. The read pass is the only reason the storefront may
+use `dangerouslySetInnerHTML`.
+
+> **`BLOB_READ_WRITE_TOKEN` is set nowhere** — not `.env`, not
+> `.env.vercel.backup`. Instagram CDN thumbnails carry a **~4-day signed
+> expiry**, so without a Blob store the resolver correctly refuses to store an
+> address it knows will die, and harvested reels fall back to the linked
+> product's photo. Create a Vercel Blob store to get real posters.
 
 ## Chat (replaces the old one-way inbox)
 
@@ -385,6 +564,14 @@ URLs on the current page, and each use links to the screen that owns it
 (`usageHref` in `media-library.tsx`). **Add a new owner there when you add a
 column that stores a media URL.**
 
+It happened again on 2026-09-26, and the shape is worth noting: not a new
+*owner*, a new **column on an owner already in the list**.
+`PortfolioItem.images` (a page's extra photos) joined `PortfolioItem.imageUrl`
+(its cover), and a photo used only as an extra photo read as "used by nothing".
+The portfolio read is now an `OR` across both columns — which makes the
+`onPage` test **load-bearing rather than defensive**, because a row can now come
+back for an extra photo while its cover is a file that is not on this page.
+
 ## The component-orphan trap
 
 Four finished components were imported **nowhere**, so features documented as working
@@ -418,6 +605,70 @@ outside that branch or it disappears for half the catalogue.
   dialog open, not on checkout/account/admin/order — and otherwise shows a Refresh
   prompt. A `sessionStorage` guard stops a reload loop when two deployments serve at
   once.
+
+## Push notifications — what is actually possible
+
+**A web app cannot choose the sound a notification makes.** That belongs to the
+OS. The Notifications spec's `sound` option was removed years ago and is ignored
+everywhere, and a service worker has no document and no `AudioContext`, so it
+could not play one even if the option existed. Anyone asking for a custom
+notification sound is asking for something the platform does not offer — say so
+rather than shipping something that looks like it worked.
+
+What *is* controllable, and is now set:
+
+- **`renotify: true` whenever a `tag` is present.** This was the actual "not
+  working properly". A tagged notification **replaces** the one already on
+  screen, and without `renotify` the platform does that replacement *silently*
+  — no banner, no sound, no buzz. So the first test push appeared and every one
+  after it quietly overwrote the same row, while the push service returned 201
+  and the UI said "Sent". Chrome throws `TypeError` on `renotify` without a tag,
+  so it must be conditional.
+- `silent: false` pinned, so no payload can mute the OS sound.
+- `vibrate` — Android and desktop Chrome only; iOS, macOS and Firefox ignore it.
+- An **in-app chime** for tabs that are already visible (`lib/push-chime.ts`).
+  Visible-only on purpose: a background tab would chime *underneath* the OS
+  sound.
+
+**iOS rules that make it look broken when it is not:** web push works only in an
+**installed home-screen PWA**, never a Safari tab; needs **iOS 16.4+**; the
+permission call must be the **first statement before any `await`** in the
+handler, or WebKit has already lost the user-activation; and deleting the app
+from the home screen destroys the subscription (the stale row is pruned on the
+next send's 410).
+
+**Push cannot be tested with `npm run dev`** — `PwaRegister` unregisters the
+worker outside production deliberately.
+
+### Push is an *action* on the automation engine, not a second notifier
+
+`IMPLEMENTED_ACTIONS` is `["email", "push"]`. A push rule is enqueued by the
+same `runAutomationTrigger`, deduped by the same unique index, held off by the
+same `occurredAt` guard, delayed through the same `AutomationJob` and claimed by
+the same compare-and-set. Only the final step branches, in
+`lib/push-dispatch.ts`.
+
+Three rules worth keeping:
+
+1. **A push goes to a device, and `PushSubscription.userId` is the only link
+   between a person and a device**, so every recipient resolves to account ids
+   first. A guest order falls back to accounts holding `Order.email` — which is
+   not a guess, it reaches exactly the people the email leg already reaches.
+2. **"No device" is a cancellation, not a failure.** Cancelled is terminal, so
+   it cannot stall or retry, and the dedupe row stays so the rule will not come
+   back for that subject.
+3. **Partial delivery is success.** 3 devices with 1 dead is `sent`, not
+   failed — expired subscriptions 410 and are pruned as designed.
+
+Push **reuses the rule's email template** (subject → title, opening paragraph →
+body). A separate push body would be a second place the same message is worded
+— the `defaultReturnsInfo` two-writer trap again. The editor renders the phone
+preview using the **same** `pushCopyFrom` the sender uses, never a browser
+re-implementation.
+
+A literal email address is meaningless for push, so "Someone else" is removed
+from the editor **and** rejected in the zod `superRefine` — a hidden control is
+not a rule.
 
 ## Safe areas — go through a CSS variable, never `env()` directly
 

@@ -26,7 +26,14 @@ export function AccountView({
   addresses,
   initialTab = "profile",
 }: {
-  user: { name: string; email: string; phone: string | null };
+  user: {
+    name: string;
+    email: string;
+    phone: string | null;
+    /** Whether each channel has been confirmed with a one-time code. */
+    emailVerified: boolean;
+    phoneVerified: boolean;
+  };
   orders: AccountOrder[];
   reviews: ReviewItem[];
   /** Saved `Address` rows, default first. The only address data on this page. */
@@ -167,6 +174,8 @@ export function AccountView({
               name={user.name}
               email={user.email}
               phone={user.phone}
+              emailVerified={user.emailVerified}
+              phoneVerified={user.phoneVerified}
               defaultAddress={defaultAddress}
               addressCount={addresses.length}
               onManageAddresses={() => setActiveTab("addresses")}

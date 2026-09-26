@@ -2,7 +2,8 @@
 
 import { headers } from "next/headers";
 import { z } from "zod";
-import { getAdminSession } from "@/lib/auth";
+import { getAdminSession, requireAdminWrite } from "@/lib/auth";
+import { AdminReadOnlyError } from "@/lib/temp-admin";
 import { getUserSession } from "@/lib/user-auth";
 import { getSettings } from "@/lib/settings";
 import { rateLimit } from "@/lib/chat";
@@ -218,8 +219,13 @@ export async function broadcastPush(input: {
   body: string;
   url: string;
 }): Promise<BroadcastResult> {
-  const admin = await getAdminSession();
-  if (!admin) return { ok: false, error: "Not signed in as an admin." };
+  let admin;
+  try {
+    admin = await requireAdminWrite("broadcastPush");
+  } catch (err) {
+    if (err instanceof AdminReadOnlyError) return { ok: false, error: err.message };
+    return { ok: false, error: "Not signed in as an admin." };
+  }
 
   if (!pushConfigured()) {
     return { ok: false, error: "VAPID keys are not set on this deployment." };

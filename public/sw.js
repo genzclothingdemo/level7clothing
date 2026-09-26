@@ -115,6 +115,14 @@ const NOTIFICATION_ICON = "/icons/icon-192.png";
 const NOTIFICATION_BADGE = "/icons/icon-maskable-192.png";
 
 /**
+ * Buzz pattern: a short double tap, not a long single one.
+ *
+ * Android and desktop Chrome honour this; iOS, macOS and Firefox ignore it
+ * silently. It is `[ms on, ms off, ms on]`.
+ */
+const NOTIFICATION_VIBRATE = [90, 60, 90];
+
+/**
  * Read a push payload without ever throwing.
  *
  * A push can legitimately carry no data at all, and an encryption or encoding
@@ -154,24 +162,78 @@ function readPushData(event) {
   };
 }
 
+/**
+ * Build the `showNotification` options.
+ *
+ * ## `renotify` is the fix for "the second one never arrives"
+ *
+ * A `tag` is a collapse key: a new notification carrying a tag **replaces** the
+ * one already on screen instead of stacking. Without `renotify`, the platform
+ * does that replacement *quietly* — no banner, no sound, no buzz. The row in
+ * Notification Centre updates and nothing tells anyone.
+ *
+ * That is exactly what "Send a test" looked like. The first test appeared; the
+ * second, third and fourth all carried `tag: "l7-test"`, so they silently
+ * overwrote it and the store looked broken while the push service was
+ * returning 201 every time.
+ *
+ * `renotify: true` says "replace it, but alert me again". It is only legal
+ * **with** a tag — Chrome throws `TypeError: renotify without tag` otherwise —
+ * which is why it is set inside the `tag` branch and nowhere else.
+ *
+ * `silent` is pinned `false` rather than left to default, because that is the
+ * one flag that would mute the OS sound, and a payload must never be able to
+ * reach it.
+ */
+function notificationOptions(data) {
+  const options = {
+    body: data.body,
+    icon: NOTIFICATION_ICON,
+    badge: NOTIFICATION_BADGE,
+    vibrate: NOTIFICATION_VIBRATE,
+    silent: false,
+    timestamp: Date.now(),
+    // The click target rides on the notification itself, so
+    // `notificationclick` needs no state of its own.
+    data: { url: data.url },
+  };
+
+  if (data.tag) {
+    options.tag = data.tag;
+    options.renotify = true;
+  }
+
+  return options;
+}
+
 self.addEventListener("push", (event) => {
   const data = readPushData(event);
 
   event.waitUntil(
     (async () => {
+      // Tell any open, visible tab so it can play the in-app chime. The OS
+      // sound is the OS's business and cannot be chosen from here, but a
+      // notification that lands while someone is already looking at the store
+      // is the one case where the platform often plays nothing at all.
+      await chimeOpenClients(data);
+
       try {
+        await self.registration.showNotification(data.title, notificationOptions(data));
+        return;
+      } catch {
+        /* an option was rejected — retry with only what every platform takes */
+      }
+
+      try {
+        // Keep the body and the click target: a notification that says the
+        // right thing and opens the right page is still the whole point.
         await self.registration.showNotification(data.title, {
           body: data.body,
-          icon: NOTIFICATION_ICON,
-          badge: NOTIFICATION_BADGE,
-          tag: data.tag,
-          // The click target rides on the notification itself, so
-          // `notificationclick` needs no state of its own.
           data: { url: data.url },
         });
         return;
       } catch {
-        /* something in the options was rejected — retry with the minimum */
+        /* still refused — fall through to the bare minimum */
       }
 
       try {
@@ -179,7 +241,7 @@ self.addEventListener("push", (event) => {
           body: PUSH_FALLBACK.body,
         });
       } catch {
-        // Both attempts failed, which means the platform is refusing to show
+        // Every attempt failed, which means the platform is refusing to show
         // anything at all. Swallow it: a rejected `waitUntil` adds an
         // unhandled rejection on top of a notification that was never going
         // to appear, and changes nothing the shopper can see.
@@ -187,6 +249,37 @@ self.addEventListener("push", (event) => {
     })()
   );
 });
+
+/**
+ * Nudge open tabs to play the in-app chime.
+ *
+ * A service worker has no document and no audio, so it cannot make a sound
+ * itself — it can only ask a page to. Only **visible** clients are asked:
+ * a backgrounded tab would double up with the OS notification sound, and two
+ * sounds for one event is worse than one.
+ *
+ * Failure here must never stop the notification being shown, so every step is
+ * guarded and the caller does not depend on the result.
+ */
+async function chimeOpenClients(data) {
+  try {
+    const clients = await self.clients.matchAll({
+      type: "window",
+      includeUncontrolled: true,
+    });
+    for (const client of clients) {
+      if (client.visibilityState !== "visible") continue;
+      client.postMessage({
+        type: "L7_PUSH",
+        title: data.title,
+        body: data.body,
+        url: data.url,
+      });
+    }
+  } catch {
+    /* no clients, or postMessage refused — the notification still shows */
+  }
+}
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();

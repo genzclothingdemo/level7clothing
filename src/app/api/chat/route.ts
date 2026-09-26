@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { runAutomationTrigger } from "@/lib/automation";
 import {
   createChatMessage,
   ensureOwnThread,
@@ -136,6 +137,29 @@ export async function POST(req: Request) {
     body: body.value,
     attachment: attachment.value,
   });
+
+  /**
+   * Tell the store somebody is waiting.
+   *
+   * **Awaited, not fired and forgotten.** A serverless function is killed
+   * shortly after its response is flushed, so a `void`ed promise here is a
+   * notification that arrives only when the instance happens to survive long
+   * enough — which is the worst kind of unreliable, because it works in
+   * development. `runAutomationTrigger` is written never to throw, so awaiting
+   * it cannot cost the customer their message; the `.catch` matches the other
+   * five call sites and covers a rejection the contract says cannot happen.
+   *
+   * The cost is one indexed query when no chat rule is switched on, because
+   * the engine returns before resolving anything if it finds no active rule.
+   *
+   * `direction` is the only fact the database cannot supply: this thread
+   * produces both chat triggers, and a *delayed* rule draining an hour later
+   * would otherwise read the newest row — which by then may be the reply.
+   */
+  await runAutomationTrigger("chat.message_received", {
+    id: thread.id,
+    context: { direction: "inbound" },
+  }).catch((err) => console.error("[chat] inbound automation failed:", err));
 
   return NextResponse.json({ threadId: thread.id, message });
 }

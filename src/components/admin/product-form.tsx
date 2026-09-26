@@ -43,6 +43,56 @@ import type { ProductDTO, ProductOption, ProductVideo } from "@/lib/types";
 
 type SubcategoryOption = { id: string; name: string; categoryName: string };
 
+/* ------------------------------------------------------------------ */
+/*  Video link labels                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The two presets offered for a video link's label.
+ *
+ * These are the *stored* strings, not display copy — `resolveVideo` uses the
+ * title as the card's caption, so what is picked here is what a shopper reads.
+ */
+const VIDEO_LABELS = ["Instagram", "YouTube"] as const;
+
+/**
+ * Which option the select is showing.
+ *
+ * An empty title reads as **Custom**, deliberately: with one `title` column
+ * there is nothing to distinguish "not chosen yet" from "chosen Custom and
+ * not typed yet", and inventing a third state would mean the select could
+ * show one thing while the row stored another. Custom with an empty box is
+ * also exactly what this control used to be, so nothing regresses.
+ */
+function videoTitleMode(title: string): string {
+  const hit = VIDEO_LABELS.find((l) => l === title.trim());
+  return hit ?? "custom";
+}
+
+/**
+ * What the URL looks like, for the placeholder only.
+ *
+ * Read from the address rather than the label, which is the rule everywhere
+ * this data is used: `resolveVideo` and `lib/portfolio-harvest.ts` both
+ * resolve the provider themselves, so a mislabelled row still plays and
+ * harvests correctly. This is a hint to the person typing, nothing more.
+ */
+function detectedVideoLabel(url: string): string | null {
+  const raw = (url ?? "").trim();
+  if (!raw) return null;
+  let host: string;
+  try {
+    host = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).hostname
+      .replace(/^www\./, "")
+      .toLowerCase();
+  } catch {
+    return null;
+  }
+  if (host.endsWith("instagram.com")) return "Instagram";
+  if (host.endsWith("youtube.com") || host.endsWith("youtu.be")) return "YouTube";
+  return null;
+}
+
 type Props = {
   product?: ProductDTO;
   categories: string[];
@@ -1301,13 +1351,54 @@ export function ProductForm({
                 <div className="mb-3 space-y-2">
                   {videos.map((v, i) => (
                     <div key={i} className="flex flex-wrap items-center gap-2">
-                      <input
-                        value={v.title}
-                        onChange={(e) => setVideoField(i, "title", e.target.value)}
-                        className="input h-11 w-full min-w-0 sm:h-10 sm:w-[13rem]"
-                        aria-label={`Video ${i + 1} title`}
-                        placeholder="Title"
-                      />
+                      {/* The label is a choice, not free text.
+                          Two reasons, and the second is the real one:
+                          "Instagram" typed nine different ways made this rail
+                          read as nine different things, and the portfolio
+                          harvests these links (`lib/portfolio-harvest.ts`) —
+                          a readable, consistent label is what lets the owner
+                          see at a glance what is about to be pulled across.
+                          **Nothing downstream trusts it.** Harvesting and
+                          `resolveVideo` both read the provider out of the URL,
+                          so a row labelled Instagram pointing at YouTube still
+                          plays as YouTube. The label is for the human. */}
+                      <select
+                        value={videoTitleMode(v.title)}
+                        onChange={(e) =>
+                          // Picking a preset writes that exact label; picking
+                          // Custom clears it so the box beside opens empty.
+                          // `videoTitleMode` reads "" back as Custom, so there
+                          // is no third "unset" state to get out of step with
+                          // what is on screen.
+                          setVideoField(
+                            i,
+                            "title",
+                            e.target.value === "custom" ? "" : e.target.value
+                          )
+                        }
+                        aria-label={`Video ${i + 1} label`}
+                        className="input h-11 w-full min-w-0 sm:h-10 sm:w-[10rem]"
+                      >
+                        {VIDEO_LABELS.map((label) => (
+                          <option key={label} value={label}>
+                            {label}
+                          </option>
+                        ))}
+                        <option value="custom">Custom…</option>
+                      </select>
+                      {videoTitleMode(v.title) === "custom" && (
+                        <input
+                          value={v.title}
+                          onChange={(e) => setVideoField(i, "title", e.target.value)}
+                          className="input h-11 w-full min-w-0 sm:h-10 sm:w-[10rem]"
+                          aria-label={`Video ${i + 1} custom label`}
+                          placeholder={
+                            detectedVideoLabel(v.url)
+                              ? `e.g. ${detectedVideoLabel(v.url)} — the making of`
+                              : "Your own label"
+                          }
+                        />
+                      )}
                       <input
                         value={v.url}
                         onChange={(e) => setVideoField(i, "url", e.target.value)}

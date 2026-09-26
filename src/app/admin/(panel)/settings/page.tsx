@@ -4,6 +4,9 @@ import { isRazorpayConfigured } from "@/lib/razorpay";
 import { isNimbusPostConfigured } from "@/lib/nimbuspost";
 import { normaliseReturnReasons } from "@/lib/returns";
 import { dispatchModeOf, normalisePipelineSettings } from "@/lib/orders-pipeline";
+import { getAdminSession } from "@/lib/auth";
+import { listTempAdmins } from "@/lib/temp-admin";
+import { smsGateway } from "@/lib/otp";
 import { InfoTip } from "@/components/store/info-tip";
 import { SettingsForm } from "@/components/admin/settings-form";
 // Runtime values come from lib/, NOT from settings-ui — that file is
@@ -96,11 +99,22 @@ export default async function AdminSettings({
 }: {
   searchParams: Promise<{ tab?: string }>;
 }) {
-  const [{ tab: rawTab }, row, { catalogue, returnableSplit }] = await Promise.all([
-    searchParams,
-    readRow(),
-    readCatalogue(),
-  ]);
+  const [{ tab: rawTab }, row, { catalogue, returnableSplit }, tempAdmins, viewer] =
+    await Promise.all([
+      searchParams,
+      readRow(),
+      readCatalogue(),
+      // Read on every load of this screen, not only when the Access tab is
+      // open: `SettingsForm` holds one draft across all six tabs and mounts
+      // whichever is selected, so a section that had to fetch its own data
+      // would either suspend on a tab switch or not exist until one. It is
+      // three queries against tables that hold a handful of rows.
+      listTempAdmins(),
+      // The panel layout has already established there is a session; this reads
+      // it again only to learn the viewer's own mode, and `getAdminSession` is
+      // memoised per request so it is not a second round trip.
+      getAdminSession(),
+    ]);
 
   // `resolveTab` and not a bare `isTabKey` check: `?tab=storefront` and
   // `?tab=email` are retired keys that now open Store, and that has to be a
@@ -143,6 +157,14 @@ export default async function AdminSettings({
     nimbusEnabled: row?.nimbusEnabled ?? d.nimbusEnabled,
     defaultMaterialsCare: row?.defaultMaterialsCare ?? d.defaultMaterialsCare,
     defaultShippingInfo: row?.defaultShippingInfo ?? d.defaultShippingInfo,
+
+    // The four verification switches. Their own writer
+    // (`updateVerificationSettings`), so they are seeded here and never routed
+    // through `updateSettings`, which does not declare them.
+    requireSignupEmailOtp: row?.requireSignupEmailOtp ?? false,
+    requireSignupPhoneOtp: row?.requireSignupPhoneOtp ?? false,
+    requireVerifiedEmailToOrder: row?.requireVerifiedEmailToOrder ?? false,
+    requireVerifiedPhoneToOrder: row?.requireVerifiedPhoneToOrder ?? false,
 
     // Listed rather than spread. `PipelineSettings` still carries the legacy
     // `autoShipOnConfirm` boolean, which this draft deliberately does not —
@@ -190,6 +212,19 @@ export default async function AdminSettings({
     // Stamped on the server so the policy card's "closes on" preview cannot
     // differ between the server render and hydration.
     todayISO: new Date().toISOString(),
+
+    // Whether a one-time code can actually be sent by text, and the sentence
+    // that explains it if not. Read on the server because the answer is an
+    // environment fact; printed beside the two phone switches because a switch
+    // that cannot be honoured has to say so where it is set, not at the till.
+    sms: smsGateway(),
+
+    tempAdmins,
+    // Defaults to the narrower mode if the session somehow read back empty.
+    // This only decides what the UI offers — the server refuses a write from a
+    // view-only holder regardless — so erring towards "offer nothing" is free.
+    viewerMode: viewer?.mode ?? "readonly",
+    viewerTempAdminId: viewer?.tempAdminId ?? null,
   };
 
   return (

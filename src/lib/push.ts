@@ -281,7 +281,17 @@ export type SendResult = {
   pruned: number;
 };
 
-type Target = { endpoint: string; p256dh: string; auth: string };
+/**
+ * One device, in the shape `sendToTargets` needs.
+ *
+ * Exported because `lib/push-dispatch.ts` assembles a list of these for the
+ * person an automation rule names, rather than for "everybody" — but the
+ * sending, the chunking and the pruning stay here, so there is still exactly
+ * one place that talks to a push service.
+ */
+export type PushTarget = { endpoint: string; p256dh: string; auth: string };
+
+type Target = PushTarget;
 
 /** How many pushes are in flight at once. Enough to be quick, not a flood. */
 const CONCURRENCY = 20;
@@ -397,6 +407,44 @@ export async function broadcast(
   }
 
   return { ...total, ok: true };
+}
+
+/**
+ * Every device belonging to these accounts.
+ *
+ * The unit is an **account**, not an address, because that is the only link
+ * this schema has between a person and a device — `PushSubscription.userId` is
+ * the whole of it. Turning "the customer on this order" into a set of account
+ * ids is `lib/push-dispatch.ts`'s job; turning account ids into devices is
+ * this one's.
+ *
+ * `take` is a bound, not a policy: nobody legitimately has more devices than
+ * this, and an unbounded read here would hand a single automation job an
+ * arbitrarily large fan-out.
+ */
+export async function targetsForUsers(
+  userIds: string[],
+  limit = 20
+): Promise<PushTarget[]> {
+  const ids = [...new Set(userIds.filter(Boolean))];
+  if (ids.length === 0) return [];
+  return prisma.pushSubscription
+    .findMany({
+      where: { userId: { in: ids } },
+      orderBy: { lastSeenAt: "desc" },
+      take: limit,
+      select: { endpoint: true, p256dh: true, auth: true },
+    })
+    .catch(() => []);
+}
+
+/** How many devices these accounts have between them. */
+export async function countTargetsForUsers(userIds: string[]): Promise<number> {
+  const ids = [...new Set(userIds.filter(Boolean))];
+  if (ids.length === 0) return 0;
+  return prisma.pushSubscription
+    .count({ where: { userId: { in: ids } } })
+    .catch(() => 0);
 }
 
 /** Count of live subscriptions, for the admin screen. */

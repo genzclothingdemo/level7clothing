@@ -432,7 +432,7 @@ export async function applyReverseScan(
   // which is where someone will actually see it.
   const cancelled = proposed === null && isCancelledReverseScan(scan.raw);
 
-  return record(
+  const moved = await record(
     returnId,
     { status: proposed ?? undefined, note, by: scan.by },
     {
@@ -450,6 +450,41 @@ export async function applyReverseScan(
           : {}),
     }
   );
+
+  /**
+   * Tell the customer their parcel moved — **now, not on the next cron pass.**
+   *
+   * `record` returns a status only when one genuinely advanced
+   * (`advanceReturnStatus` answers `null` for a repeat, a late scan or a
+   * terminal row), so this fires on real movement and on nothing else.
+   *
+   * Until this line the reverse leg had no call site at all: courier-driven
+   * pickups reached the engine only through `sweepReturnStatuses`, which runs
+   * inside the automation pass every 15–60 minutes. That worked, and "your
+   * return was collected" arriving up to an hour after the courier left is
+   * still the wrong message at the wrong time — the customer has watched
+   * somebody take their parcel and heard nothing.
+   *
+   * **The sweep stays**, and the two are not a duplicate. Both land on the
+   * same `<returnId>:<status>` dedupe key, so whichever gets there first wins
+   * at the unique index and the other is skipped — the engine's header names
+   * exactly this case ("two firing sites for one event") as the reason that
+   * key has the status in it. The sweep is now the net for a scan this process
+   * never saw, rather than the only way one is ever noticed.
+   *
+   * Imported dynamically, the way `lib/fulfilment.ts` does it: the engine
+   * pulls in Prisma, Resend and the push stack, and this module is reached
+   * from a webhook that must not pay for any of that on a scan that changes
+   * nothing.
+   */
+  if (moved) {
+    const { runAutomationTrigger } = await import("./automation");
+    await runAutomationTrigger("return.status_changed", { id: returnId }).catch(
+      (err) => console.error("[nimbus-returns] reverse-leg automation failed:", err)
+    );
+  }
+
+  return moved;
 }
 
 /**

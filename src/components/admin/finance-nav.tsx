@@ -60,7 +60,7 @@ const chip =
  * more, so at 375px this bar alone stood between the heading and the first
  * figure for about 290px — before the page had said anything. A single
  * swipeable line is what the storefront's own filter rails already do
- * (`shop-filters`, `portfolio-tabs`), and `shrink-0` on the chip is what stops
+ * (`shop-filters`), and `shrink-0` on the chip is what stops
  * the labels squashing instead of overflowing.
  *
  * `overflow-visible` from `sm` matters: a scroll container clips, and these

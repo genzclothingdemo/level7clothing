@@ -162,10 +162,24 @@ model Order {
 // -------- Customer accounts --------
 model User {
   id               String    @id @default(cuid())
-  email            String    @unique
+  // NOT unique, on purpose, as of 2026-09-26. Two accounts may share one
+  // inbox — a couple, a family, a shop ordering for staff — and refusing that
+  // forced people into throwaway addresses the store could never reach. The
+  // signup warns that the address is already in use and shows the masked
+  // number it belongs to, then lets them continue.
+  email            String
+  emailVerifiedAt  DateTime?
   passwordHash     String
   name             String
-  phone            String?
+  // **The identity.** Canonical E.164 (`+919104499432`) — always written
+  // through `normalisePhone()` in lib/phone.ts, never raw, or a lookup by one
+  // spelling misses an account stored under another.
+  //
+  // Nullable because one account predates this change and has no number;
+  // Postgres permits many NULLs under a unique index, so legacy rows keep
+  // working and sign in by email. Every new signup requires a number.
+  phone            String?   @unique
+  phoneVerifiedAt  DateTime?
   // Saved default shipping address (prefilled at checkout, remembered per order).
   address          String?
   city             String?
@@ -335,6 +349,18 @@ model SiteSettings {
   // a nominal amount on, in whole rupees, added to the order total at checkout
   // and recorded on `Order.paymentFee` so a past order can always be explained.
   // 0 means "absorb it", which is the default.
+  // ---- Identity verification ----
+  // Four independent switches, because the two channels and the two moments
+  // really are independent: a store may want a verified email to open an
+  // account but not care again until checkout, or the exact reverse.
+  //
+  // SMS OTP has no gateway yet. The phone switches run through the same code
+  // path and simply have nothing to send, which the settings screen states
+  // rather than leaving it to be discovered by a customer who cannot check out.
+  requireSignupEmailOtp       Boolean @default(false)
+  requireSignupPhoneOtp       Boolean @default(false)
+  requireVerifiedEmailToOrder Boolean @default(false)
+  requireVerifiedPhoneToOrder Boolean @default(false)
   codFeeAmount          Int      @default(0)
   partialFeeAmount      Int      @default(0)
   announcement          String?  @default("Join the club — exclusive deals and early access to new drops")
@@ -733,6 +759,19 @@ model PortfolioItem {
   imageUrl    String? // thumbnail or uploaded image
   embedHtml   String? // oEmbed/iframe html when available
   productId   String? // when this piece is about one product
+  // ---- Admin-authored pages ----
+  // A row can also BE a page rather than point at one: a bulk-order write-up,
+  // an achievement, a press piece. `bodyHtml` is sanitised on the way in and
+  // rendered as markup; `images` carries the extra photos such a page needs
+  // beyond its single thumbnail.
+  bodyHtml    String?
+  images      String[] @default([])
+  ctaLabel    String?
+  ctaUrl      String?
+  // Set when the row was harvested from a product's video links rather than
+  // typed by hand. Lets the storefront say "from our catalogue" and lets a
+  // re-harvest update its own rows without touching anything the owner wrote.
+  sourceProductId String?
   tags        String[] @default([])
   sortOrder   Int      @default(0)
   isFeatured  Boolean  @default(false)
@@ -820,4 +859,73 @@ model AutomationJob {
   // must not queue the same reminder twice.
   @@unique([ruleId, subjectType, subjectId])
   @@index([status, runAt])
+}
+
+// -------- One-time codes --------
+// Email OTP today, SMS OTP the moment a gateway exists. The row is written the
+// same way for both, so turning SMS on is a sender and a toggle — not a
+// migration and not a second table that drifts from this one.
+model OtpCode {
+  id      String @id @default(cuid())
+  /** "signup" | "login" | "reset" | "verify-email" | "verify-phone" */
+  purpose String
+  /** "email" | "sms" */
+  channel String
+  /** Canonical target: a lowercased address, or E.164 for a number. */
+  target  String
+  /** Hashed, never stored in the clear — a leaked table must not be a login. */
+  codeHash String
+  /** Wrong guesses. A code is burned well before brute force is interesting. */
+  attempts Int      @default(0)
+  expiresAt DateTime
+  consumedAt DateTime?
+  userId    String?
+  createdAt DateTime @default(now())
+
+  @@index([target, purpose])
+  @@index([expiresAt])
+}
+
+// -------- Temporary admins --------
+// A second way into the admin panel that the owner can hand out and take back,
+// separate from `AdminUser` (the single permanent login from the env vars).
+//
+// `mode` is the point: a "read only" holder can see every screen and change
+// nothing. That is enforced in the server actions, not just hidden in the UI —
+// a server action is a public endpoint and hiding its button is not a
+// permission.
+model TempAdmin {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  /** "readonly" | "full" */
+  mode         String   @default("readonly")
+  isActive     Boolean  @default(true)
+  /** Optional automatic expiry. Null = until it is switched off or deleted. */
+  expiresAt    DateTime?
+  lastLoginAt  DateTime?
+  note         String?
+
+  logs      AdminActivityLog[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// What a temporary admin did. Cascades on delete: removing the person removes
+// their trail, which is what was asked for — so this is an operational log for
+// the owner's own oversight, NOT an audit record to be relied on afterwards.
+model AdminActivityLog {
+  id          String    @id @default(cuid())
+  tempAdminId String
+  tempAdmin   TempAdmin @relation(fields: [tempAdminId], references: [id], onDelete: Cascade)
+  /** "login" | "view" | "create" | "update" | "delete" | "blocked" */
+  action String
+  /** The screen or server action it happened on. */
+  path   String?
+  /** One human-readable line: what changed, or why it was refused. */
+  detail String?
+  at     DateTime @default(now())
+
+  @@index([tempAdminId, at])
 }

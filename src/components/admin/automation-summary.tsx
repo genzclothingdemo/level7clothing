@@ -37,12 +37,19 @@ export function delaySummary(minutes: number): string {
   return `After ${hours}h ${minutes % 60}m`;
 }
 
-/** The one sentence a rule is: trigger → conditions → delay → action. */
+/**
+ * The one sentence a rule is: trigger → conditions → delay → action.
+ *
+ * `verb` carries the channel ("email" / "notify") rather than being hardcoded:
+ * a rule is one sentence, and a sentence that says "email" about a push rule is
+ * a readout that lies.
+ */
 export function ruleSentence(opts: {
   triggerLabel: string;
   conditions: string;
   delayMinutes: number;
   recipient: string;
+  verb?: string;
 }): string {
   const when =
     opts.conditions === "Every time"
@@ -50,7 +57,7 @@ export function ruleSentence(opts: {
       : `${opts.triggerLabel} (${opts.conditions})`;
   const delay =
     opts.delayMinutes > 0 ? `, ${delaySummary(opts.delayMinutes).toLowerCase()}` : "";
-  return `When ${when.charAt(0).toLowerCase()}${when.slice(1)}${delay} → email ${opts.recipient.toLowerCase()}.`;
+  return `When ${when.charAt(0).toLowerCase()}${when.slice(1)}${delay} → ${opts.verb ?? "email"} ${opts.recipient.toLowerCase()}.`;
 }
 
 /** The preset delays worth one tap. Anything else is typed. */

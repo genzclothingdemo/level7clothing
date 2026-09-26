@@ -11,8 +11,10 @@ import {
   publicTags,
   sectionOf,
 } from "@/lib/portfolio";
+import { planHarvest } from "@/lib/portfolio-harvest";
 import { resolveVideo } from "@/lib/videos";
 import { PortfolioFilters } from "@/components/admin/portfolio-filters";
+import { PortfolioHarvest } from "@/components/admin/portfolio-harvest";
 import {
   PortfolioTable,
   type PortfolioRow,
@@ -21,7 +23,13 @@ import {
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Portfolio" };
 
-type SP = Promise<{ q?: string; kind?: string; status?: string; section?: string }>;
+type SP = Promise<{
+  q?: string;
+  kind?: string;
+  status?: string;
+  section?: string;
+  source?: string;
+}>;
 
 export default async function AdminPortfolio({
   searchParams,
@@ -33,11 +41,25 @@ export default async function AdminPortfolio({
   const kind = sp.kind ?? "";
   const status = sp.status ?? "";
   const section = sp.section ?? "";
-  const filtered = Boolean(q || kind || status || section);
+  const source = sp.source ?? "";
+  const filtered = Boolean(q || kind || status || section || source);
 
-  const rows = await prisma.portfolioItem
-    .findMany({ orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }] })
-    .catch(() => []);
+  /*
+   * Both reads together: they are independent, and this screen is already one
+   * of the query-heavy ones CLAUDE.md warns about. `planHarvest` fails soft —
+   * `null` simply hides the suggestion panel rather than taking the list down
+   * with it, which is the right direction for a hint about work that has not
+   * been done.
+   */
+  const [rows, harvestPlan] = await Promise.all([
+    prisma.portfolioItem
+      .findMany({ orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }] })
+      .catch(() => []),
+    planHarvest().catch((error: unknown) => {
+      console.error("[portfolio] could not plan the harvest:", error);
+      return null;
+    }),
+  ]);
 
   // One query for every linked product rather than one per row. Only active
   // products come back, which is what makes `danglingProduct` below meaningful
@@ -89,6 +111,13 @@ export default async function AdminPortfolio({
       sortOrder: r.sortOrder,
       isFeatured: r.isFeatured,
       isActive: r.isActive,
+      // Provenance and shape, so the list says what a row *is* without
+      // opening it. All three are resolved here for the same reason the
+      // section is: the table is a client component and `lib/portfolio.ts`
+      // imports Prisma, so nothing may be worked out during render.
+      fromCatalogue: Boolean(r.sourceProductId),
+      hasBody: Boolean(r.bodyHtml?.trim()),
+      extraPhotos: r.images.length,
     };
   });
 
@@ -101,6 +130,11 @@ export default async function AdminPortfolio({
     if (status === "hidden" && row.isActive) return false;
     if (status === "featured" && !row.isFeatured) return false;
     if (section && row.section !== section) return false;
+    // "Where did this row come from?" is a question the harvest panel makes
+    // worth asking, and it is a column read rather than a derived one.
+    if (source === "catalogue" && !row.fromCatalogue) return false;
+    if (source === "written" && row.fromCatalogue) return false;
+    if (source === "page" && !row.hasBody) return false;
     if (q) {
       // Searches the raw tags too, so an admin who knows a row is tagged
       // `set:demo` can still find it by typing that.
@@ -163,6 +197,13 @@ export default async function AdminPortfolio({
           the shot.
         </p>
       </div>
+
+      {/* Reels already in the catalogue. Detection is automatic; publishing
+          is a press — see the header of `portfolio-harvest.tsx` for why the
+          old always-on derived read was deleted. The plan is read here rather
+          than in a mount effect, so the panel arrives with its answer instead
+          of flashing a spinner on a screen the owner opens constantly. */}
+      <PortfolioHarvest initialPlan={harvestPlan} />
 
       <div className="mt-6 min-w-0">
         {/* `useSearchParams` needs a Suspense boundary above it. */}

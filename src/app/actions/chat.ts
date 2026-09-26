@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
-import { getAdminSession } from "@/lib/auth";
+import { requireAdminWrite } from "@/lib/auth";
 
 /**
  * Admin-side chat housekeeping.
@@ -14,15 +14,14 @@ import { getAdminSession } from "@/lib/auth";
  * is left are the rare, deliberate mutations, where a revalidate is welcome.
  */
 
-async function requireAdmin() {
-  const session = await getAdminSession();
-  if (!session) throw new Error("Unauthorized");
+async function requireAdmin(what: string) {
+  const session = await requireAdminWrite(what);
   return session;
 }
 
 /** Archive a conversation, or bring it back. Either side writing reopens it. */
 export async function setChatThreadClosed(threadId: string, closed: boolean) {
-  await requireAdmin();
+  await requireAdmin("setChatThreadClosed");
   if (!threadId) return { ok: false as const, error: "Missing thread" };
 
   await prisma.chatThread.update({
@@ -40,7 +39,7 @@ export async function setChatThreadClosed(threadId: string, closed: boolean) {
  * recoverable, which is why the UI asks first.
  */
 export async function deleteChatThread(threadId: string) {
-  await requireAdmin();
+  await requireAdmin("deleteChatThread");
   if (!threadId) return { ok: false as const, error: "Missing thread" };
 
   await prisma.chatThread.delete({ where: { id: threadId } });

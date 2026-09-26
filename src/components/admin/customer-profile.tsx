@@ -12,12 +12,14 @@ import {
   PackageX,
   Phone,
   ShieldCheck,
+  ShieldQuestion,
   ShoppingBag,
   ShoppingCart,
   UserRound,
   XCircle,
 } from "lucide-react";
 import { formatINR, whatsappLink } from "@/lib/utils";
+import { formatPhone } from "@/lib/phone";
 import { Block, BtnLink } from "@/components/admin/order-ui";
 import { CopyableId } from "@/components/admin/copy-id";
 import { InfoTip } from "@/components/store/info-tip";
@@ -190,6 +192,35 @@ export function CustomerAttention({ customer }: { customer: CustomerRecord }) {
  * This is the *only* place any of those strings appear. The header carries the
  * buttons, this carries the values.
  */
+/**
+ * Confirmed with a one-time code, or not yet.
+ *
+ * Deliberately quiet when it is "not confirmed": it is the normal state for
+ * every account created before verification existed, and for every account in a
+ * store that never switches the switches on. It is a fact about the record, not
+ * a fault in it — the two settings decide whether it costs the customer
+ * anything.
+ */
+function ConfirmedMark({ ok, channel }: { ok: boolean; channel: string }) {
+  return ok ? (
+    <span
+      className="inline-flex items-center gap-0.5 font-medium text-success"
+      title={`This ${channel} was confirmed with a one-time code.`}
+    >
+      <ShieldCheck className="h-3 w-3 shrink-0" aria-hidden="true" />
+      confirmed
+    </span>
+  ) : (
+    <span
+      className="inline-flex items-center gap-0.5"
+      title={`This ${channel} has never been confirmed with a one-time code. That only stops an order if the matching switch is on in Settings.`}
+    >
+      <ShieldQuestion className="h-3 w-3 shrink-0" aria-hidden="true" />
+      not confirmed
+    </span>
+  );
+}
+
 export function CustomerIdentity({ customer }: { customer: CustomerRecord }) {
   const account = customer.accounts[0] ?? null;
   const extraAccounts = customer.accounts.slice(1);
@@ -213,28 +244,69 @@ export function CustomerIdentity({ customer }: { customer: CustomerRecord }) {
       <div className="space-y-2 text-sm">
         <p className="break-words font-medium">{customer.displayName}</p>
 
-        {customer.email ? (
-          <a
-            href={`mailto:${customer.email}`}
-            className="flex items-start gap-2 break-all text-xs text-muted-foreground hover:text-accent"
-          >
-            <Mail className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            {customer.email}
-          </a>
+        {/*
+          The mobile reads first, because it IS the identity: `User.phone` is
+          the unique column and the thing that signs this person in. The email
+          is contact information underneath it — two accounts may share one
+          inbox, so an address cannot name anybody on its own.
+
+          Each line carries its own confirmed mark. One mark for the record
+          could not say *which* channel was confirmed, and they are confirmed
+          separately. Guests get no marks at all: there is no account, so there
+          is nothing that could have been confirmed.
+        */}
+        {customer.phone ? (
+          <div className="flex items-start gap-2">
+            <Phone
+              className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
+              aria-hidden="true"
+            />
+            <span className="min-w-0">
+              <a
+                href={`tel:${customer.phone}`}
+                className="text-xs text-muted-foreground hover:text-accent"
+              >
+                {formatPhone(customer.phone)}
+              </a>
+              <span className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
+                <span>{account ? "Signs in with this" : "Mobile"}</span>
+                {customer.verification && (
+                  <ConfirmedMark ok={customer.verification.phone} channel="mobile" />
+                )}
+              </span>
+            </span>
+          </div>
         ) : (
-          <Nothing>No email on record.</Nothing>
+          <Nothing>
+            {account
+              ? "No mobile number on this account — it predates mobile sign-in, so it signs in by email."
+              : "No phone number on record."}
+          </Nothing>
         )}
 
-        {customer.phone ? (
-          <a
-            href={`tel:${customer.phone}`}
-            className="flex items-start gap-2 text-xs text-muted-foreground hover:text-accent"
-          >
-            <Phone className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            {customer.phone}
-          </a>
+        {customer.email ? (
+          <div className="flex items-start gap-2">
+            <Mail
+              className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
+              aria-hidden="true"
+            />
+            <span className="min-w-0">
+              <a
+                href={`mailto:${customer.email}`}
+                className="break-all text-xs text-muted-foreground hover:text-accent"
+              >
+                {customer.email}
+              </a>
+              <span className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
+                <span>Where the store writes</span>
+                {customer.verification && (
+                  <ConfirmedMark ok={customer.verification.email} channel="email" />
+                )}
+              </span>
+            </span>
+          </div>
         ) : (
-          <Nothing>No phone number on record.</Nothing>
+          <Nothing>No email on record.</Nothing>
         )}
 
         {shipped && latest && (
@@ -286,8 +358,23 @@ export function CustomerIdentity({ customer }: { customer: CustomerRecord }) {
                 So the link that matters is the one to everything it bought,
                 and the id, which is what gets pasted into a DB lookup.
               */}
+              {/*
+                Searched by the NUMBER when there is one. The address is no
+                longer unique, so an email search on a shared inbox would list
+                another person's orders under this account's heading.
+
+                The ten national digits, not the stored `+91…`: an order's
+                phone column holds whatever the shopper typed, and the ten
+                digits are the part every spelling of the number has in common.
+              */}
               <p className="text-[11px]">
-                <AdminRef href={adminLink.orderSearch(account.email)}>
+                <AdminRef
+                  href={adminLink.orderSearch(
+                    account.phone
+                      ? account.phone.replace(/\D/g, "").slice(-10)
+                      : account.email
+                  )}
+                >
                   All orders on this account
                 </AdminRef>
               </p>

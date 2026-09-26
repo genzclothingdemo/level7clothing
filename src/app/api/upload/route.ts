@@ -1,16 +1,14 @@
 import { NextResponse } from "next/server";
 import { put } from "@vercel/blob";
-import { getAdminSession } from "@/lib/auth";
+import { guardAdminWriteRoute } from "@/lib/auth";
 import { slugify } from "@/lib/utils";
 import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
 
 export async function POST(req: Request) {
-  const admin = await getAdminSession();
-  if (!admin) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const gate = await guardAdminWriteRoute("uploadMedia");
+  if (!gate.ok) return gate.response;
 
   if (!process.env.BLOB_READ_WRITE_TOKEN) {
     return NextResponse.json(

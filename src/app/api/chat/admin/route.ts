@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getAdminSession } from "@/lib/auth";
+import { getAdminSession, guardAdminWriteRoute } from "@/lib/auth";
+import { runAutomationTrigger } from "@/lib/automation";
 import { prisma } from "@/lib/prisma";
 import {
   ADMIN_THREAD_PAGE,
@@ -115,8 +116,9 @@ export async function GET(req: Request) {
 
 /** Reply as the store. Sending also clears the thread's admin badge. */
 export async function POST(req: Request) {
-  const admin = await requireAdmin();
-  if (!admin) return unauthorized();
+  const gate = await guardAdminWriteRoute("replyToCustomer");
+  if (!gate.ok) return gate.response;
+  const admin = gate.session;
 
   if (!rateLimit(`chat:admin:${admin.id}`, SEND_LIMIT.limit, SEND_LIMIT.windowMs)) {
     return NextResponse.json(
@@ -166,6 +168,22 @@ export async function POST(req: Request) {
     body: body.value,
     attachment: attachment.value,
   });
+
+  /**
+   * Tell the customer we wrote back.
+   *
+   * This is the half that only a push or an email can do at all: the chat
+   * panel **polls**, so it can reach a browser that is still open and nothing
+   * else. A reply matters most precisely when the tab is closed.
+   *
+   * A customer with no account has no device, which `dispatchAutomationPush`
+   * turns into a cancelled job carrying the real reason rather than a failure
+   * — see the note there. Awaited for the same reason as the customer route.
+   */
+  await runAutomationTrigger("chat.reply_sent", {
+    id: thread.id,
+    context: { direction: "outbound" },
+  }).catch((err) => console.error("[chat] reply automation failed:", err));
 
   return NextResponse.json({ threadId: thread.id, message });
 }

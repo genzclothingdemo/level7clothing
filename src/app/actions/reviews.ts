@@ -3,13 +3,12 @@
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
-import { getAdminSession } from "@/lib/auth";
+import { requireAdminWrite } from "@/lib/auth";
 import { getUserSession } from "@/lib/user-auth";
 import { hasPurchased } from "@/lib/reviews";
 
-async function requireAdmin() {
-  const session = await getAdminSession();
-  if (!session) throw new Error("Unauthorized");
+async function requireAdmin(what: string) {
+  const session = await requireAdminWrite(what);
   return session;
 }
 
@@ -118,7 +117,7 @@ async function slugFor(reviewId: string): Promise<string | null> {
 
 /** Publish or unpublish a review. Unapproving also unpins it. */
 export async function setReviewApproved(id: string, approved: boolean) {
-  await requireAdmin();
+  await requireAdmin("setReviewApproved");
   const slug = await slugFor(id);
   await prisma.review.update({
     where: { id },
@@ -135,7 +134,7 @@ export async function setReviewApproved(id: string, approved: boolean) {
  * implied — pinning something the storefront can't show would do nothing.
  */
 export async function setReviewFeatured(id: string, featured: boolean) {
-  await requireAdmin();
+  await requireAdmin("setReviewFeatured");
   const slug = await slugFor(id);
   await prisma.review.update({
     where: { id },
@@ -147,7 +146,7 @@ export async function setReviewFeatured(id: string, featured: boolean) {
 
 /** Private moderation note — never rendered on the storefront. */
 export async function setReviewNote(id: string, note: string) {
-  await requireAdmin();
+  await requireAdmin("setReviewNote");
   await prisma.review.update({
     where: { id },
     data: { adminNote: note.trim() || null },
@@ -157,7 +156,7 @@ export async function setReviewNote(id: string, note: string) {
 }
 
 export async function deleteReview(id: string) {
-  await requireAdmin();
+  await requireAdmin("deleteReview");
   const slug = await slugFor(id);
   await prisma.review.delete({ where: { id } });
   revalidateReviews(slug);
@@ -166,7 +165,7 @@ export async function deleteReview(id: string) {
 
 /** Approve everything currently awaiting review, for clearing a backlog. */
 export async function approveAllPending() {
-  await requireAdmin();
+  await requireAdmin("approveAllPendingReviews");
   const { count } = await prisma.review.updateMany({
     where: { approved: false },
     data: { approved: true },

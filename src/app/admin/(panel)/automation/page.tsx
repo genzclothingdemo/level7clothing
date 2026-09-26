@@ -3,6 +3,7 @@ import { ArrowUpRight, Mail, Plus, Zap } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import {
   DIRECT_MAIL,
+  actionSpec,
   describeConditions,
   jobBacklog,
   readConditions,
@@ -47,7 +48,10 @@ export const metadata = { title: "Automation" };
  *    in `lib/email.ts` were retired, this list is not a *subset* of what the
  *    store emails on an event — it is the whole of it. Pausing a rule now
  *    genuinely stops that message, which is the only thing that makes the
- *    switch worth having.
+ *    switch worth having. As of 2026-09-26 the same is true of **push**: a
+ *    notification sent on an order event is a rule in this list, on the same
+ *    engine, not a parallel notifier. Admin → Notifications is one-off
+ *    broadcasts only, and says so.
  * 2. **The order pipeline** — read-only, with a link. Those columns belong to
  *    Settings → Orders and stay there. CLAUDE.md records exactly what happens
  *    when a setting gets a second editable control: `defaultReturnsInfo` had
@@ -183,9 +187,10 @@ export default async function AdminAutomation() {
           <div className="min-w-0">
             <h2 className="font-serif text-xl">Your rules</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              When something happens, and your conditions match, send an email.
-              Every message your store sends on an event is one of these — pause
-              one and that message genuinely stops.
+              When something happens, and your conditions match, send an email
+              or a phone notification. Every message your store sends on an
+              event is one of these — pause one and that message genuinely
+              stops.
             </p>
           </div>
           <AutomationRestoreButton />
@@ -232,6 +237,12 @@ export default async function AdminAutomation() {
                       <dt className="text-muted-foreground">Sends to</dt>
                       <dd className="mt-0.5 break-words">
                         {recipientLabel(rule.recipient)}
+                      </dd>
+                    </div>
+                    <div className="min-w-0">
+                      <dt className="text-muted-foreground">Channel</dt>
+                      <dd className="mt-0.5">
+                        {actionSpec(rule.action)?.short ?? rule.action}
                       </dd>
                     </div>
                     <div className="col-span-2 min-w-0">
@@ -296,12 +307,15 @@ export default async function AdminAutomation() {
                           {delaySummary(rule.delayMinutes)}
                         </td>
                         <td className="px-4 py-3 text-xs text-muted-foreground">
-                          <p className="max-w-[14rem] break-words">
+                          <p className="max-w-[14rem] break-words text-foreground">
+                            {actionSpec(rule.action)?.short ?? rule.action} ·{" "}
+                            {recipientLabel(rule.recipient)}
+                          </p>
+                          <p className="mt-0.5 max-w-[14rem] break-words">
                             {rule.template?.name ?? (
                               <span className="text-danger">No template</span>
                             )}
                           </p>
-                          <p className="mt-0.5">→ {recipientLabel(rule.recipient)}</p>
                         </td>
                         <td className="whitespace-nowrap px-4 py-3 text-xs text-muted-foreground">
                           {rule.runCount === 0

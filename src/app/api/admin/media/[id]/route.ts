@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { del } from "@vercel/blob";
-import { getAdminSession } from "@/lib/auth";
+import { guardAdminWriteRoute } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -19,8 +19,8 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await getAdminSession();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const gate = await guardAdminWriteRoute("updateMedia");
+  if (!gate.ok) return gate.response;
 
   const { id } = await params;
 
@@ -46,8 +46,8 @@ export async function DELETE(
   _req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await getAdminSession();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const gate = await guardAdminWriteRoute("deleteMedia");
+  if (!gate.ok) return gate.response;
 
   const { id } = await params;
 

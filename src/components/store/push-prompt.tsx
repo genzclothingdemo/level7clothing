@@ -4,6 +4,7 @@ import { useState } from "react";
 import { usePathname } from "next/navigation";
 import { InfoTip } from "@/components/store/info-tip";
 import { dismissPrompt, usePromptDismissed, usePush } from "@/components/store/push-core";
+import { usePushChime } from "@/lib/push-chime";
 
 /**
  * The "notifications are off" bar.
@@ -35,6 +36,15 @@ import { dismissPrompt, usePromptDismissed, usePush } from "@/components/store/p
 export function PushPrompt() {
   const pathname = usePathname();
   const push = usePush();
+
+  /*
+   * Mounted here rather than anywhere else because this component is in the
+   * root layout by way of `PwaRegister`, and hooks run before every early
+   * return below — so the chime is live on every page even when this bar is
+   * rendering nothing at all. See `lib/push-chime.ts` for why it exists and
+   * for what a web app genuinely cannot do about a notification's sound.
+   */
+  usePushChime();
 
   // Read straight from the store: it fails closed (server snapshot `true`),
   // so the bar is never in the server HTML and there is nothing to mismatch

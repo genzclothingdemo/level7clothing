@@ -27,6 +27,7 @@ export function PortfolioFilters() {
   const kind = params.get("kind") ?? "";
   const status = params.get("status") ?? "";
   const section = params.get("section") ?? "";
+  const source = params.get("source") ?? "";
 
   function setParam(key: string, value: string) {
     const next = new URLSearchParams(params.toString());
@@ -36,7 +37,7 @@ export function PortfolioFilters() {
     router.replace(query ? `${pathname}?${query}` : pathname);
   }
 
-  const narrowing = !!(q || kind || status || section);
+  const narrowing = !!(q || kind || status || section || source);
 
   const select = (live: boolean) =>
     cn(
@@ -99,6 +100,22 @@ export function PortfolioFilters() {
         <option value="customers">Happy customers</option>
         <option value="collabs">Collaborations</option>
         <option value="bulk">Bulk &amp; custom work</option>
+      </select>
+
+      {/* Where a row came from, and whether it is something to read. Both are
+          plain column reads (`sourceProductId`, `bodyHtml`) resolved on the
+          server page — the harvest panel is what makes the first one a
+          question worth asking. */}
+      <select
+        value={source}
+        onChange={(e) => setParam("source", e.target.value)}
+        aria-label="Filter by where the piece came from"
+        className={select(!!source)}
+      >
+        <option value="">Anything</option>
+        <option value="catalogue">From the catalogue</option>
+        <option value="written">Added by hand</option>
+        <option value="page">Has a written page</option>
       </select>
 
       {narrowing && (

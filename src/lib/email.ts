@@ -17,17 +17,21 @@ import type { SettingsDTO } from "./types";
  *
  * ## Who still sends directly, and why
  *
- * Exactly two, both deliberate:
+ * Exactly three, all deliberate:
  *
  * - **{@link sendPasswordResetEmail}** carries a one-time token. It is a reply
  *   to something the customer did two seconds ago, not a notification about the
  *   store — and a rule that could switch it off is a rule that locks people out
  *   of their own accounts with no error anywhere.
+ * - **{@link sendOtpEmail}** is the same argument in a shorter window: a
+ *   six-digit code that expires in ten minutes, waited for on a form. A paused
+ *   rule here does not delay a message, it stops an account being created and
+ *   an order being placed.
  * - **{@link sendContactEmail}** is the contact form's own delivery. Switching
  *   it off would silently bin enquiries the customer believes were sent.
  *
- * Both are listed read-only on Admin → Automation so the screen is still the
- * whole picture — see "Every mail this store sends" there.
+ * All three are listed read-only on Admin → Automation so the screen is still
+ * the whole picture — see "Every mail this store sends" there.
  */
 
 const apiKey = process.env.RESEND_API_KEY;
@@ -259,6 +263,65 @@ export async function sendPasswordResetEmail(
   });
 }
 
+
+/**
+ * A one-time code, on its way to somebody staring at a form.
+ *
+ * **This is the only sender in the file that reports whether it worked.** Every
+ * other message here is fire-and-forget: a receipt that does not arrive is a
+ * bad day, and the failure belongs in the log and on the automation screen. A
+ * code that does not arrive is a customer sitting in front of an input they can
+ * never fill, so `lib/otp.ts` has to be able to say "the code exists, nothing
+ * carried it" on screen — which it cannot do if this returns Resend's raw
+ * result and leaves the interpreting to the caller.
+ *
+ * The code is rendered large and monospaced and is also in the subject, because
+ * most people read it from the notification without opening anything.
+ */
+export async function sendOtpEmail(
+  settings: SettingsDTO,
+  to: string,
+  msg: { code: string; minutes: number; purpose: string }
+): Promise<{ delivered: boolean; detail?: string }> {
+  const what =
+    msg.purpose === "signup"
+      ? "finish creating your account"
+      : msg.purpose === "verify-phone"
+        ? "confirm your mobile number"
+        : msg.purpose === "reset"
+          ? "reset your password"
+          : "confirm your email address";
+
+  const body = `
+    <p style="font-size:15px;margin:0 0 12px">Use this code to ${what}.</p>
+    <p style="margin:0 0 18px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:32px;font-weight:700;letter-spacing:8px;color:#141210">${msg.code}</p>
+    <p style="font-size:14px;color:#555;margin:0 0 8px">It expires in ${msg.minutes} minutes and can be used once.</p>
+    <p style="font-size:12px;color:#999;margin:0">If you didn't ask for this, you can ignore this email — nothing has changed on your account.</p>`;
+
+  const res = await send({
+    to,
+    subject: `${msg.code} is your ${settings.brandName} code`,
+    html: shell(settings.brandName, "Your one-time code", body),
+  });
+
+  if (res && typeof res === "object") {
+    if ("skipped" in res && res.skipped) {
+      return {
+        delivered: false,
+        detail:
+          "This store has no email key configured, so no code was sent. Ask the store owner to set RESEND_API_KEY.",
+      };
+    }
+    if ("error" in res && res.error) {
+      return {
+        delivered: false,
+        detail:
+          "The store's email provider rejected the message, so no code arrived. Ask the store owner to check Admin → Automation.",
+      };
+    }
+  }
+  return { delivered: true };
+}
 
 /* ------------------------------------------------------------------ */
 /*  Automation                                                         */

@@ -23,6 +23,7 @@ import {
   PackageX,
   UserRound,
   Megaphone,
+  BellRing,
   Zap,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
@@ -106,6 +107,11 @@ const nav: {
   // this store doing without me?" — and half of that answer lives in Settings,
   // which it links to rather than duplicating.
   { href: "/admin/automation", label: "Automation", icon: Zap },
+  // Beside Automation because they answer the same question from two sides:
+  // Automation is what the store sends by email, this is what it can push to a
+  // phone. It existed for a while reachable only from two links buried inside
+  // Settings, which is how a screen gets built and then never opened.
+  { href: "/admin/notifications", label: "Notifications", icon: BellRing },
   { href: "/admin/settings", label: "Branding & settings", icon: Settings },
 ];
 

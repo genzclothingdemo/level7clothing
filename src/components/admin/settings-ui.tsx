@@ -83,6 +83,17 @@ export type SettingsDraft = {
   defaultMaterialsCare: string;
   defaultShippingInfo: string;
 
+  /* ---- Identity verification. Written by `updateVerificationSettings`. ----
+   *
+   * Four, not two, because the two channels and the two moments really are
+   * independent: a store may want a confirmed email to open an account and not
+   * ask again at checkout, or the exact reverse.
+   */
+  requireSignupEmailOtp: boolean;
+  requireSignupPhoneOtp: boolean;
+  requireVerifiedEmailToOrder: boolean;
+  requireVerifiedPhoneToOrder: boolean;
+
   /* ---- Cash-handling fees. Written by `updatePaymentFees`. ---- */
   /**
    * Whole rupees, held as strings for the same reason as
@@ -161,6 +172,29 @@ export function isFeeKey(k: DraftKey): k is FeeKey {
   return FEE_KEY_SET.has(k);
 }
 
+/**
+ * The four verification switches, owned by `updateVerificationSettings`.
+ *
+ * Third writer, same rule as the other two: `settingsSchema` does not declare
+ * these columns, and Zod drops what it does not declare **without a word**, so
+ * sending them through `updateSettings` would look like a save and write
+ * nothing. That is the failure this split exists to make impossible.
+ */
+export const VERIFY_KEYS = [
+  "requireSignupEmailOtp",
+  "requireSignupPhoneOtp",
+  "requireVerifiedEmailToOrder",
+  "requireVerifiedPhoneToOrder",
+] as const satisfies readonly DraftKey[];
+
+export type VerifyKey = (typeof VERIFY_KEYS)[number];
+
+const VERIFY_KEY_SET: ReadonlySet<string> = new Set(VERIFY_KEYS);
+
+export function isVerifyKey(k: DraftKey): k is VerifyKey {
+  return VERIFY_KEY_SET.has(k);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Tabs                                                               */
 /* ------------------------------------------------------------------ */
@@ -232,6 +266,22 @@ export const FIELD_META: Record<DraftKey, { label: string; tab: TabKey }> = {
   defaultShippingInfo: { label: "Shipping & Delivery", tab: "store" },
 
   adminNotifyEmail: { label: "Order & lead emails", tab: "store" },
+
+  // Verification lives on Store because it is about the *people* the store
+  // deals with and the two contacts it reaches them on — the same tab that
+  // already holds the public address and the private one. It is not an Orders
+  // setting: only half of it is about orders, and splitting the four across two
+  // tabs would mean neither tab could state what the store actually asks for.
+  requireSignupEmailOtp: { label: "Confirm email at signup", tab: "store" },
+  requireSignupPhoneOtp: { label: "Confirm mobile at signup", tab: "store" },
+  requireVerifiedEmailToOrder: {
+    label: "Confirmed email before ordering",
+    tab: "store",
+  },
+  requireVerifiedPhoneToOrder: {
+    label: "Confirmed mobile before ordering",
+    tab: "store",
+  },
 };
 
 const ALL_KEYS = Object.keys(FIELD_META) as DraftKey[];

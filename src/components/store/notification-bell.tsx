@@ -17,8 +17,8 @@ import { cn } from "@/lib/utils";
  * - The deployment has no VAPID public key.
  * - The browser has no Push API (older Firefox ESR, most in-app webviews).
  *
- * Two states render *without* an enable button, because in both the customer
- * has somewhere to go and hiding the bell would hide the reason:
+ * Three states render *without* an enable button, because in all of them the
+ * customer has somewhere to go and hiding the bell would hide the reason:
  *
  * - `denied` — the site cannot reopen that prompt, so the panel says where the
  *   real switch is.
@@ -27,6 +27,10 @@ import { cn } from "@/lib/utils";
  *   nothing and let the account page's settings card carry the explanation;
  *   that card is gone, so the rule lives here now, next to the control it
  *   governs, pointing at the install icon beside it.
+ * - `needs-ios-update` — installed on the home screen already, but on an iOS
+ *   older than 16.4, which is the release web push shipped in. Telling this
+ *   person to install the app is the one piece of advice guaranteed not to
+ *   help, since they already have.
  *
  * Mounted in the utility strip above the navbar, via `AppQuickActions`.
  */
@@ -64,14 +68,20 @@ export function NotificationBell({ className }: { className?: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // `needs-install` is iOS-in-a-tab: the switch cannot work yet, but the way
-  // out is one tap away on the install icon beside this one, so the bell stays
-  // and explains rather than vanishing.
+  // Two iPhone states where the switch cannot work yet but the way out is
+  // knowable, so the bell stays and explains rather than vanishing:
+  // `needs-install` (iOS in a Safari tab — the install icon is right beside
+  // this one) and `needs-ios-update` (installed already, but on an iOS older
+  // than 16.4, where Apple had not shipped web push). Both render the panel
+  // with no control in it, because a button that provably does nothing is
+  // worse than a sentence that explains why.
   const needsInstall = push.support === "needs-install";
-  if (push.support !== "ready" && !needsInstall) return null;
+  const needsUpdate = push.support === "needs-ios-update";
+  const explainOnly = needsInstall || needsUpdate;
+  if (push.support !== "ready" && !explainOnly) return null;
 
-  const on = !needsInstall && push.permission === "granted" && push.subscribed;
-  const blocked = !needsInstall && push.permission === "denied";
+  const on = !explainOnly && push.permission === "granted" && push.subscribed;
+  const blocked = !explainOnly && push.permission === "denied";
   const Icon = on ? BellRing : Bell;
 
   return (
@@ -82,11 +92,16 @@ export function NotificationBell({ className }: { className?: string }) {
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
         aria-label={
-          on
-            ? "Notifications are on"
-            : blocked
-              ? "Notifications are blocked"
-              : "Turn on notifications"
+          explainOnly
+            ? // "Turn on notifications" would be a promise this button cannot
+              // keep in either iPhone state, and a screen-reader user has no
+              // other way to find that out before pressing it.
+              "Why notifications aren't available"
+            : on
+              ? "Notifications are on"
+              : blocked
+                ? "Notifications are blocked"
+                : "Turn on notifications"
         }
         // Squared and borderless, matching the rest of the top bar — see
         // `.icon-btn` in globals.css.
@@ -130,11 +145,13 @@ export function NotificationBell({ className }: { className?: string }) {
           <p className="mt-2 text-sm leading-relaxed text-foreground">
             {needsInstall
               ? "Install the app first."
-              : on
-                ? "On for this device. You'll hear about your orders."
-                : blocked
-                  ? "Blocked for this site."
-                  : "Off. Turn them on to hear when your order is packed and dispatched."}
+              : needsUpdate
+                ? "Your iPhone is too old for this."
+                : on
+                  ? "On for this device. You'll hear about your orders."
+                  : blocked
+                    ? "Blocked for this site."
+                    : "Off. Turn them on to hear when your order is packed and dispatched."}
           </p>
 
           {/* The rule this carries used to live in a paragraph on the account
@@ -148,6 +165,14 @@ export function NotificationBell({ className }: { className?: string }) {
             </p>
           )}
 
+          {needsUpdate && (
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+              Apple added notifications for installed web apps in iOS 16.4. This
+              app is already on your home screen, so the only thing missing is
+              the update: Settings → General → Software Update.
+            </p>
+          )}
+
           {blocked && (
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
               The store can&apos;t reopen that prompt — browsers only let you
@@ -157,7 +182,7 @@ export function NotificationBell({ className }: { className?: string }) {
             </p>
           )}
 
-          {!blocked && !needsInstall && (
+          {!blocked && !explainOnly && (
             <div className="mt-4 flex flex-wrap gap-2">
               <button
                 type="button"

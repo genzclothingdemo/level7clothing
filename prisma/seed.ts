@@ -601,20 +601,31 @@ async function main() {
   });
   console.log(`✓ Admin ready → ${email} / ${password}`);
 
-  // Demo customer account (for trying the login + order tracking flow)
+  // Demo customer account (for trying the login + order tracking flow).
+  //
+  // **Keyed on the phone, not the email.** Email stopped being unique on
+  // 2026-09-26, when the mobile number became the account identity and two
+  // people were allowed to share an address — so `where: { email }` no longer
+  // even typechecks, let alone identifies anybody.
+  //
+  // Stored canonical (E.164, no spaces) because every lookup compares against
+  // `normalisePhone`'s output. The literal `"+91 90000 11111"` this used to
+  // write is one of the four spellings that migration had to clean up; seeding
+  // the old form would quietly put it back.
   const demoEmail = "customer@level7clothing.com";
+  const demoPhone = "+919000011111";
   const demoPassword = "customer123";
   await prisma.user.upsert({
-    where: { email: demoEmail },
+    where: { phone: demoPhone },
     update: {},
     create: {
       email: demoEmail,
       name: "Demo Customer",
-      phone: "+91 90000 11111",
+      phone: demoPhone,
       passwordHash: await bcrypt.hash(demoPassword, 10),
     },
   });
-  console.log(`✓ Demo customer → ${demoEmail} / ${demoPassword}`);
+  console.log(`✓ Demo customer → ${demoPhone} / ${demoPassword}`);
 
   // -----------------------------------------------------------------------
   // Products: reset the catalogue to Level7 Clothing's real product list.

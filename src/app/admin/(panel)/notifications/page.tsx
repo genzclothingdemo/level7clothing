@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { BellOff } from "lucide-react";
+import { AutomationFeed } from "@/components/admin/automation-feed";
 import { PushBroadcast } from "@/components/admin/push-broadcast";
 import { countSubscriptions, pushConfigured, PUSH_LIMITS } from "@/lib/push";
 import { listPushDevices } from "@/lib/push-devices";
@@ -40,6 +41,42 @@ export default async function AdminNotifications() {
         <p className="mt-1 text-sm text-muted-foreground">
           {total} device{total === 1 ? "" : "s"} opted in
           {total > 0 && ` · ${signedIn} linked to an account`}
+        </p>
+      </div>
+
+      {/*
+        **The feed comes first, and that ordering is the fix.**
+
+        This page used to open with a compose box, which is why the only
+        notifications that existed were the ones typed into it. The list of
+        what the shop has actually announced — orders, chat, returns, courier
+        scans — is what somebody opens this screen to see; sending a broadcast
+        by hand is the rare errand and now sits below it.
+
+        It is a client component because it polls. The rest of the page is
+        server-rendered, so nothing else here pays for that.
+      */}
+      <div className="mt-8 max-w-2xl">
+        <AutomationFeed />
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          These are the events your store announced, newest first — the same
+          rules you can pause or reword in{" "}
+          <Link
+            href="/admin/automation"
+            className="underline underline-offset-2 hover:text-foreground"
+          >
+            Automation
+          </Link>
+          . Nothing here was typed by hand. It refreshes on its own every 30
+          seconds, and immediately whenever you come back to this tab.
+        </p>
+      </div>
+
+      <div className="mt-10 border-t border-border pt-8">
+        <h2 className="font-serif text-xl">Send one yourself</h2>
+        <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground">
+          A one-off notification to every opted-in device — a drop, a delay, a
+          sale. Nothing on this half happens automatically.
         </p>
       </div>
 

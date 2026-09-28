@@ -26,11 +26,22 @@
  * card lays out **horizontally** — photo left, words right. A row with a
  * paragraph in it is unmistakably an article card rather than a product tile,
  * so the rule is honoured and the page still reads as editorial.
+ *
+ * ── Fifty of them ───────────────────────────────────────────────────────────
+ *
+ * The owner sizes this section at fifty-plus too, so the cards are handed to
+ * `RevealList` **already rendered**. That is what keeps this file a server
+ * component: the cards ship no JavaScript and can still call `splitStat` from
+ * a Prisma-importing module, while the only interactive part — how many are in
+ * the document — lives in the client wrapper. A card past the cut is not in
+ * the DOM, so its photo is never requested; `next/image`'s lazy loading is
+ * then the second line of defence rather than the only one.
  */
 
 import Image from "next/image";
 import Link from "next/link";
 import { ArrowUpRight, ShoppingBag } from "lucide-react";
+import { RevealList } from "@/components/store/portfolio-reveal";
 import { splitStat, type PortfolioEntry } from "@/lib/portfolio";
 
 /**
@@ -70,8 +81,10 @@ export function PortfolioPages({ entries }: { entries: PortfolioEntry[] }) {
   if (entries.length === 0) return null;
 
   return (
-    <ul className="mt-6 grid grid-cols-1 gap-3 lg:grid-cols-2">
-      {entries.map((entry) => {
+    <RevealList
+      step={8}
+      className="mt-6 grid grid-cols-1 gap-3 lg:grid-cols-2"
+      items={entries.map((entry) => {
         const { figure, rest } = splitStat(entry.title);
         const external = entry.url ? !entry.url.startsWith("/") : false;
 
@@ -160,6 +173,6 @@ export function PortfolioPages({ entries }: { entries: PortfolioEntry[] }) {
           </li>
         );
       })}
-    </ul>
+    />
   );
 }

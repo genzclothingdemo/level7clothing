@@ -47,18 +47,27 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
-import { runAutomationTrigger } from "@/lib/automation";
 import { revalidatePath } from "next/cache";
-import { mapNimbusStatus, NOTIFY_STATUSES } from "@/lib/nimbus-status";
+import { mapNimbusStatus } from "@/lib/nimbus-status";
+// The engine is no longer addressed directly from here. Which trigger a
+// courier scan raises is one decision shared with the polling sync — see the
+// long note on the helper for what happened when each side decided for itself.
+import { notifyCourierScan } from "@/lib/fulfilment";
 import { applyReverseScan } from "@/lib/nimbus-returns";
 import { isRtoStatus } from "@/lib/returns";
 
 // ---------------------------------------------------------------------------
-// The status table and the "worth emailing about" set both live in
-// lib/nimbus-status.ts. They used to be declared here AND in fulfilment.ts,
-// and had drifted — see that file for what that cost.
+// The status table lives in lib/nimbus-status.ts. It used to be declared here
+// AND in fulfilment.ts, and had drifted — see that file for what that cost.
+//
+// The "worth notifying about" set is no longer read here either. Deciding
+// *whether* a scan is worth telling anybody, and *which* trigger says so, is
+// `notifyCourierScan` in lib/fulfilment.ts — one decision for the push path
+// (this route) and the polling path, so the two cannot drift the way the
+// status tables once did. A local `EMAIL_STATUSES = NOTIFY_STATUSES` alias
+// survived here for a while with no reader at all, which is how that drift
+// starts.
 // ---------------------------------------------------------------------------
-const EMAIL_STATUSES = NOTIFY_STATUSES;
 
 type StatusEntry = { status: string; note?: string; at: string };
 
@@ -259,12 +268,17 @@ export async function POST(req: NextRequest) {
   // scoped to "becomes delivered" fires once rather than on every scan. The
   // dedupe key is `<orderId>:<status>`, which is also what makes this safe
   // alongside `lib/fulfilment.ts` reporting the same move.
-  if (newStatus && newStatus !== order.status) {
-    await runAutomationTrigger("order.status_changed", {
-      id: order.id,
-      context: { previousStatus: order.status },
-    }).catch((err) => console.error("[nimbus-webhook] automation trigger failed:", err));
-  }
+  //
+  // The `newStatus !== order.status` test used to live here, and moved into the
+  // helper along with the choice of trigger. That matters for exactly one case:
+  // an RTO whose mapped status does not move (`rto initiated` on a parcel
+  // already marked `shipped`) was dropped by this gate, so the customer heard
+  // nothing at the one moment the delivery could still have been rescued.
+  await notifyCourierScan(order.id, {
+    raw: nimbusStatusRaw,
+    status: newStatus,
+    previousStatus: order.status,
+  }).catch((err) => console.error("[nimbus-webhook] automation trigger failed:", err));
 
   // Revalidate the admin orders page so the new status shows immediately.
   try {

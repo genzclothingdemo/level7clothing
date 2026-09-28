@@ -466,6 +466,35 @@ start it, so a non-YouTube slide shows a play mark. YouTube gets `autoplay=1`
 and really does play. Muting would make autoplay reliable at the cost of every
 reel being silent. The only real fix is the Graph API, which needs a token.
 
+### Designed for 50+ per group — three complementary bounds
+
+| bound | caps |
+|---|---|
+| ARIA tabs across the three Social groups | how much page exists (1 group, not 3 stacked) |
+| `PAGE_SIZE = 24` + Show more | DOM and scroll length inside a group |
+| one shared `IntersectionObserver` (`rootMargin: 250px`) | **which images actually fetch** |
+
+**`next/image` lazy loading is the floor, not the answer** — Chrome's lazy
+threshold reaches past 1000px, which on a 3-up phone grid fetches the entire
+page of tiles anyway. Tiles past `EAGER = 12` render as empty squares and mount
+their `<img>` only when the observer says they are close. `EAGER` is a constant
+precisely so server and client render identically and hydration has nothing to
+reconcile.
+
+`POSTER_RADIUS = 2` bounds the viewer: every slide is in the DOM, because the
+track's scroll height **is** the set, so a poster per slide meant opening one
+tile downloaded 55 covers.
+
+Measured at 216 seeded rows: **16 image elements on first paint for 229 rows**,
+0 iframes at rest, 2–3 while open, 0 after close.
+
+**The viewer's chrome is opaque black, not a gradient** — and that is
+correctness, not taste: Instagram's `/embed` is a *white card* with its own
+header and caption, so a translucent bar put a white close button on a white
+card. The bars overlay rather than sit in the flex column, because a bar in the
+layout would change the track's height, and the track's height is the
+scroll-snap unit.
+
 ### Harvest identity is the provider's id, never the URL string
 
 `instagram:<shortcode>` / `youtube:<videoId>`, read from the **URL**, never from
@@ -642,11 +671,10 @@ worker outside production deliberately.
 
 ### Push is an *action* on the automation engine, not a second notifier
 
-`IMPLEMENTED_ACTIONS` is `["email", "push"]`. A push rule is enqueued by the
-same `runAutomationTrigger`, deduped by the same unique index, held off by the
-same `occurredAt` guard, delayed through the same `AutomationJob` and claimed by
-the same compare-and-set. Only the final step branches, in
-`lib/push-dispatch.ts`.
+`IMPLEMENTED_ACTIONS` is `["email", "push", "inapp"]`. Every channel is enqueued
+by the same `runAutomationTrigger`, deduped by the same unique index, held off
+by the same `occurredAt` guard, delayed through the same `AutomationJob` and
+claimed by the same compare-and-set. Only the final step branches.
 
 Three rules worth keeping:
 
@@ -669,6 +697,96 @@ re-implementation.
 A literal email address is meaningless for push, so "Someone else" is removed
 from the editor **and** rejected in the zod `superRefine` — a hidden control is
 not a rule.
+
+## Notifications: three channels, one engine, one screen
+
+### The in-app feed **is** `AutomationJob` — there is no `Notification` table
+
+This was the fix for "only what the admin sends manually shows up". That
+complaint was literally true: there was no in-app channel at all.
+`notification-bell.tsx` was a **push permission control**, not a feed, and
+`/admin/notifications` was a broadcast composer — so a manual broadcast was the
+only thing in the codebase capable of producing a notification.
+
+`inapp` is now a third action. A job row is already created exactly once per
+(rule, subject) by the unique index, claimed once by the compare-and-set, held
+off by `occurredAt` and cancelled when it stops applying. A separate
+`Notification` model would have had to re-earn all of that, and the first time
+the two disagreed there would be no way to tell which was right.
+
+**The row you pause in Admin → Automation and the row that appears in the bell
+are the same row.** Delivery for `inapp` writes the rendered copy to
+`payload.inapp` and stops; the feed is then one indexed read with no
+re-resolution, which matters because it is polled.
+
+Poll cadence is **30 s visible / 180 s hidden / stopped for guests**, with an
+immediate refetch on `visibilitychange` — that last part is what makes it feel
+live, because returning to the tab is itself the trigger. Chained `setTimeout`,
+never `setInterval`, so a slow response cannot stack requests.
+
+### Settings → Alerts is a *view* over `AutomationRule`
+
+`AutomationRule` already stores `trigger` × `conditions` × `action` ×
+`recipient` × `isActive`. That **is** the notification matrix, so the screen
+stores nothing of its own — a cell is a rule's `isActive`, and ticking a cell
+with no row creates it from `SYSTEM_RULES`. Storing the matrix anywhere else
+would give one fact two homes, which this file already records going wrong
+twice.
+
+Two details that are load-bearing:
+
+- **Channel is a column, not a row.** One row reads "an order shipped, told to
+  the customer". 22 questions instead of 110 switches.
+- **The server re-resolves every rule from `(event, channel)` before writing**
+  and never trusts a rule id from the browser, so a stale tab cannot toggle the
+  wrong rule.
+
+`sms` and `whatsapp` are in the vocabulary but **not** in
+`IMPLEMENTED_ACTIONS`: rendered, disabled, unchecked, with the reason on the
+control. The server hard-refuses *enabling* an unsupported channel while always
+allowing one to be switched off, so an orphan tick can never become unclearable.
+
+### RTO is its own trigger, not a condition
+
+`order.rto` exists because a `phase` condition on `order.status_changed` cannot
+work: `conditionsMatch` is equality, so a new "only RTO" rule could be written
+but the **existing** `{status: "cancelled"}` rule would still also match, and
+the customer would be told their order was cancelled when goods are travelling
+back. The decision therefore lives at the call site — `notifyCourierScan()`
+raises `order.rto` **and returns**, never also `order.status_changed`. One
+courier event, one trigger. The order's `status` column still becomes
+`cancelled`; only the notification changed.
+
+`rtoStage()` is a third reading of the same lookup row (`phase === "rto"` plus
+`status`), so there is no second list of courier strings.
+
+**`isRtoStatus` / `isRtoComplete` read the table, not the spelling.** They used
+a regex, and the courier scan `"returned"` is an RTO that contains no word
+"rto" and neither "delivered" nor "received" — so a real RTO read as an
+ordinary cancellation and a parcel that was home read as still in transit. Both
+now consult `courierPhase` / `rtoStage` first and keep the text test only as a
+fallback for wording the table has never seen.
+
+### Templates
+
+Every `{{token}}` a template uses must be populated by its trigger — a blank
+token renders as an empty label and looks broken. **`pruneFactLines` runs
+*before* substitution**, because afterwards `Courier: {{order.courier}}` with no
+courier and the prose line `Track it here:` are the same string, and a filter
+downstream drops the introducer while stranding its URL.
+
+Expectation-setting is **derived, never typed** — a mail saying "we'll tell you
+when it ships" *after* it shipped is the store lying to a customer it knew
+better than. The CTA follows the same rule: "Track this parcel" only when an AWB
+exists.
+
+Product images in mail must be **absolute**. `Order.items[].image` is stored as
+`/products/level7/…`, which is a broken image in every mail client.
+
+> **Most outbound mail ships `isActive: false` on purpose.** As of 2026-09-28,
+> 14 customer-facing email rules are off — including order placed, shipped and
+> delivered. That is a deliberate safe default, not a bug: turning them on sends
+> real mail to real customers. Settings → Alerts is the one screen that does it.
 
 ## Safe areas — go through a CSS variable, never `env()` directly
 

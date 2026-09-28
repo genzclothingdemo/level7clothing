@@ -729,9 +729,34 @@ export async function verifyRazorpayPayment(input: VerifyPaymentInput) {
     signature: data.razorpaySignature,
   });
   if (!valid) {
-    await prisma.order
+    const wrote = await prisma.order
       .update({ where: { id: order.id }, data: { paymentStatus: "failed" } })
-      .catch(() => {});
+      .then(() => true)
+      .catch(() => false);
+
+    // **The failed payment finally tells somebody.** `Order.paymentStatus` is a
+    // separate column from `Order.status`, and nothing used to raise anything
+    // when it moved — so the one shopper in the store who had chosen the
+    // pieces, typed the address and reached the payment page simply vanished,
+    // and the owner never learned the money had not arrived.
+    //
+    // Raised only when the write landed, because every fact the engine uses is
+    // read back off the row: on a failed update the column still says
+    // `pending`, the rules are all conditioned on `failed`, and the trigger
+    // would resolve to nothing anyway. Skipping it makes that silence
+    // deliberate rather than accidental.
+    //
+    // Awaited, like every other trigger call here — `runAutomationTrigger`
+    // cannot throw or reject by contract, so it can only delay this error
+    // response, never replace it. Dedupe is `<orderId>:failed`, so a shopper
+    // who retries and fails again is told once, not twice.
+    if (wrote) {
+      await runAutomationTrigger("order.payment_changed", {
+        id: order.id,
+        context: { previousPaymentStatus: order.paymentStatus },
+      }).catch((err) => console.error("[orders] payment automation failed:", err));
+    }
+
     return { ok: false as const, error: "Payment verification failed." };
   }
 
@@ -798,6 +823,24 @@ export async function verifyRazorpayPayment(input: VerifyPaymentInput) {
   await runAutomationTrigger("order.created", { id: order.id }).catch((err) =>
     console.error("[orders] automation trigger failed:", err)
   );
+
+  // The money column moved the other way. Raised **after** `order.created` for
+  // the same inbox-ordering reason that call is raised before the shipment
+  // pipeline: the receipt is the first thing a customer should see.
+  //
+  // **Nothing ships listening to this**, and that is the decision rather than
+  // an oversight — see the block above the payment rules in
+  // `SYSTEM_RULES`. In short: `order.created` is raised one line earlier, by
+  // this very function, precisely because *this* is the instant a prepaid or
+  // part-paid order becomes real. A shipped "we received your money" rule
+  // would be a second mail about one event, which is the duplication this
+  // engine exists to end. The trigger is raised anyway so an owner who wants
+  // something the receipt does not say — "an advance landed, a balance is
+  // still out" — can build it without a deploy.
+  await runAutomationTrigger("order.payment_changed", {
+    id: order.id,
+    context: { previousPaymentStatus: order.paymentStatus },
+  }).catch((err) => console.error("[orders] payment automation failed:", err));
 
   // Confirmed → stage the draft (or book it, when auto-ship is on). Not
   // confirmed → nothing is staged, because "order confirmed ⇒ draft staged"

@@ -15,7 +15,7 @@
 // `prisma` and any server-only import. Everything here is pure.
 
 import { formatINR } from "@/lib/utils";
-import { mapNimbusStatus } from "@/lib/nimbus-status";
+import { courierPhase, mapNimbusStatus, rtoStage } from "@/lib/nimbus-status";
 
 export const RETURN_STATUSES = [
   "pending",
@@ -240,11 +240,33 @@ export function reverseReturnStatus(raw: string | null | undefined): ReturnStatu
  * the customer may be owed, and nothing else in the pipeline says so.
  */
 export function isRtoStatus(raw: string | null | undefined): boolean {
+  // **The status table is the authority, not the spelling.** `courierPhase`
+  // reports `"rto"` for every scan that means the parcel is coming back — and
+  // that includes `"returned"`, which contains no word "rto" and which the text
+  // test below misses completely. A real RTO reading as an ordinary
+  // cancellation is the exact confusion this function exists to prevent: it
+  // ends with stock on our shelf and money the customer may be owed.
+  if (courierPhase(raw) === "rto") return true;
+
+  // Fallback for courier text the table has never seen. Kept deliberately:
+  // an unclassifiable scan that *says* RTO must not quietly read as a normal
+  // cancellation just because nobody has added that wording yet.
   return /\brto\b|return to origin/i.test(String(raw ?? ""));
 }
 
-/** True once an RTO parcel has actually completed its journey back. */
+/**
+ * True once an RTO parcel has actually completed its journey back.
+ *
+ * Same authority as `isRtoStatus`, and for the same reason: the courier scan
+ * `"returned"` means the parcel is home, but contains neither "delivered" nor
+ * "received", so a text test called it still in transit and the stock never
+ * looked like it had landed.
+ */
 export function isRtoComplete(raw: string | null | undefined): boolean {
+  if (rtoStage(raw) === "returned") return true;
+
+  // Fallback for wording the table has not seen, kept narrow: it must already
+  // look like an RTO *and* say it arrived.
   const v = String(raw ?? "").trim().toLowerCase();
   return isRtoStatus(v) && (v.includes("delivered") || v.includes("received"));
 }

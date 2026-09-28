@@ -1,7 +1,7 @@
 import { cache } from "react";
 import { prisma } from "./prisma";
 import { getSettings } from "./settings";
-import { mapNimbusStatus, NOTIFY_STATUSES } from "./nimbus-status";
+import { mapNimbusStatus, rtoStage, NOTIFY_STATUSES } from "./nimbus-status";
 import {
   courierChoiceLabel,
   dispatchModeOf,
@@ -1133,11 +1133,23 @@ export async function refreshTracking(
       },
     });
 
-    // Tell the customer only when the order itself moved to a milestone.
-    if (changed && nextStatus !== order.status) {
-      await notifyStatus(orderId, nextStatus, order.status).catch((err) =>
-        console.error("[fulfilment] tracking email failed:", err)
-      );
+    // One call, one decision — see `notifyCourierScan`.
+    //
+    // The old gate here was `changed && nextStatus !== order.status`, and the
+    // second half of it was why an RTO could start in silence: `rto initiated`
+    // maps to `shipped` on a parcel that is already `shipped`, so the status
+    // does not move and the customer was never told their delivery had failed.
+    // The status test now lives inside the helper, which applies it to ordinary
+    // scans and deliberately does not apply it to RTO.
+    //
+    // `changed` stays: an identical repeat scan is genuinely nothing new, and
+    // skipping it saves a rules query on every poll of every open parcel.
+    if (changed) {
+      await notifyCourierScan(orderId, {
+        raw: rawStatus,
+        status: nextStatus,
+        previousStatus: order.status,
+      }).catch((err) => console.error("[fulfilment] tracking notification failed:", err));
     }
 
     return {
@@ -1188,6 +1200,71 @@ async function notifyStatus(
     id: orderId,
     context: { previousStatus },
   }).catch((err) => console.error("[fulfilment] automation trigger failed:", err));
+}
+
+/**
+ * **What a courier scan tells the automation engine — the one decision, shared
+ * by the poller and the webhook.**
+ *
+ * There are exactly two places a courier can reach this app: `refreshTracking`
+ * below (polling, via `/api/cron/nimbus-sync`) and the NimbusPost webhook
+ * (push). They saw the same scan and each decided for itself what to raise,
+ * which is the same shape of duplication that let `NIMBUS_TO_STATUS` and
+ * `TRACKING_TO_STATUS` drift until `pickup done` meant two different things.
+ * This function is the single answer, for the same reason that table is.
+ *
+ * ### RTO raises `order.rto` and **nothing else**
+ *
+ * A parcel that failed to deliver is stored as the order status `cancelled`,
+ * because `OrderStatus` has no `rto` member and adding one would ripple through
+ * every screen that switches on status. That is a storage compromise, and until
+ * now it leaked all the way to the customer: `order.status_changed` fired with
+ * `cancelled`, the shipped rule on that status matched, and somebody who had
+ * cancelled nothing was emailed the word *cancelled* while their goods were on
+ * a van coming back.
+ *
+ * So the branch is exclusive, and the `return` is the load-bearing line. If
+ * both triggers were raised the customer would get the RTO message *and* the
+ * cancellation message, which is worse than the bug. A plain cancellation —
+ * one with no RTO scan behind it — takes the second branch and reads exactly
+ * as it always has.
+ *
+ * The stage (`returning` / `returned`) is not passed on: `resolveSubject`
+ * recovers it from `Order.deliveryStatus`, so this stays a decision about
+ * *which* trigger and never becomes a second copy of the courier vocabulary.
+ *
+ * **Call this after the order row has been written.** Every fact the engine
+ * resolves — including the scan this call is about — is read back off the row,
+ * which is the same contract `notifyStatus` already has for `previousStatus`.
+ */
+export async function notifyCourierScan(
+  orderId: string,
+  scan: {
+    /** The courier's own words for this scan. */
+    raw: string | null | undefined;
+    /** What `mapNimbusStatus` made of it — `null` when unrecognised. */
+    status: string | null | undefined;
+    /** The order's status *before* the caller wrote this scan. */
+    previousStatus: string;
+  }
+): Promise<void> {
+  // The parcel is coming home. This is checked first and returns, because the
+  // status it maps to is a lie the customer must not be told.
+  if (rtoStage(scan.raw)) {
+    const { runAutomationTrigger } = await import("./automation");
+    // No status gate. An `rto initiated` scan on an already-`shipped` order
+    // moves nothing — `mapNimbusStatus` sends it to `shipped` too — so a
+    // "did the status change?" test would drop the very first notice that a
+    // delivery has failed. The dedupe key (`<orderId>:rto:<stage>`) is what
+    // stops four hub scans becoming four messages.
+    await runAutomationTrigger("order.rto", { id: orderId }).catch((err) =>
+      console.error("[fulfilment] RTO trigger failed:", err)
+    );
+    return;
+  }
+
+  if (!scan.status || scan.status === scan.previousStatus) return;
+  await notifyStatus(orderId, scan.status, scan.previousStatus);
 }
 
 /**

@@ -12,7 +12,7 @@
  * directive can be imported from both sides, which is what a shared constant
  * and a type guard actually need.
  *
- * ## Why these five
+ * ## Why these seven
  *
  * Settings is now the **single home for settings** — the order pipeline and the
  * return policy both moved in from the screens that used to own them, because
@@ -23,7 +23,7 @@
  *
  *   Brand + Contact          → **Store**  (who you are)
  *   Copy + Product defaults  → **Store**  (what it says)
- *   Your own alert address   → **Store**  (where it writes to you)
+ *   Your own alert address   → **Alerts** (where it writes to you)
  *
  * and the order is by how often the owner touches them. **Store** stays first
  * because the sidebar calls this screen "Branding & settings" and landing
@@ -33,19 +33,24 @@
  * ## Store, Storefront and Email are one tab
  *
  * They were three, and the split never survived contact with the errand. All
- * three answer the same question — *what is this shop called, what does it say,
- * and where does it write* — and the owner asked for them folded together.
- * Concretely: the brand name and the hero headline are both "the words at the
- * top of the home page", and the public contact email (Store) and the admin
- * alert address (Email) are two fields that only make sense read side by side,
- * because the whole point of the second one is that it is *not* the first.
- * Being on different tabs is what made that hard to check.
+ * three answer the same question — *what is this shop called and what does it
+ * say* — and the owner asked for them folded together. Concretely: the brand
+ * name and the hero headline are both "the words at the top of the home page".
  *
  * Nothing was dropped. Every control moved across, and the set-once ones are
  * behind the same `SetOnce` folds they already used, so the merged tab is five
  * closed rows and two open cards rather than three tabs' worth of fields.
  *
  * `TAB_ALIASES` keeps the two retired `?tab=` values working — see below.
+ *
+ * ## …and the alert address then moved out again, on purpose
+ *
+ * The admin alert address sat here because it only makes sense read next to
+ * the public contact email. It is now edited on **Alerts**, where the rest of
+ * the sending identity lives, and Store shows it read-only with a link — so
+ * the pair is still readable side by side on both tabs and there is still
+ * exactly one input for it. That is the rule that matters: a second editable
+ * copy of a column is how `defaultReturnsInfo` lost an update silently.
  *
  * ## Shipping is gone, and Integrations replaced it
  *
@@ -95,7 +100,7 @@ export const TABS = [
     heading: "Brand, copy & contact",
     blurb: "What the shop is called, what it says, and where it writes",
     guide:
-      "Identity, the words on the storefront, and the two email addresses. Everything here is read from the database at render time — the brand name in the header, the browser tab, order emails, the sitemap and the home-screen icon all come from this tab, and none of it is hardcoded anywhere. The announcement bar and the hero are on top because they are what changes for a sale; the rest is set once and folded away. The two addresses are deliberately together: the contact email is public and is where customers reply, the alert address is private and is where the store writes to you.",
+      "Identity, the words on the storefront, and the public contact details. Everything here is read from the database at render time — the brand name in the header, the browser tab, order emails, the sitemap and the home-screen icon all come from this tab, and none of it is hardcoded anywhere. The announcement bar and the hero are on top because they are what changes for a sale; the rest is set once and folded away. The contact email is the public one, printed in the footer and used as the reply address on everything the store sends; the private address your own alerts go to is on the Alerts tab, shown here read-only so the two can still be read against each other.",
   },
   {
     key: "orders",
@@ -104,6 +109,18 @@ export const TABS = [
     blurb: "What happens to an order without you",
     guide:
       "Two decisions, in order: when a new order stops being a request and becomes work (confirmation), and how far a confirmed order then travels towards the courier on its own. Both default to the cautious answer — a human confirms, and nothing charges your courier wallet unattended. This is the tab people go hunting for, which is why it is second.",
+  },
+  {
+    // Third, between the two tabs it is about. Everything here used to be in
+    // four places — the OTP switches on Store, the alert address on Store, the
+    // sending identity nowhere at all, and the on/off for every message on
+    // Admin → Automation — which is why the owner asked for it centralised.
+    key: "alerts",
+    label: "Alerts",
+    heading: "Alerts & notifications",
+    blurb: "Who gets told what, and how it reaches them",
+    guide:
+      "One grid: every event this store can announce, who it goes to, and which channel carries it. A tick here is the same rule Admin → Automation lists — this is the short way to switch one on or off, and that screen is where its wording and timing live. Above the grid is everything about sending itself: the address mail comes from, whether that domain can actually deliver, where replies land, and where your own alerts go. Underneath it are the codes the store asks people for before it trusts an address or a number, because a channel is only as good as the contact detail behind it.",
   },
   {
     key: "payments",

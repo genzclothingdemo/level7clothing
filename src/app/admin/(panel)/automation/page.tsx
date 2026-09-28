@@ -3,6 +3,7 @@ import { ArrowUpRight, Mail, Plus, Zap } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import {
   DIRECT_MAIL,
+  IMPLEMENTED_ACTIONS,
   actionSpec,
   describeConditions,
   jobBacklog,
@@ -32,6 +33,14 @@ import {
   type QueueOutcome,
 } from "@/components/admin/automation-health";
 import { AutomationRestoreButton } from "@/components/admin/automation-restore";
+import { NotificationPostureStrip } from "@/components/admin/notification-matrix";
+import { smsGateway } from "@/lib/otp";
+import {
+  SMS_UNAVAILABLE,
+  orderedChannels,
+  whatsappGateway,
+  type ChannelFact,
+} from "@/lib/notification-channels";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Automation" };
@@ -120,6 +129,41 @@ export default async function AdminAutomation() {
   const dispatch = dispatchModeOf(pipeline);
   const active = rules.filter((r) => r.isActive).length;
 
+  /**
+   * The notification posture, counted straight off the rules already loaded
+   * above — no second query, and no second source of truth: Settings → Alerts
+   * draws the same column of the same table as a grid.
+   *
+   * `supported` is `IMPLEMENTED_ACTIONS`, the one list the sender cancels an
+   * unknown action against, so a channel that cannot be sent reads
+   * "unavailable" here for the same reason its checkbox is disabled there.
+   */
+  const notifyKeys = orderedChannels([
+    ...IMPLEMENTED_ACTIONS,
+    ...rules.map((r) => r.action),
+  ]);
+
+  const notifyByChannel: Record<string, number> = Object.fromEntries(
+    notifyKeys.map((key) => [
+      key,
+      rules.filter((r) => r.isActive && r.action === key).length,
+    ])
+  );
+
+  const notifyChannels: ChannelFact[] = notifyKeys.map((key) => ({
+    channel: key,
+    supported: (IMPLEMENTED_ACTIONS as readonly string[]).includes(key),
+    healthy: false,
+    detail:
+      key === "sms"
+        ? smsGateway().ready
+          ? smsGateway().detail
+          : SMS_UNAVAILABLE
+        : key === "whatsapp"
+          ? whatsappGateway().detail
+          : "",
+  }));
+
   const jobRows: JobRow[] = jobs.map((j) => ({
     id: j.id,
     ruleName: j.rule.name,
@@ -180,6 +224,18 @@ export default async function AdminAutomation() {
 
       {/* ---------------- Can we send at all? ---------------- */}
       <EmailHealthCard health={health} queue={queueOutcome} />
+
+      {/* ---------------- The same rows, as a posture ----------------
+          Read-only, with one link. Settings → Alerts is the grid view of the
+          list below: an owner asking "does a shipped order text the customer"
+          is asking about a cell, not about a rule's wording, and reading that
+          off twenty-three rows is not an answer. Never a control here — the
+          grid is one editor, this is the statement of it. */}
+      <NotificationPostureStrip
+        byChannel={notifyByChannel}
+        channels={notifyChannels}
+        total={active}
+      />
 
       {/* ---------------- Rules ---------------- */}
       <section className="min-w-0">

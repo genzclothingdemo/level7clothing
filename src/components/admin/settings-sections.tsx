@@ -64,7 +64,18 @@ import {
   type DraftKey,
   type SettingsDraft,
 } from "@/components/admin/settings-ui";
-import { formatINR } from "@/lib/utils";
+import { NotificationMatrixCard } from "@/components/admin/notification-matrix";
+// Runtime values and types from the one module that is safe on both sides —
+// it has no directive and no server imports, so the server page builds the
+// matrix with it and this client component renders the result.
+import {
+  identityTone,
+  type ChannelFact,
+  type NotificationMatrix,
+  type SendingIdentity,
+} from "@/lib/notification-channels";
+import type { TabKey } from "@/lib/settings-tabs";
+import { cn, formatINR } from "@/lib/utils";
 import {
   CONFIRM_MODE_LABEL,
   DISPATCH_MODE_LABEL,
@@ -131,6 +142,25 @@ export type SettingsFacts = {
    */
   sms: { ready: boolean; detail: string };
 
+  /* ---- Alerts tab ---- */
+  /**
+   * Everything the notification matrix needs, built on the server.
+   *
+   * **`matrix` is a view over `AutomationRule`, not a stored grid.** See the
+   * header of `lib/notification-channels.ts`: a tick is that table's
+   * `isActive` column, resolved back to a real rule by the action. Nothing
+   * about the owner's choices is kept anywhere else, which is the only way the
+   * screen and the engine can be guaranteed to agree.
+   *
+   * `channels` carries `supported` derived from `IMPLEMENTED_ACTIONS`, so the
+   * disabled cells on screen and the refusals on the server are the same list.
+   */
+  notifications: {
+    channels: ChannelFact[];
+    matrix: NotificationMatrix;
+    identity: SendingIdentity;
+  };
+
   /* ---- Access tab ---- */
   /**
    * Everyone who can sign in besides the owner, with their state and the newest
@@ -156,6 +186,16 @@ export type SectionProps = {
   /** True for a field that differs from the last saved value. */
   isDirty: (key: DraftKey) => boolean;
   facts: SettingsFacts;
+  /**
+   * Switch to another tab without navigating.
+   *
+   * A section that mirrors a setting owned by another tab needs a way to send
+   * the owner there, and a `<Link href="?tab=…">` is a real navigation — this
+   * form holds one unsaved draft across all seven tabs, so that is a way to
+   * lose an edit. The shell passes its own `selectTab`, which is the same
+   * `history.replaceState` the tab bar uses.
+   */
+  goTab: (tab: TabKey) => void;
 };
 
 /** True when any of these fields is unsaved — used to force a fold open. */
@@ -192,7 +232,7 @@ function anyDirty(isDirty: (k: DraftKey) => boolean, keys: DraftKey[]): boolean 
  * fields. Nothing else was regrouped — a fold that merges two unlike things to
  * save a row is how a summary stops being able to tell the truth.
  */
-export function StoreSection({ f, set, isDirty, facts }: SectionProps) {
+export function StoreSection({ f, set, isDirty, facts, goTab }: SectionProps) {
   const [uploading, setUploading] = useState(false);
 
   async function onLogo(e: React.ChangeEvent<HTMLInputElement>) {
@@ -493,63 +533,69 @@ export function StoreSection({ f, set, isDirty, facts }: SectionProps) {
         />
       </SetOnce>
 
-      {/* ---- Set once: what the store asks people to prove ---- */}
-      <VerificationFold f={f} set={set} isDirty={isDirty} facts={facts} />
-
-      {/* ---- Set once: where the store writes to YOU (was the Email tab) ----
-          Deliberately the last fold and deliberately on this tab: it is one
-          address, it is set once, and its whole meaning is "not the contact
-          email six rows above". The summary says which of the two it is, so
-          the commonest mistake — both pointing at one inbox — is visible
-          without opening the fold. */}
-      <SetOnce
-        label="Your alerts"
-        summary={
-          sameAsPublic
-            ? `${f.adminNotifyEmail} — same as public`
-            : f.adminNotifyEmail
-        }
-        tip="Where the store writes to you — a new order, a new enquiry, a new interested customer. This address is never shown to a customer, which is why it is separate from the public contact email above. Customer-facing email (the order confirmation, the status update, the return decision) goes out through Resend and replies come back to your contact email, not to this one."
-        dirty={isDirty("adminNotifyEmail")}
+      {/* ---- Read-only: the private half of the pair, owned by Alerts ----
+          The alert address used to be edited here, because it only makes
+          sense read next to the public contact email above. It is now edited
+          on Alerts, beside the address mail is *sent from* and the grid of
+          what actually gets sent — and it is mirrored here so the pair is
+          still readable side by side. Read-only, and never an input: two
+          editable copies of one column is the `defaultReturnsInfo` lost
+          update, which cost a silent overwrite with no error anywhere. */}
+      <ManagedElsewhere
+        title="Where the store writes"
+        onJump={() => goTab("alerts")}
+        where="Alerts"
+        why="Your own alert address, the address customer mail is sent from, and which events send at all — all one errand, so they are one tab. Shown here because the public contact email above is the address this one deliberately is not."
       >
-        <TextField
-          label="Send order & lead emails to"
-          type="email"
-          inputMode="email"
-          required
-          value={f.adminNotifyEmail}
-          dirty={isDirty("adminNotifyEmail")}
-          onChange={(v) => set("adminNotifyEmail", v)}
-          hint={
+        <ReadRow
+          label="Your alerts go to"
+          value={f.adminNotifyEmail || "Not set"}
+          tone={sameAsPublic ? "warn" : undefined}
+          tip={
             sameAsPublic
-              ? "Same as your public contact email — your alerts and your customers share one inbox."
-              : undefined
+              ? "This is the same as your public contact email, so your own alerts and your customers' replies share one inbox. That works, but a busy contact inbox is where a new order notice gets lost."
+              : "Never shown to a customer. New orders, new enquiries and new interested customers are written here."
           }
         />
+        <ReadRow
+          label="Customer mail is sent from"
+          value={facts.notifications.identity.fromAddress}
+          tone={identityTone(facts.notifications.identity) === "ok" ? undefined : "warn"}
+          tip="Set in the deployment's environment, not on any screen. Replies to it come back to your public contact email above."
+        />
+        <ReadRow
+          label="Alerts switched on"
+          value={`${Object.values(facts.notifications.matrix.byChannel).reduce(
+            (a, b) => a + b,
+            0
+          )} across all channels`}
+          tone="muted"
+        />
+      </ManagedElsewhere>
 
-        <div className="min-w-0">
-          <div className="label flex items-center gap-1">
-            <span>Other channels</span>
-            <InfoTip term="Other channels">
-              Two more ways the store reaches people. Neither has a setting to
-              configure — each one is a message you compose and send, so each
-              has its own screen.
-            </InfoTip>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <ChannelLink
-              href="/admin/notifications"
-              label="Push notifications"
-              detail="Compose and broadcast"
-            />
-            <ChannelLink
-              href="/admin/newsletter"
-              label="Newsletter"
-              detail="Subscriber list"
-            />
-          </div>
+      <div className="min-w-0 rounded-2xl border border-border bg-card p-4 sm:p-5">
+        <div className="mb-3 flex items-center gap-1">
+          <h2 className="font-serif text-lg leading-none">Other channels</h2>
+          <InfoTip term="Other channels">
+            Two more ways the store reaches people. Neither has a setting to
+            configure — each one is a message you compose and send, so each has
+            its own screen. What goes out <em>automatically</em> is the Alerts
+            tab.
+          </InfoTip>
         </div>
-      </SetOnce>
+        <div className="flex flex-wrap gap-2">
+          <ChannelLink
+            href="/admin/notifications"
+            label="Push notifications"
+            detail="Compose and broadcast"
+          />
+          <ChannelLink
+            href="/admin/newsletter"
+            label="Newsletter"
+            detail="Subscriber list"
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -700,6 +746,210 @@ function VerificationFold({ f, set, isDirty, facts }: SectionProps) {
         )}
       </div>
     </SetOnce>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  1c. Alerts — one home for every notification decision              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Alerts — **the single screen for "who gets told what, and how".**
+ *
+ * This is what the owner asked for in one sentence: centralise the sending
+ * settings, and let every other screen link here instead of growing its own
+ * copy. Before it, one question was answered in four places — the address mail
+ * comes from was in the environment and on no screen, the address alerts go to
+ * was a fold on Store, whether a customer has to prove an address was another
+ * fold on Store, and whether any given event sends at all was a table on
+ * Admin → Automation.
+ *
+ * Three cards, in the order the question is actually asked:
+ *
+ *   1. **Can mail leave at all, and from where.** First, because none of the
+ *      rest means anything if it cannot. CLAUDE.md records the cost of getting
+ *      this wrong: an `EMAIL_FROM` on a gmail.com address made Resend reject
+ *      every send with a 403 for weeks while the code path returned cleanly,
+ *      so order confirmations, password resets and contact replies were all
+ *      silently undeliverable. This card shows the live verdict, not a label.
+ *   2. **The grid** — every event, every recipient, every channel.
+ *   3. **What the store asks people to prove** — the four one-time-code
+ *      switches, moved here whole from Store. A channel is only as good as the
+ *      contact detail behind it, so the decision to confirm one belongs on the
+ *      screen that decides what gets sent to it.
+ *
+ * **One writer per key, as everywhere else on this screen.** The grid writes
+ * `AutomationRule.isActive` through its own action and saves as you tick; the
+ * alert address goes through `updateSettings` and the four switches through
+ * `updateVerificationSettings`, both on the shared save bar. `contactEmail` is
+ * the Store tab's and is shown here read-only with a jump — a second input for
+ * it is exactly the `defaultReturnsInfo` trap.
+ */
+export function AlertsSection({ f, set, isDirty, facts, goTab }: SectionProps) {
+  return (
+    <div className="space-y-4">
+      <SendingIdentityCard
+        f={f}
+        set={set}
+        isDirty={isDirty}
+        facts={facts}
+        goTab={goTab}
+      />
+
+      <NotificationMatrixCard
+        matrix={facts.notifications.matrix}
+        channels={facts.notifications.channels}
+        // The UI reflecting the rule, never being it: every write routes
+        // through `requireAdminWrite` on the server, which refuses and records
+        // a view-only holder whatever the browser chooses to send.
+        canWrite={facts.viewerMode === "full"}
+      />
+
+      <VerificationFold
+        f={f}
+        set={set}
+        isDirty={isDirty}
+        facts={facts}
+        goTab={goTab}
+      />
+    </div>
+  );
+}
+
+/**
+ * Where mail comes from, whether it can actually get out, and where your own
+ * copy lands.
+ *
+ * The badge is the whole point of the card: **it states the live verdict, not
+ * a hopeful label.** "Rejected" here is the thing that would otherwise be
+ * discovered weeks later by a customer who never got their order confirmation.
+ *
+ * The sender itself is read-only because it is an environment variable and not
+ * a column — the same rule the Integrations tab applies to the Razorpay and
+ * NimbusPost keys. There is no input, so there is nothing to leak, and no way
+ * to change it here into something Resend would reject.
+ */
+function SendingIdentityCard({ f, set, isDirty, facts, goTab }: SectionProps) {
+  const id = facts.notifications.identity;
+  const tone = identityTone(id);
+  const sameAsPublic =
+    f.adminNotifyEmail.trim().toLowerCase() === f.contactEmail.trim().toLowerCase();
+
+  const badge =
+    tone === "bad"
+      ? { tone: "danger" as const, label: "Not delivering" }
+      : tone === "warn"
+        ? { tone: "warn" as const, label: "Test sender" }
+        : { tone: "success" as const, label: "Sending" };
+
+  return (
+    <Card
+      title="How mail leaves this store"
+      tip="The one place the sending identity is stated. Who mail is from is set in the deployment's environment and shown here read-only; where replies land is your public contact email on the Store tab; where your own alerts land is the one field on this card. Resend only accepts a sender on a domain you have verified in your Resend account — a sender it will not accept is refused with a 403 and the store carries on as if it sent, which is why the verdict is printed rather than assumed."
+      aside={<Badge tone={badge.tone}>{badge.label}</Badge>}
+    >
+      <dl className="space-y-1.5">
+        <ReadRow
+          label="Sent from"
+          value={
+            <span className="break-all font-mono text-[11px]">{id.from}</span>
+          }
+          tip="`EMAIL_FROM` in the deployment's environment. Not editable on any screen — it is a deployment setting, and an input for it here would be a way to break every send from a browser."
+        />
+        <ReadRow
+          label="Resend key"
+          value={id.hasApiKey ? "Set" : "Missing"}
+          tone={id.hasApiKey ? undefined : "warn"}
+          tip="Whether `RESEND_API_KEY` is present. The value is never rendered — a screen that prints a send key is a screen that leaks it into a screenshot. With no key nothing is sent at all; each message is skipped with a line in the log."
+        />
+        <ReadRow
+          label="Replies go to"
+          value={f.contactEmail || "Not set"}
+          tip="Your public contact email, from the Store tab. It is what a customer replies to, and what the store tells people to write to."
+        />
+        {id.lastSent && (
+          <ReadRow label="Last sent" value={id.lastSent} tone="muted" />
+        )}
+        {id.failedCount > 0 && (
+          <ReadRow
+            label="Failed"
+            value={`${id.failedCount} in the queue`}
+            tone="warn"
+            tip={id.lastFailedError ?? undefined}
+          />
+        )}
+        {!id.lastSent && id.failedCount === 0 && (
+          <ReadRow
+            label="Last sent"
+            value="Nothing yet"
+            tone="muted"
+            tip="No rule has sent anything from this store since the queue was last cleared. That is normal for a new store, and a warning sign for a busy one."
+          />
+        )}
+      </dl>
+
+      {/* Printed, not behind an (i). A sender nobody can verify is the one
+          state that silently means something other than what it says, and
+          CLAUDE.md records that it went unnoticed for weeks. Same treatment as
+          the unattended-dispatch warning on Orders. */}
+      {tone !== "ok" && (
+        <div
+          className={cn(
+            "rounded-lg border p-2.5",
+            tone === "bad"
+              ? "border-danger/40 bg-danger/10"
+              : "border-orange-500/40 bg-orange-500/10"
+          )}
+        >
+          <p
+            className={cn(
+              "flex items-start gap-1.5 text-xs font-medium",
+              tone === "bad" ? "text-danger" : "text-orange-600 dark:text-orange-400"
+            )}
+          >
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+            <span>
+              {tone === "bad"
+                ? "Mail is not reaching anybody."
+                : "This is a test sender."}
+            </span>
+          </p>
+          <p className="mt-1 pl-5 text-xs leading-relaxed text-foreground">
+            {id.advice}
+          </p>
+        </div>
+      )}
+
+      {/* The one editable field on this card. Its writer is `updateSettings`,
+          exactly as it was on Store — the move is which tab draws it, not
+          which action owns it. */}
+      <TextField
+        label="Send my own alerts to"
+        type="email"
+        inputMode="email"
+        required
+        value={f.adminNotifyEmail}
+        dirty={isDirty("adminNotifyEmail")}
+        onChange={(v) => set("adminNotifyEmail", v)}
+        tip="Where the store writes to you — a new order, a new enquiry, someone waiting in chat. Never shown to a customer, which is the whole reason it is separate from your public contact email."
+        hint={
+          sameAsPublic ? (
+            <>
+              Same as your public contact email, so your alerts and your
+              customers share one inbox.{" "}
+              <button
+                type="button"
+                onClick={() => goTab("store")}
+                className="cursor-pointer text-accent underline-offset-2 hover:underline"
+              >
+                Change the public one on Store
+              </button>
+              .
+            </>
+          ) : undefined
+        }
+      />
+    </Card>
   );
 }
 

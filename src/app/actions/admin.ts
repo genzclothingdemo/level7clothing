@@ -1018,8 +1018,36 @@ export async function updateOrderTracking(
 
 export async function updatePaymentStatus(id: string, paymentStatus: string) {
   await requireAdmin("updatePaymentStatus");
+
+  // Read the old value first: `order.payment_changed` carries
+  // `previousPaymentStatus`, and after the write it is unrecoverable.
+  const before = await prisma.order.findUnique({
+    where: { id },
+    select: { paymentStatus: true },
+  });
+  if (!before) return { ok: false as const, error: "Order not found" };
+
   await prisma.order.update({ where: { id }, data: { paymentStatus } });
   revalidatePath("/admin/orders");
+
+  // Setting the column by hand is the same event as Razorpay setting it, so it
+  // raises the same trigger — otherwise marking a payment failed from the
+  // orders table would tell nobody, while the identical change made by the
+  // payment callback tells everyone. Skipped when the value did not actually
+  // move: re-saving the same status is a no-op, not an event.
+  //
+  // Not awaited for correctness, only for ordering — `runAutomationTrigger`
+  // cannot throw by contract, and the dedupe key is `<orderId>:<status>`, so
+  // a double-save cannot produce a second message.
+  if (before.paymentStatus !== paymentStatus) {
+    await runAutomationTrigger("order.payment_changed", {
+      id,
+      context: { previousPaymentStatus: before.paymentStatus },
+    }).catch((err) =>
+      console.error("[admin] payment automation failed:", err)
+    );
+  }
+
   return { ok: true as const };
 }
 

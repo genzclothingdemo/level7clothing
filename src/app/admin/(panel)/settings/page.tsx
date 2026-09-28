@@ -7,6 +7,24 @@ import { dispatchModeOf, normalisePipelineSettings } from "@/lib/orders-pipeline
 import { getAdminSession } from "@/lib/auth";
 import { listTempAdmins } from "@/lib/temp-admin";
 import { smsGateway } from "@/lib/otp";
+import { emailHealth } from "@/lib/email";
+import { pushReach } from "@/lib/push-dispatch";
+import {
+  IMPLEMENTED_ACTIONS,
+  SYSTEM_RULES,
+  describeConditions,
+  readConditions,
+  triggerLabel,
+} from "@/lib/automation";
+import {
+  SMS_UNAVAILABLE,
+  buildNotificationMatrix,
+  composeFallbackLabel,
+  orderedChannels,
+  whatsappGateway,
+  type ChannelFact,
+  type RuleRow,
+} from "@/lib/notification-channels";
 import { InfoTip } from "@/components/store/info-tip";
 import { SettingsForm } from "@/components/admin/settings-form";
 // Runtime values come from lib/, NOT from settings-ui — that file is
@@ -94,13 +112,205 @@ async function readCatalogue(): Promise<{
   return { catalogue: { active, byMode }, returnableSplit: split };
 }
 
+/**
+ * "2 days ago", computed on the server.
+ *
+ * Deliberately not done in the browser: a relative time computed at render and
+ * again at hydration is a mismatch, and `toLocaleDateString` picks up the
+ * viewer's locale and timezone. The Alerts card receives a finished string.
+ */
+function ago(date: Date | null | undefined): string | null {
+  if (!date) return null;
+  const mins = Math.round((Date.now() - date.getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+/**
+ * Everything the Alerts tab needs — the live sending state, what each channel
+ * can currently do, and the grid itself.
+ *
+ * **The grid is a view over `AutomationRule` and is built here, once.** The
+ * catalogue (`SYSTEM_RULES`) and the live rows are both read on the server and
+ * folded together by `buildNotificationMatrix`; the client is handed a plain
+ * object. That split is not stylistic — `lib/automation.ts`, `lib/email.ts`
+ * and `lib/push-dispatch.ts` are all `server-only`, and the matrix has to be
+ * rendered by a client component because it is a grid of checkboxes.
+ *
+ * `supported` comes from `IMPLEMENTED_ACTIONS`, which is also what
+ * `deliverJob` cancels an unknown action against and what the write action
+ * refuses on — one list, so a channel can never be tickable and unsendable.
+ * `healthy` is a separate, softer question: configured *right now*. A missing
+ * Resend key is a warning on screen, not a locked checkbox, because an owner
+ * setting rules up before they buy a domain is doing nothing wrong.
+ */
+async function readNotificationFacts(): Promise<SettingsFacts["notifications"]> {
+  const health = emailHealth();
+
+  const [rules, reach, lastSentJob, lastFailedJob, failedCount] = await Promise.all([
+    prisma.automationRule
+      .findMany({
+        select: {
+          id: true,
+          name: true,
+          trigger: true,
+          conditions: true,
+          action: true,
+          recipient: true,
+          delayMinutes: true,
+          isActive: true,
+          templateId: true,
+        },
+      })
+      .catch(() => []),
+    pushReach().catch(() => ({
+      configured: false,
+      totalDevices: 0,
+      reachableDevices: 0,
+      adminEmail: "",
+      adminDevices: 0,
+    })),
+    // `AutomationJob` is the only record of a send that survives a deploy —
+    // `lib/email.ts`'s own last-send memory dies with the instance, so a
+    // screen that only read that would say "nothing yet" after every deploy.
+    prisma.automationJob
+      .findFirst({
+        where: { status: "sent" },
+        orderBy: { sentAt: "desc" },
+        select: { sentAt: true, rule: { select: { name: true } } },
+      })
+      .catch(() => null),
+    prisma.automationJob
+      .findFirst({
+        where: { status: "failed" },
+        orderBy: { createdAt: "desc" },
+        select: { createdAt: true, error: true, rule: { select: { name: true } } },
+      })
+      .catch(() => null),
+    prisma.automationJob.count({ where: { status: "failed" } }).catch(() => 0),
+  ]);
+
+  const supports = (key: string) =>
+    (IMPLEMENTED_ACTIONS as readonly string[]).includes(key);
+
+  const sms = smsGateway();
+  const whatsapp = whatsappGateway();
+
+  const detailFor: Record<string, { healthy: boolean; detail: string }> = {
+    email: {
+      healthy: health.hasApiKey && health.verdict !== "unverifiable",
+      detail:
+        health.hasApiKey && health.verdict !== "unverifiable"
+          ? `Sent from ${health.fromDomain}.`
+          : health.advice,
+    },
+    push: {
+      healthy: reach.configured,
+      detail: !reach.configured
+        ? "Notification keys are not set on this deployment, so nothing can be sent to a phone."
+        : reach.reachableDevices === 0
+          ? "No customer has installed the store to a phone yet, so these are queued and skipped with a reason rather than failing."
+          : `${reach.reachableDevices} signed-in device${
+              reach.reachableDevices === 1 ? "" : "s"
+            } can be reached${
+              reach.adminDevices === 0 ? " — none of them yours" : ""
+            }.`,
+    },
+    // The in-app bell has no gateway, no permission prompt and no address —
+    // it is a row in this database waiting to be looked at, so it is healthy
+    // whenever it is supported at all.
+    inapp: {
+      healthy: true,
+      detail:
+        "Waits in the notification bell until they look. Nothing to configure and nothing that can reject it.",
+    },
+    // `smsGateway()` decides; this screen words it. Its own sentence is about
+    // one-time codes, which is the wrong subject next to "tell the customer
+    // their order shipped".
+    sms: { healthy: sms.ready, detail: sms.ready ? sms.detail : SMS_UNAVAILABLE },
+    whatsapp: { healthy: whatsapp.ready, detail: whatsapp.detail },
+  };
+
+  // The columns: the named vocabulary, plus everything this store has actually
+  // got. `IMPLEMENTED_ACTIONS` belongs to the delivery engine and grows — a
+  // hard-coded column list would have hidden every live `inapp` rule behind a
+  // screen claiming to show the whole posture.
+  const channels: ChannelFact[] = orderedChannels([
+    ...IMPLEMENTED_ACTIONS,
+    ...rules.map((r) => r.action),
+  ]).map((key) => ({
+    channel: key,
+    supported: supports(key),
+    healthy: detailFor[key]?.healthy ?? false,
+    detail:
+      detailFor[key]?.detail ??
+      (supports(key)
+        ? ""
+        : "This channel is not something this store can send yet."),
+  }));
+
+  const ruleRows: RuleRow[] = rules.map((r) => ({
+    id: r.id,
+    name: r.name,
+    trigger: r.trigger,
+    // Normalised through the engine's own reader, so a blank condition means
+    // "any" here exactly as it does when the rule fires.
+    conditions: readConditions(r.conditions),
+    action: r.action,
+    recipient: r.recipient,
+    delayMinutes: r.delayMinutes,
+    isActive: r.isActive,
+    hasTemplate: r.templateId !== null,
+  }));
+
+  return {
+    channels,
+    matrix: buildNotificationMatrix({
+      catalogue: SYSTEM_RULES,
+      rules: ruleRows,
+      facts: channels,
+      labelFor: (trigger, conditions) =>
+        composeFallbackLabel(
+          triggerLabel(trigger),
+          describeConditions(trigger, conditions)
+        ),
+    }),
+    identity: {
+      hasApiKey: health.hasApiKey,
+      from: health.from,
+      fromAddress: health.fromAddress,
+      fromDomain: health.fromDomain,
+      verdict: health.verdict,
+      advice: health.advice,
+      lastSent: lastSentJob
+        ? `${ago(lastSentJob.sentAt)} · ${lastSentJob.rule.name}`
+        : null,
+      lastFailed: lastFailedJob
+        ? `${ago(lastFailedJob.createdAt)} · ${lastFailedJob.rule.name}`
+        : null,
+      lastFailedError: lastFailedJob?.error ?? null,
+      failedCount,
+    },
+  };
+}
+
 export default async function AdminSettings({
   searchParams,
 }: {
   searchParams: Promise<{ tab?: string }>;
 }) {
-  const [{ tab: rawTab }, row, { catalogue, returnableSplit }, tempAdmins, viewer] =
-    await Promise.all([
+  const [
+    { tab: rawTab },
+    row,
+    { catalogue, returnableSplit },
+    tempAdmins,
+    viewer,
+    notifications,
+  ] = await Promise.all([
       searchParams,
       readRow(),
       readCatalogue(),
@@ -114,6 +324,10 @@ export default async function AdminSettings({
       // it again only to learn the viewer's own mode, and `getAdminSession` is
       // memoised per request so it is not a second round trip.
       getAdminSession(),
+      // Read on every load for the same reason as the temp admins above: one
+      // draft, seven tabs, and the section that is not mounted still has to be
+      // able to mount without suspending.
+      readNotificationFacts(),
     ]);
 
   // `resolveTab` and not a bare `isTabKey` check: `?tab=storefront` and
@@ -218,6 +432,12 @@ export default async function AdminSettings({
     // environment fact; printed beside the two phone switches because a switch
     // that cannot be honoured has to say so where it is set, not at the till.
     sms: smsGateway(),
+
+    // The Alerts tab, whole: the live sending state, what each channel can do
+    // today, and the grid of which events tell whom. The grid is a **view over
+    // `AutomationRule`** — see `readNotificationFacts` above and the header of
+    // `lib/notification-channels.ts`.
+    notifications,
 
     tempAdmins,
     // Defaults to the narrower mode if the session somehow read back empty.

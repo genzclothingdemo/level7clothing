@@ -462,6 +462,168 @@ const demoWhere = {
   OR: [{ tags: { has: DEMO_TAG } }, { tags: { has: LEGACY_TAG } }],
 };
 
+/* ------------------------------------------------------------------ */
+/*  Load test — `--bulk` / `--unbulk`                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A **throwaway** population used to prove /portfolio survives the size the
+ * owner described — *"each section = 50+ post/reel/yt/page"*. It is not part
+ * of the demo set and is never seeded by a plain run:
+ *
+ *   node scripts/seed-portfolio-demo.mjs --bulk     # ~50 per group, 4 groups
+ *   node scripts/seed-portfolio-demo.mjs --unbulk   # take them all back out
+ *
+ * **Its own tag, and no overlap with `set:demo`.** `tags: { has: … }` is an
+ * exact element match, so `set:demo-bulk` is invisible to `demoWhere` and
+ * `--unbulk` can never reach a real row. That separation is the whole reason
+ * this lives behind a second tag rather than inside `build()`: the fourteen
+ * curated rows must come out of a load test byte-identical, and the default
+ * path (which updates every `set:demo` row it finds) is never run.
+ *
+ * Every row is deliberately **realistic where realism is what is being
+ * measured**: distinct local posters, so no two tiles share an optimiser cache
+ * entry and an image-fetch count means something; real embed hosts, so the
+ * provider split and the viewer's players behave as they do in production.
+ */
+const BULK_TAG = "set:demo-bulk";
+const bulkWhere = { tags: { has: BULK_TAG } };
+
+/** Real shortcodes, cycled — so any tile opened during testing really plays. */
+const BULK_IG = ["DT0n6EDCHlR", "DF0B5nty74N", "DBvh3MeyZ7x"];
+/** Real video ids: `i.ytimg.com` posters are permanent and already allow-listed. */
+const BULK_YT = [
+  "aqz-KE-bpKQ",
+  "jNQXAC9IVRw",
+  "ScMzIvxBSi4",
+  "YE7VzlLtp-4",
+  "9bZkp7q19f0",
+  "kJQP7kiw5Fk",
+];
+
+const BULK_NOUN = [
+  "Drop", "Fit check", "Studio", "Print run", "Lookbook", "Campus", "Rail",
+  "Cut & sew", "Back room", "Packing table", "Proof", "Colourway",
+];
+const BULK_VERB = [
+  "in the light", "on the floor", "before the wash", "at 240 GSM",
+  "two passes deep", "in bottle green", "unboxed", "off the press",
+  "sorted by size", "day one", "with the seam turned out", "on location",
+];
+
+/** Every local product photo, so posters are distinct tile to tile. */
+async function localPosters() {
+  const { readdir } = await import("node:fs/promises");
+  const names = await readdir("public/products/level7");
+  return names
+    .filter((n) => /\.(png|jpe?g|webp)$/i.test(n))
+    .sort()
+    .map((n) => `/products/level7/${n}`);
+}
+
+async function buildBulk(perGroup) {
+  const posters = await localPosters();
+  const rows = [];
+  let order = 1000;
+
+  const phrase = (i) =>
+    `${BULK_NOUN[i % BULK_NOUN.length]} ${String(i + 1).padStart(3, "0")} — ${
+      BULK_VERB[(i * 7) % BULK_VERB.length]
+    }`;
+
+  // ---- Social: shoppable (sourceProductId set → source "product-video") ----
+  for (let i = 0; i < perGroup; i += 1) {
+    const code = BULK_IG[i % BULK_IG.length];
+    rows.push({
+      title: `${phrase(i)} [bulk]`,
+      description: i % 3 === 0 ? "Shot on the piece, straight out of the studio." : null,
+      kind: "instagram",
+      url: `https://www.instagram.com/p/${code}/`,
+      imageUrl: posters[i % posters.length],
+      embedHtml: igEmbed(code),
+      productId: i % 2 === 0 ? PRODUCT.field : PRODUCT.reserve,
+      sourceProductId: i % 2 === 0 ? PRODUCT.field : PRODUCT.reserve,
+      tags: [BULK_TAG, "section:reels"],
+      sortOrder: order++,
+      isFeatured: i === 0,
+      isActive: true,
+    });
+  }
+
+  // ---- Social: studio (hand-added Instagram, no source product) ----
+  for (let i = 0; i < perGroup; i += 1) {
+    const code = BULK_IG[(i + 1) % BULK_IG.length];
+    rows.push({
+      title: `${phrase(i + 40)} [bulk]`,
+      description: i % 4 === 0 ? "Behind the scenes, picked by us." : null,
+      kind: "instagram",
+      url: `https://www.instagram.com/p/${code}/`,
+      imageUrl: posters[(i + 37) % posters.length],
+      embedHtml: igEmbed(code),
+      tags: [BULK_TAG, "section:reels"],
+      sortOrder: order++,
+      isFeatured: false,
+      isActive: true,
+    });
+  }
+
+  // ---- Social: YouTube ----
+  for (let i = 0; i < perGroup; i += 1) {
+    const id = BULK_YT[i % BULK_YT.length];
+    rows.push({
+      title: `${phrase(i + 80)} [bulk]`,
+      description: i % 5 === 0 ? "The longer cut." : null,
+      kind: "video",
+      url: `https://www.youtube.com/watch?v=${id}`,
+      imageUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+      embedHtml: ytEmbed(
+        `https://www.youtube-nocookie.com/embed/${id}?rel=0&modestbranding=1`
+      ),
+      tags: [BULK_TAG, "section:reels"],
+      sortOrder: order++,
+      isFeatured: false,
+      isActive: true,
+    });
+  }
+
+  // ---- Pages: nothing playable, so `embedUrl` stays null ----
+  for (let i = 0; i < perGroup; i += 1) {
+    const withFigure = i % 3 === 0;
+    rows.push({
+      title: withFigure
+        ? `${(i + 2) * 137} pieces out the door in week ${i + 1} [bulk]`
+        : `${phrase(i + 120)} [bulk]`,
+      description:
+        i % 2 === 0
+          ? "Campus and corporate runs go out on the same cotton as retail, proofed twice before anything is cured."
+          : "A short note about a run we are still asked about.",
+      kind: i % 4 === 0 ? "link" : "image",
+      url: i % 4 === 0 ? "/contact" : null,
+      imageUrl: i % 5 === 0 ? null : posters[(i + 71) % posters.length],
+      tags: [BULK_TAG, i % 3 === 0 ? "milestone" : "bulk order"],
+      sortOrder: order++,
+      isFeatured: i === 1,
+      isActive: true,
+    });
+  }
+
+  return rows.map((r) => ({ ...BLANK, ...r }));
+}
+
+async function seedBulk(perGroup) {
+  const existing = await prisma.portfolioItem.count({ where: bulkWhere });
+  if (existing) {
+    await prisma.portfolioItem.deleteMany({ where: bulkWhere });
+    console.log(`cleared ${existing} stale bulk rows first`);
+  }
+  const rows = await buildBulk(perGroup);
+  const { count } = await prisma.portfolioItem.createMany({ data: rows });
+  const real = await prisma.portfolioItem.count({ where: { NOT: bulkWhere } });
+  console.log(
+    `seeded ${count} bulk rows (${perGroup} per group × 4) · ${real} non-bulk rows untouched`
+  );
+}
+
 /**
  * Every column this script writes, at its "not set" value.
  *
@@ -521,6 +683,21 @@ async function setProductVideos(videos) {
 }
 
 async function main() {
+  // Load test first — both branches return, so a bulk run can never fall
+  // through into the default path that rewrites the fourteen curated rows.
+  if (process.argv.includes("--unbulk")) {
+    const { count } = await prisma.portfolioItem.deleteMany({ where: bulkWhere });
+    const left = await prisma.portfolioItem.count();
+    console.log(`removed ${count} bulk rows · ${left} portfolio rows remain`);
+    return;
+  }
+  if (process.argv.includes("--bulk")) {
+    const at = process.argv.indexOf("--bulk");
+    const n = Number(process.argv[at + 1]);
+    await seedBulk(Number.isFinite(n) && n > 0 ? n : 54);
+    return;
+  }
+
   if (process.argv.includes("--clean")) {
     const { count } = await prisma.portfolioItem.deleteMany({ where: demoWhere });
     await setProductVideos([]);

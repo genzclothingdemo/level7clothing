@@ -34,6 +34,19 @@ export const dynamic = "force-dynamic";
  *      product, the ones the owner added by hand, and everything on YouTube.
  *   2. **Pages** — the write-ups, achievements and bulk-order work.
  *
+ * ── The page does not explain itself ────────────────────────────────────────
+ *
+ * The owner's note, verbatim: *"explaination text 00 kar do."* This page had
+ * an intro paragraph, a sentence under each of the two headings, a sentence
+ * under each of the three groups, a standing hint reading "Tap any tile — it
+ * plays here, not on Instagram", and a line of sell copy over the closing
+ * buttons. Seven paragraphs of narration around the work itself.
+ *
+ * A portfolio shows. What survives is the vocabulary CLAUDE.md already
+ * prescribes for this store — `.eyebrow` labels, counts, and **one** `(i)`
+ * carrying everything that is genuinely worth saying, on the heading it is
+ * about. Prose belongs behind an info affordance, not in the first impression.
+ *
  * ── Why the grouping is decided here and not in `lib/portfolio.ts` ──────────
  *
  * `lib/portfolio.ts` is another agent's file, and it still models the six
@@ -69,17 +82,15 @@ export const dynamic = "force-dynamic";
  * Source ids that mean **"this reel's URL came from a product's video links"**.
  *
  * A `Set<string>` rather than a comparison against `PortfolioSource`, and that
- * is the point: `lib/portfolio.ts` currently exports
- * `PortfolioSource = "portfolio" | "instagram-api"` and has **no marker at all
- * for a product-derived reel** — `productVideoEntries()` was removed, and the
- * owner of that module is adding it back. Written this way the lookup
- * typechecks against today's narrow union and starts working the moment the
- * union widens, whichever of these spellings lands, with no edit here.
+ * is the point: the union in `lib/portfolio.ts` is that module's to widen, and
+ * it has already carried more and fewer members than it does today. Written
+ * this way the lookup typechecks against whatever the union is now and keeps
+ * working through the next spelling, with no edit here.
  *
- * Until then the "shoppable" group is empty and hides itself, which is honest:
- * an empty group is better than guessing, and guessing was available —
- * `entry.product !== null` is *not* the same question. A reel the owner added
- * by hand can also name a garment; that does not make it a product video.
+ * A group with nothing in it hides itself, which is honest: an empty group is
+ * better than guessing, and guessing was available — `entry.product !== null`
+ * is *not* the same question. A reel the owner added by hand can also name a
+ * garment; that does not make it a product video.
  */
 const PRODUCT_SOURCES: ReadonlySet<string> = new Set([
   "product-video",
@@ -91,19 +102,19 @@ const PRODUCT_SOURCES: ReadonlySet<string> = new Set([
 
 type SocialGroupId = "shoppable" | "studio" | "youtube";
 
-const SOCIAL_GROUP_META: Record<SocialGroupId, { label: string; blurb: string }> = {
-  shoppable: {
-    label: "Shot on a piece",
-    blurb: "Reels attached to something you can buy — the garment is one tap away.",
-  },
-  studio: {
-    label: "From the studio",
-    blurb: "Drops, shoots and behind the scenes, picked by us.",
-  },
-  youtube: {
-    label: "On YouTube",
-    blurb: "The longer cuts and the shorts, wherever they came from.",
-  },
+/**
+ * Two or three words each, and no sentence.
+ *
+ * These are **tab labels** now, not shelf headings with a blurb under them, so
+ * they have to survive being read at 11px beside a count on a 320px screen.
+ * The same string names the set inside the reel viewer ("STUDIO · 12 / 54"),
+ * which is the only place a visitor is told which feed they are swiping
+ * through — so short is not a compromise here, it is the requirement.
+ */
+const SOCIAL_GROUP_LABEL: Record<SocialGroupId, string> = {
+  shoppable: "On a piece",
+  studio: "Studio",
+  youtube: "YouTube",
 };
 
 /** YouTube wins over provenance — the brief asks for both sources together. */
@@ -161,7 +172,7 @@ export default async function PortfolioPage() {
     ["shoppable", "studio", "youtube"] as const
   ).map((id) => ({
     id,
-    ...SOCIAL_GROUP_META[id],
+    label: SOCIAL_GROUP_LABEL[id],
     entries: social.filter((entry) => socialGroupOf(entry) === id),
   }));
 
@@ -169,11 +180,17 @@ export default async function PortfolioPage() {
   const empty = social.length === 0 && pages.length === 0;
 
   return (
-    <div className="container-px mx-auto max-w-7xl py-14">
-      {/* ---- Who we are ----------------------------------------------
-          The brand statement leads the page: it is the one thing every visitor
-          should read, and it comes from `SiteSettings` so the owner edits it
-          at Admin → Settings. CLAUDE.md: don't hardcode brand strings.
+    <div className="container-px mx-auto max-w-7xl py-9 sm:py-14">
+      {/* ---- Masthead ------------------------------------------------
+          The brand, the line under it, and one way out. Deliberately short:
+          this is a page whose job is to show work, and every pixel spent above
+          the first photograph is a pixel of not showing it. At 320×800 the
+          masthead plus one section header already runs to most of a screen.
+
+          Two things that used to be here are gone for the same reason, and
+          both were duplicates rather than sacrifices: `aboutText`, which has a
+          page of its own at /about, and a "Work with us" button pointing at
+          /contact — which the closing block already offers as "Talk to us".
 
           A `<div>`, not a `<header>`: the store layout's navbar is already the
           page's `banner` landmark, and a second one leaves a screen-reader
@@ -181,158 +198,129 @@ export default async function PortfolioPage() {
           header. */}
       <div className="text-center">
         <p className="eyebrow">Our work</p>
-        <h1 className="mt-2 font-serif text-4xl leading-tight md:text-5xl">
+        <h1 className="display-tight mt-2.5 font-serif text-4xl leading-none sm:text-5xl md:text-6xl">
           {s.brandName}
         </h1>
         {s.tagline && (
-          <p className="mt-2 text-sm uppercase tracking-[0.2em] text-accent">
+          <p className="mt-2.5 text-[11px] uppercase tracking-[0.22em] text-accent sm:text-xs">
             {s.tagline}
           </p>
         )}
-        {s.aboutText && (
-          <p className="mx-auto mt-5 max-w-xl text-sm leading-relaxed text-muted-foreground">
-            {s.aboutText}
-          </p>
-        )}
 
-        <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+        <div className="mt-5 flex justify-center">
           <ButtonLink href={profileUrl} target="_blank" rel="noreferrer">
             <InstagramIcon className="h-4 w-4" aria-hidden="true" />
             {handle}
             <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
           </ButtonLink>
-          <ButtonLink href="/contact" variant="outline">
-            Work with us
-          </ButtonLink>
         </div>
-
-        {/*
-          Honesty about what this page is. With no Graph API token there is no
-          automatic mirror of the whole account, and saying so is better than
-          implying one — see the block comment on `fetchInstagramMedia` in
-          lib/portfolio.ts. Individual posts *are* mirrored: the poster is
-          copied into our own storage and the reel plays on this page.
-
-          Prose behind an (i), per the owner's rule about first impressions.
-        */}
-        <p className="mt-5 inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-          {data.live ? (
-            <>Pulled live from Instagram, plus our own picks</>
-          ) : (
-            <>Tap any tile — it plays here, not on Instagram</>
-          )}
-          <InfoTip term={data.live ? "Live feed" : "How this works"}>
-            {data.live
-              ? "Recent posts come straight from the Instagram Graph API and refresh every few minutes. Anything we've written up ourselves keeps its own description and stays where we put it."
-              : "Every reel and film here opens full-screen on this page, and you can keep scrolling through them without going back. We copy the cover image to our own storage when we add a post; the video itself only streams from Instagram or YouTube once you open it. Mirroring the whole account automatically would need an Instagram Graph API token tied to a Business account, which isn't connected."}
-          </InfoTip>
-        </p>
       </div>
 
       {empty ? (
-        <div className="mt-10 rounded-2xl border border-dashed border-border p-10 text-center sm:p-12">
+        <div className="mt-10 rounded-2xl border border-dashed border-border p-10 text-center sm:p-14">
           <p className="font-serif text-xl">Nothing here yet</p>
-          <p className="mx-auto mt-2 max-w-sm text-sm text-muted-foreground">
-            Reels, milestones and customer notes will show up here as they
-            happen.
-          </p>
           <ButtonLink href="/shop" className="mt-6">
             Browse the collection
           </ButtonLink>
         </div>
       ) : (
         <>
-          {/* Two sections is not a tab bar — these are jump links to what is
-              already on the page, so there is still exactly one URL and
-              nothing to hydrate. `role="tablist"` would lie to a screen reader
-              about what pressing them does. */}
-          {social.length > 0 && pages.length > 0 && (
-            <nav
-              aria-label="Jump to a section"
-              className="mt-8 flex flex-wrap justify-center gap-2"
-            >
-              <SectionChip href="#social" label="Social" count={social.length} />
-              <SectionChip href="#pages" label="Pages" count={pages.length} />
-            </nav>
-          )}
-
+          {/* There is no section index above this, and that is the second
+              duplicate removed: two chips reading "SOCIAL 166 · PAGES 63" sat
+              eighty pixels above two headings reading "Social … 166 posts" and
+              "Pages … 63 pages". The counts have one home now — the heading
+              they belong to — and the hairline rules do the dividing. */}
           {social.length > 0 && (
-            <section id="social" className="mt-12 scroll-mt-24">
-              <div className="min-w-0">
-                <h2 className="font-serif text-2xl leading-tight sm:text-3xl">
-                  Social
-                </h2>
-                <p className="mt-1 max-w-xl text-sm leading-relaxed text-muted-foreground">
-                  Reels and films. Open one and keep scrolling — you never have
-                  to come back out.
-                </p>
-              </div>
+            <section id="social" className="mt-10 scroll-mt-24 sm:mt-14">
+              <SectionHead label="Social" count={social.length} unit="posts">
+                {/*
+                  The one piece of prose left on the page, behind the (i) that
+                  CLAUDE.md prescribes for exactly this. It carries what a
+                  visitor might reasonably wonder and what we owe them
+                  honestly: the reels play on this page, nothing is embedded
+                  until one is opened, and with no Graph API token this is a
+                  curated set rather than a mirror of the whole account.
+                */}
+                <InfoTip term="Social">
+                  {data.live
+                    ? "Recent posts come straight from the Instagram Graph API and refresh every few minutes. Anything we have written up ourselves keeps its own description and stays where we put it."
+                    : "Every reel and film here opens full-screen on this page, and you can keep scrolling through them without coming back out. Nothing is loaded from Instagram or YouTube until you open one. Mirroring the whole account automatically would need an Instagram Graph API token tied to a Business account, which isn't connected — so this is a set we pick, not a live feed."}
+                </InfoTip>
+              </SectionHead>
 
               <PortfolioSocial groups={liveGroups} />
             </section>
           )}
 
           {pages.length > 0 && (
-            <section id="pages" className="mt-14 scroll-mt-24">
-              <div className="min-w-0">
-                <h2 className="font-serif text-2xl leading-tight sm:text-3xl">
-                  Pages
-                </h2>
-                <p className="mt-1 max-w-xl text-sm leading-relaxed text-muted-foreground">
-                  What the label has done, in our words and in our customers&rsquo;
-                  — plus the bulk and custom runs.
-                </p>
-              </div>
-
+            <section id="pages" className="mt-12 scroll-mt-24 sm:mt-16">
+              <SectionHead label="Pages" count={pages.length} unit="pages" />
               <PortfolioPages entries={pages} />
             </section>
           )}
         </>
       )}
 
-      <div className="rule mt-14" />
-
-      <section className="mt-10 text-center">
-        <h2 className="font-serif text-2xl">Want something like this?</h2>
-        <p className="mx-auto mt-2 max-w-sm text-sm text-muted-foreground">
-          Bulk runs, campus orders and custom prints — tell us what you need.
-        </p>
-        <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-          <ButtonLink href="/contact">Talk to us</ButtonLink>
-          <ButtonLink href="/shop" variant="outline">
-            Browse the collection
-          </ButtonLink>
+      <section className="mt-14 sm:mt-18">
+        <div className="rule" />
+        <div className="mt-8 text-center">
+          <h2 className="display-tight font-serif text-2xl sm:text-3xl">
+            Want something like this?
+          </h2>
+          <div className="mt-6 flex flex-wrap items-center justify-center gap-2.5">
+            <ButtonLink href="/contact">Talk to us</ButtonLink>
+            <ButtonLink href="/shop" variant="outline">
+              Browse the collection
+            </ButtonLink>
+          </div>
         </div>
       </section>
     </div>
   );
 }
 
+/* ------------------------------------------------------------------ */
+/*  Section furniture                                                  */
+/* ------------------------------------------------------------------ */
+
 /**
- * Squared, uppercase, wide-tracked; colour change only — no lift, no shadow,
- * per the design system in CLAUDE.md.
+ * A rule, a big name, a count. That is the whole divider.
  *
- * The `!` on the border colour guards against `globals.css`'s
- * `* { border-color: var(--border) }`, which is inside `@layer base` today but
- * has escaped that layer twice before. It costs nothing and the failure it
- * prevents is silent.
+ * The two sections used to be an `h2` with a sentence under it, one after the
+ * other down a single column — which is why they "read as one long scroll".
+ * What separates them now is structural rather than verbal: a hairline across
+ * the full measure, a heading at display size against it, and the count set
+ * right so the eye has two anchors on the line instead of one.
+ *
+ * `children` is where a section's `(i)` goes, and it is typed as
+ * `React.ReactNode` — never as a component. CLAUDE.md: a Lucide icon is a
+ * `forwardRef` object, so passing the component itself from a server file to a
+ * client one throws at render with a clean typecheck behind it.
  */
-function SectionChip({
-  href,
+function SectionHead({
   label,
   count,
+  unit,
+  children,
 }: {
-  href: string;
   label: string;
   count: number;
+  unit: string;
+  children?: React.ReactNode;
 }) {
   return (
-    <a
-      href={href}
-      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-border px-4 text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground transition-colors hover:border-accent! hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-    >
-      {label}
-      <span className="tabular-nums opacity-70">{count}</span>
-    </a>
+    <>
+      <div className="rule" />
+      <div className="mt-4 flex items-end justify-between gap-4">
+        <h2 className="display-tight min-w-0 font-serif text-3xl leading-none sm:text-4xl">
+          {label}
+          {children}
+        </h2>
+        <span className="eyebrow shrink-0 pb-1 tabular-nums">
+          {count} {unit}
+        </span>
+      </div>
+    </>
   );
 }
+

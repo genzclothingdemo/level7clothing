@@ -265,22 +265,30 @@ export const FIELD_META: Record<DraftKey, { label: string; tab: TabKey }> = {
   defaultMaterialsCare: { label: "Materials & Care", tab: "store" },
   defaultShippingInfo: { label: "Shipping & Delivery", tab: "store" },
 
-  adminNotifyEmail: { label: "Order & lead emails", tab: "store" },
+  // Moved from Store to Alerts, with Store keeping a read-only line and a
+  // link. It is the private half of the sending identity — the address the
+  // store writes to YOU at — and it belongs beside the address it writes FROM.
+  // Still exactly one input, still written only by `updateSettings`; the move
+  // is which tab draws it, not which action owns it.
+  adminNotifyEmail: { label: "Order & lead emails", tab: "alerts" },
 
-  // Verification lives on Store because it is about the *people* the store
-  // deals with and the two contacts it reaches them on — the same tab that
-  // already holds the public address and the private one. It is not an Orders
-  // setting: only half of it is about orders, and splitting the four across two
-  // tabs would mean neither tab could state what the store actually asks for.
-  requireSignupEmailOtp: { label: "Confirm email at signup", tab: "store" },
-  requireSignupPhoneOtp: { label: "Confirm mobile at signup", tab: "store" },
+  // Verification moved to Alerts with it. It was on Store because it is about
+  // the *people* the store deals with and the two contacts it reaches them on
+  // — but that is the same sentence as "which channel can actually carry an
+  // alert", which is the question the Alerts tab exists to answer. A store
+  // that asks for a code before it believes an address is a store whose email
+  // alerts land; one that does not is guessing. Splitting the four across two
+  // tabs would mean neither tab could state what the store actually asks for,
+  // so all four moved together.
+  requireSignupEmailOtp: { label: "Confirm email at signup", tab: "alerts" },
+  requireSignupPhoneOtp: { label: "Confirm mobile at signup", tab: "alerts" },
   requireVerifiedEmailToOrder: {
     label: "Confirmed email before ordering",
-    tab: "store",
+    tab: "alerts",
   },
   requireVerifiedPhoneToOrder: {
     label: "Confirmed mobile before ordering",
-    tab: "store",
+    tab: "alerts",
   },
 };
 
@@ -594,6 +602,7 @@ export function SetOnce({
 export function ManagedElsewhere({
   title,
   href,
+  onJump,
   where,
   why,
   note,
@@ -602,6 +611,16 @@ export function ManagedElsewhere({
   title: string;
   /** The owning screen. Omitted when the value is fixed in code. */
   href?: string;
+  /**
+   * Switch to another tab of *this* screen instead of navigating.
+   *
+   * A `<Link>` to `?tab=…` would be a real navigation, and this form keeps one
+   * unsaved draft across every tab — the tab bar itself uses
+   * `history.replaceState` for exactly that reason. When the owner is here,
+   * this is the same jump without the risk of dropping an edit. Takes
+   * precedence over `href`.
+   */
+  onJump?: () => void;
   /** Human path to the owning screen, e.g. "Returns → Return policy". */
   where?: string;
   /** One line on why it lives there. Shown behind the (i). */
@@ -624,7 +643,19 @@ export function ManagedElsewhere({
 
       <dl className="space-y-1.5">{children}</dl>
 
-      {href && where ? (
+      {onJump && where ? (
+        <button
+          type="button"
+          onClick={onJump}
+          className={cn(
+            "mt-3 inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg text-[11px] font-medium uppercase tracking-wider text-accent transition-colors hover:text-foreground",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          )}
+        >
+          Edit in {where}
+          <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+        </button>
+      ) : href && where ? (
         <Link
           href={href}
           className={cn(

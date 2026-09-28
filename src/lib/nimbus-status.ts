@@ -133,6 +133,40 @@ export function courierPhase(raw: string | null | undefined): CourierPhase | nul
   return lookup(raw)?.phase ?? null;
 }
 
+/**
+ * How far along a **return to origin** is — a third reading of the same row.
+ *
+ * `null` means this scan is not an RTO at all, which is the answer for every
+ * ordinary parcel and the gate every caller tests first.
+ *
+ * ### Why this is derived and not a new table
+ *
+ * The two facts it needs are already in the row. `phase === "rto"` says the
+ * parcel is travelling back to us; `status` says whether that journey is over,
+ * because the map already sends `rto initiated` / `rto in transit` to `shipped`
+ * (still moving) and `rto delivered` / `returned` to `cancelled` (arrived).
+ * Reading the pair is therefore exact, and it needs no second list of courier
+ * strings to fall out of step with the first — which is the whole reason this
+ * file exists (see the header on `NIMBUS_TO_STATUS` vs `TRACKING_TO_STATUS`).
+ *
+ * **Do not reimplement this as a string match.** `isRtoStatus` in
+ * `lib/returns.ts` tests the raw text with `/\brto\b/`, which is right for the
+ * admin's "Coming back to you" band and wrong here: the courier status
+ * `"returned"` is an RTO in this table and contains no word `rto`, so a text
+ * test misses it while the lookup does not.
+ */
+export type RtoStage =
+  /** On its way back to us. Nothing is on our shelf yet. */
+  | "returning"
+  /** Back with us. Stock has landed, and a prepaid customer may be owed money. */
+  | "returned";
+
+export function rtoStage(raw: string | null | undefined): RtoStage | null {
+  const row = lookup(raw);
+  if (!row || row.phase !== "rto") return null;
+  return row.status === "cancelled" ? "returned" : "returning";
+}
+
 /** True if the courier is telling us this shipment is dead. */
 export function isCancelledStatus(raw: string | null | undefined): boolean {
   return mapNimbusStatus(raw) === "cancelled";

@@ -115,10 +115,15 @@ import "server-only";
 
 import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
-import { sendAutomationEmail } from "@/lib/email";
+import { sendAutomationEmail, type EmailContext } from "@/lib/email";
 import { absoluteUrl } from "@/lib/site-url";
 import { formatINR } from "@/lib/utils";
 import { dispatchAutomationPush, pushCopyFrom } from "@/lib/push-dispatch";
+// The courier table, read for its third column. `Order.deliveryStatus` holds
+// the courier's raw words, so the phase is recoverable from the row at send
+// time — which is why no call site has to remember to pass it. See the note in
+// `resolveSubject`.
+import { courierPhase, rtoStage, type RtoStage } from "@/lib/nimbus-status";
 import type { Prisma } from "@prisma/client";
 
 /* ------------------------------------------------------------------ */
@@ -128,6 +133,14 @@ import type { Prisma } from "@prisma/client";
 export const TRIGGER_KEYS = [
   "order.created",
   "order.status_changed",
+  // `Order.paymentStatus` is a **separate column** from `Order.status`, and
+  // nothing used to raise anything when it moved. A signature that fails to
+  // verify wrote `failed` and told nobody — the one customer in the store who
+  // definitely wanted to buy, and could not.
+  "order.payment_changed",
+  // A parcel coming back is not a status. See the spec below for why it is a
+  // trigger of its own rather than a condition on `order.status_changed`.
+  "order.rto",
   "cart.abandoned",
   "return.requested",
   "return.status_changed",
@@ -193,6 +206,53 @@ const ORDER_TOKENS: TokenSpec[] = [
   { token: "customer.phone", describes: "Their mobile number" },
   { token: "order.address", describes: "The full delivery address, on one line" },
   { token: "order.note", describes: "What the customer typed at checkout, if anything" },
+  // The money columns, which nothing offered before. `order.total` alone
+  // cannot describe a part-paid order at all: it is one number where there are
+  // three (what was charged online, what is still to be collected, and the sum
+  // of the two), and a template that can only quote the sum has to *guess* at
+  // the other two in prose. Blank rather than ₹0 when there is nothing to
+  // report — same rule as `return.refundAmount`, for the same reason.
+  { token: "order.paymentStatus", describes: "pending / paid / partial / failed" },
+  { token: "order.amountPaid", describes: "Formatted — what has actually been taken online" },
+  {
+    token: "order.balanceDue",
+    describes: "Formatted — what is still to be collected in cash. Blank when nothing is",
+  },
+];
+
+/**
+ * Tokens for the money column moving, on its own.
+ *
+ * `payment.attempted` is the one that makes a failed-payment message truthful.
+ * The gateway is not always asked for `order.total`: on a **partial** order it
+ * is asked for the advance and the rest was always going to be cash at the
+ * door, so a mail saying "your payment of {{order.total}} failed" would quote a
+ * figure the customer was never charged. It is `total − balanceDue`, which is
+ * the same expression `verifyRazorpayPayment` uses to record `amountPaid` on
+ * the way up — one arithmetic, both directions.
+ */
+const PAYMENT_TOKENS: TokenSpec[] = [
+  {
+    token: "payment.attempted",
+    describes: "Formatted — what the gateway was asked for. The advance on a part-paid order",
+  },
+  {
+    token: "payment.previousStatus",
+    describes: "What the payment status was before this change",
+  },
+];
+
+/**
+ * Tokens for a parcel that failed to deliver and is travelling back to us.
+ *
+ * `rto.stage` is the same value the rule conditions on, offered as a token so a
+ * single template *can* cover both stages if an owner would rather write one.
+ * The shipped rules do not — see {@link SYSTEM_RULES}.
+ */
+const RTO_TOKENS: TokenSpec[] = [
+  { token: "rto.stage", describes: "returning (on its way back) / returned (back with you)" },
+  { token: "rto.scan", describes: "The courier's own words for this scan" },
+  { token: "rto.location", describes: "Where it was last seen — blank if the courier didn't say" },
 ];
 
 /**
@@ -215,6 +275,13 @@ const RETURN_TOKENS: TokenSpec[] = [
   { token: "return.trackingNumber", describes: "Reverse AWB — blank until booked" },
   { token: "order.number", describes: "The order it came from" },
   { token: "order.url", describes: "Link to their order page" },
+  // `resolveSubject` has always populated this for a return (it reads
+  // `order.phone`), but the catalogue did not offer it — so the owner's own
+  // "a return was requested" template used `{{customer.phone}}` while the
+  // token list beside the editor said no such token existed. It rendered
+  // correctly and looked like a typo, which is the worst way round: an owner
+  // tidying up a "mistake" would have deleted a line that worked.
+  { token: "customer.phone", describes: "Their mobile number" },
 ];
 
 /**
@@ -323,6 +390,103 @@ export const TRIGGERS: TriggerSpec[] = [
       ...ORDER_TOKENS,
       { token: "order.previousStatus", describes: "What it was before this change" },
     ],
+  },
+  /* ---- The money column, which moves independently of the status ---- */
+  //
+  // **Why this is a second trigger and not a status.** `Order.status` and
+  // `Order.paymentStatus` are separate columns that move separately and mean
+  // different things: an order can be `pending` with the money in
+  // (`paid`, waiting for a human to confirm it) or `confirmed` with the money
+  // still out (a COD parcel on a van). Folding a failed payment into
+  // `order.status_changed` would need a status value there is no column for —
+  // exactly the trap CLAUDE.md records for RTO — and every rule already written
+  // against "the status changed" would start seeing events that are not status
+  // changes.
+  //
+  // **Why it fires on success too, when nothing is shipped to listen.** The
+  // trigger is "the money column moved", and a trigger that only reports half
+  // of a column's movements is a trigger somebody will eventually be surprised
+  // by. The *rules* are where the judgement lives, and there is deliberately no
+  // shipped rule for `paid` or `partial` — see the note on the failure rules in
+  // `SYSTEM_RULES` for why a success mail here would be a duplicate of the
+  // order receipt rather than an addition to it.
+  {
+    key: "order.payment_changed",
+    label: "An order's payment succeeds or fails",
+    blurb:
+      "The money column, which moves on its own — a card that was declined, an advance that landed. A failed payment is the one event where the customer wanted to buy and could not.",
+    subjectType: "order",
+    firesFrom: "the Razorpay verification action, on both the success and the failure path",
+    conditions: [
+      {
+        key: "paymentStatus",
+        label: "Only when the payment is",
+        options: [
+          { value: "", label: "Any payment result" },
+          { value: "failed", label: "Failed" },
+          { value: "paid", label: "Paid in full" },
+          { value: "partial", label: "Advance received" },
+        ],
+      },
+      // The same field `order.created` offers, with the same values, because a
+      // failed prepaid payment and a failed advance are not the same story and
+      // a rule has to be able to tell them apart. COD is absent from the list
+      // on purpose: a cash order never takes an online payment, so there is no
+      // payment of its own to succeed or fail.
+      {
+        key: "paymentMethod",
+        label: "And only for payment method",
+        options: [
+          { value: "", label: "Any payment method" },
+          { value: "Razorpay", label: "Paid online (prepaid)" },
+          { value: "Partial", label: "Part-paid (advance online)" },
+        ],
+      },
+    ],
+    tokens: [...COMMON_TOKENS, ...ORDER_TOKENS, ...PAYMENT_TOKENS],
+  },
+  /* ---- The parcel that failed to deliver and is coming home ---- */
+  //
+  // **Why RTO is a trigger and not a condition.** `mapNimbusStatus` sends
+  // `rto delivered` to the order status `cancelled`, and `OrderStatus` has no
+  // `rto` member (adding one ripples through every screen that switches on
+  // status, which is out of scope). So the shipped rule
+  // "Tell the customer their order was cancelled" — `{ status: "cancelled" }` —
+  // matches an RTO perfectly, and emails somebody the word *cancelled* for an
+  // order they did not cancel.
+  //
+  // A `phase` condition on `order.status_changed` does not fix that. It would
+  // let a *new* rule say "only RTO", but it cannot stop the **existing** rule
+  // matching, because `conditionsMatch` is equality and that rule's conditions
+  // say nothing about the phase. Narrowing it would mean editing a live rule
+  // row, and `syncSystemAutomation` is additive by design — it never rewrites
+  // what the owner has.
+  //
+  // Making RTO its own trigger moves the decision to the *call site*, where it
+  // belongs: `notifyCourierScan` in `lib/fulfilment.ts` reads the phase off the
+  // scan and raises this instead of `order.status_changed`. One courier event
+  // raises one trigger, so the cancellation rule keeps firing for real
+  // cancellations and stops firing for parcels coming home — with nothing
+  // edited, nothing migrated and no negative conditions added to the engine.
+  {
+    key: "order.rto",
+    label: "A parcel is coming back to you (RTO)",
+    blurb:
+      "Delivery failed or was refused, so the courier is carrying the parcel back. The customer did not cancel anything, and goods — and possibly a refund — are in motion.",
+    subjectType: "order",
+    firesFrom: "the courier scan handler shared by the NimbusPost webhook and the tracking poller",
+    conditions: [
+      {
+        key: "stage",
+        label: "Only when the parcel is",
+        options: [
+          { value: "", label: "Either stage" },
+          { value: "returning", label: "On its way back to you" },
+          { value: "returned", label: "Back with you" },
+        ],
+      },
+    ],
+    tokens: [...COMMON_TOKENS, ...ORDER_TOKENS, ...RTO_TOKENS],
   },
   {
     key: "cart.abandoned",
@@ -443,7 +607,7 @@ export function recipientLabel(recipient: string): string {
  * cancels any job whose action is not in it. Both read the same constant, so a
  * channel cannot be saveable and unsendable, or sendable and unsaveable.
  */
-export const IMPLEMENTED_ACTIONS = ["email", "push"] as const;
+export const IMPLEMENTED_ACTIONS = ["email", "push", "inapp"] as const;
 
 export type ActionKey = (typeof IMPLEMENTED_ACTIONS)[number];
 
@@ -488,6 +652,14 @@ export const ACTIONS: ActionSpec[] = [
     caveat:
       "Only reaches a customer who installed the store to their phone's home screen and allowed notifications, while signed in. Most won't have — those jobs are skipped with a reason, not failed.",
   },
+  {
+    key: "inapp",
+    label: "Show it in the notification bell",
+    short: "In-app",
+    verb: "show",
+    caveat:
+      "Always works and never interrupts anybody — it waits in the bell until they look. No install, no permission, no email address needed. The one channel that cannot fail, which is why the shipped rules for it are switched on.",
+  },
 ];
 
 export function actionSpec(action: string): ActionSpec | null {
@@ -520,6 +692,83 @@ export function renderTemplate(text: string, tokens: TokenBag): string {
   return text.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, key: string) =>
     Object.prototype.hasOwnProperty.call(tokens, key) ? tokens[key] : ""
   );
+}
+
+/**
+ * Drop the template lines that would render as a broken-looking label, or as
+ * a fact the email is about to print properly anyway.
+ *
+ * **This has to run before substitution**, which is the whole point of it
+ * existing here rather than in `lib/email.ts`. Once tokens are replaced,
+ * `Courier: {{order.courier}}` with no courier and the prose line
+ * `Track it here:` are byte-for-byte the same string — a label and nothing
+ * else — so nothing downstream can drop the first without also eating the
+ * second and stranding the URL it introduced. Before substitution the
+ * difference is plain: one of them has a token on it.
+ *
+ * Only a line shaped exactly `Label: {{one.token}}` is ever considered, and
+ * that gate is what makes this safe. Ordinary prose never matches it, so no
+ * sentence an owner writes can be silently deleted.
+ *
+ * Two things are dropped:
+ *
+ * 1. **The token is empty.** `Courier:` on its own is the "blank token renders
+ *    as an empty label" failure the brief names, and it was live in four
+ *    shipped templates — every one of them sent at a moment when the courier
+ *    is by definition not known yet.
+ * 2. **The value is already in the `facts` table.** The structured half of the
+ *    email prints courier, AWB and total as proper rows, so leaving the
+ *    template's own copy in prints each of them twice, a few centimetres
+ *    apart. Matched on the *value*, not the label, because the template says
+ *    "Total:" where the table says "Order total".
+ *
+ * A third shape is handled alongside them: an **introducer whose value is on
+ * the next line** ("Track it here:" followed by `{{order.trackingUrl}}`).
+ * When that token is empty the pair is dropped together, because a promise
+ * with nothing under it is the same broken look as a label with nothing after
+ * it. This is the case that cannot be spotted after substitution at all — by
+ * then the introducer is indistinguishable from a real sentence — and it is
+ * why the whole function runs where it does.
+ */
+export function pruneFactLines(
+  body: string,
+  tokens: TokenBag,
+  facts: { value: string }[]
+): string {
+  const printed = new Set(facts.map((f) => f.value.trim()).filter(Boolean));
+  /** `Courier: {{order.courier}}` — a label and its value on one line. */
+  const FACT = /^\s*([^:{}]{1,40}):\s*\{\{\s*([\w.]+)\s*\}\}\s*$/;
+  /** `Track it here:` — a label with no token, introducing the line below. */
+  const INTRO = /^\s*[^{}]{1,60}:\s*$/;
+  /** `{{order.trackingUrl}}` — a line that is nothing but one token. */
+  const LONE = /^\s*\{\{\s*([\w.]+)\s*\}\}\s*$/;
+
+  const lines = body.split("\n");
+  const keep = lines.map((line) => {
+    const m = line.match(FACT);
+    if (!m) return true;
+    const value = (tokens[m[2]] ?? "").trim();
+    // Empty ⇒ it would render as a bare label. Already in the table ⇒ it
+    // would render twice.
+    return Boolean(value) && !printed.has(value);
+  });
+
+  // An introducer and the empty token it introduces go together.
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    if (!keep[i] || !INTRO.test(lines[i])) continue;
+    const next = lines[i + 1].match(LONE);
+    if (next && !(tokens[next[1]] ?? "").trim()) {
+      keep[i] = false;
+      keep[i + 1] = false;
+    }
+  }
+
+  return lines
+    .filter((_, i) => keep[i])
+    .join("\n")
+    // Pruning can leave three blank lines where two paragraphs met.
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /** Every `{{token}}` a body mentions, deduped — used to flag typos in the editor. */
@@ -560,6 +809,17 @@ export const SAMPLE_TOKENS: TokenBag = {
   "order.courier": "Delhivery",
   "order.trackingNumber": "1234567890123",
   "order.trackingUrl": "https://www.delhivery.com/track/package/1234567890123",
+  // A part-paid sample, because that is the case a preview has to expose: the
+  // three money tokens are only ever *different numbers* on a partial order, so
+  // a prepaid sample would let a template that confuses them look correct.
+  "order.paymentStatus": "partial",
+  "order.amountPaid": "₹720",
+  "order.balanceDue": "₹1,679",
+  "payment.attempted": "₹720",
+  "payment.previousStatus": "pending",
+  "rto.stage": "returning",
+  "rto.scan": "RTO In Transit",
+  "rto.location": "Bhiwandi",
   "cart.productName": "Oversized Tee — Black",
   "cart.quantity": "1",
   "cart.price": "₹1,299",
@@ -594,7 +854,13 @@ export function allKnownTokens(): TokenSpec[] {
 /*  Subject resolution — turning a row into a token bag                */
 /* ------------------------------------------------------------------ */
 
-type OrderItem = { name?: string; quantity?: number };
+type OrderItem = {
+  name?: string;
+  quantity?: number;
+  image?: string | null;
+  price?: number;
+  options?: { name?: string; value?: string }[];
+};
 
 /** Prisma's `Json` comes back as `unknown`; an order's items are read defensively. */
 function itemLines(items: unknown): { count: number; lines: string } {
@@ -604,6 +870,189 @@ function itemLines(items: unknown): { count: number; lines: string } {
     .map((i) => `${i?.name ?? "Item"} × ${Number(i?.quantity) || 1}`)
     .join("\n");
   return { count, lines };
+}
+
+/**
+ * The same items again, as cards for the email.
+ *
+ * **Every image is made absolute.** `Order.items[].image` is stored as
+ * `/products/level7/…`, which resolves fine in a browser on this origin and
+ * resolves to nothing at all in an inbox — a mail client has no origin to be
+ * relative to, so a relative `src` is a broken image in every single client.
+ * This is the kind of thing that looks right in every preview and is wrong for
+ * every actual recipient, so it is done here, once, rather than in a template.
+ *
+ * Capped at four. A basket of twelve pieces becomes a scroll nobody finishes,
+ * and the order page the button leads to is the right place for the full list.
+ */
+function itemCards(items: unknown): NonNullable<EmailContext["items"]> {
+  const list: OrderItem[] = Array.isArray(items) ? (items as OrderItem[]) : [];
+  return list.slice(0, 4).map((item) => ({
+    name: item?.name ?? "Item",
+    image: item?.image ? absoluteUrl(item.image) : null,
+    quantity: Number(item?.quantity) || 1,
+    price: typeof item?.price === "number" ? formatINR(item.price) : undefined,
+    options: Array.isArray(item?.options)
+      ? item.options
+          .map((o) => [o?.name, o?.value].filter(Boolean).join(": "))
+          .filter(Boolean)
+          .join(" · ") || undefined
+      : undefined,
+  }));
+}
+
+/**
+ * The heading and the button for an order email, chosen by what just happened.
+ *
+ * **This is the "accurate expectation-setting" half of the brief**, and it is
+ * the one part of a status mail that must not be a template: a customer
+ * reading "we'll let you know when it ships" *after* it has shipped has been
+ * told something false by a store that knew better. So the sentence under the
+ * button is derived from the row, every time.
+ *
+ * The button follows the same rule. Before an AWB exists there is nothing to
+ * track and a "Track" button would open a courier page saying the number does
+ * not exist, so it says "View order" until the parcel is real.
+ */
+function orderHeadline(order: {
+  status: string;
+  paymentStatus: string;
+  hasTracking: boolean;
+  /** Non-null ⇒ the courier is carrying this parcel back to us. */
+  rto: RtoStage | null;
+}): { headline: string; cta: string; note?: string } {
+  const { status, hasTracking } = order;
+
+  /* ---- Two readings that outrank the status column ---- */
+  //
+  // Both of these exist because `Order.status` is a five-value column that
+  // cannot express what actually happened, and the structured half of the
+  // email is the one part of a message that must never be a template. See the
+  // function's own note: a customer told something false by a store that knew
+  // better is the failure this whole shape exists to prevent.
+
+  // 1. The parcel is coming home. A completed RTO is stored as `cancelled`,
+  //    which would otherwise headline "Your order has been cancelled." to
+  //    somebody who cancelled nothing and is owed their money.
+  if (order.rto) {
+    return order.rto === "returned"
+      ? {
+          headline: "Your parcel has come back to us.",
+          cta: "View order",
+          note: "It couldn't be delivered, so the courier returned it. Nothing was cancelled by you — if you paid online, your refund is the next thing we'll sort out.",
+        }
+      : {
+          headline: "Your parcel is on its way back to us.",
+          cta: "View order",
+          note: "A delivery didn't succeed, so the courier is carrying it back. Nothing is lost and nothing was cancelled — reply to this email and we can send it out again.",
+        };
+  }
+
+  // 2. The money did not arrive, and nothing has happened to the order since.
+  //    Scoped to a still-`pending` order on purpose: if a human later confirms
+  //    or ships it anyway, the ordinary wording is the true one again, and a
+  //    shipped order must not headline "we couldn't take your payment".
+  if (order.paymentStatus === "failed" && status === "pending") {
+    return {
+      headline: "We couldn't take your payment.",
+      cta: "View order",
+      note: "Nothing has been charged, and nothing is owed. Your order is being held, not confirmed — placing it again is the quickest fix.",
+    };
+  }
+
+  switch (status) {
+    case "confirmed":
+      return {
+        headline: "Your order is confirmed.",
+        cta: "View order",
+        note: "We're packing it now. You'll get tracking details the moment it leaves us.",
+      };
+    case "shipped":
+      return {
+        headline: "Your order is on its way.",
+        cta: hasTracking ? "Track this parcel" : "View order",
+        note: hasTracking
+          ? "Tracking can take a few hours to show its first scan after a parcel is booked."
+          : "Your courier details will appear on the order page shortly.",
+      };
+    case "delivered":
+      return {
+        headline: "Your order has been delivered.",
+        cta: "View order",
+        note: "Something not right? You can start a return from the order page.",
+      };
+    case "cancelled":
+      return {
+        headline: "Your order has been cancelled.",
+        cta: "View order",
+        note: "Anything already paid is refunded to the original payment method.",
+      };
+    case "pending":
+      return {
+        headline: "We're taking another look at your order.",
+        cta: "View order",
+        note: "Nothing is wrong on your side, and nothing extra is owed.",
+      };
+    default:
+      return { headline: "There's an update on your order.", cta: "View order" };
+  }
+}
+
+/**
+ * The same, for the parcel travelling the other way.
+ *
+ * A return has its own vocabulary and its own anxieties — where is my piece,
+ * and where is my money — so none of this borrows from the order wording.
+ * CLAUDE.md records that reusing `sendOrderStatusEmail` for the reverse leg is
+ * the wrong voice; this is what having a voice of its own looks like.
+ */
+function returnHeadline(status: string): { headline: string; cta: string; note?: string } {
+  switch (status) {
+    case "pending":
+      return {
+        headline: "We've got your return request.",
+        cta: "View order",
+        note: "We review returns within 24 hours. Keep the piece and its packaging as it is until you hear from us.",
+      };
+    case "approved":
+      return {
+        headline: "Your return is approved.",
+        cta: "View order",
+        note: "Pack the piece as you received it. If we've booked a pickup, the courier comes to you — you don't need to post anything.",
+      };
+    case "rejected":
+      return {
+        headline: "We couldn't accept this return.",
+        cta: "View order",
+        note: "If you think that's wrong, reply to this email — a person reads it.",
+      };
+    case "picked_up":
+      return {
+        headline: "Your return has been collected.",
+        cta: "View order",
+        note: "We'll email again when it reaches us. The refund follows from there.",
+      };
+    case "received":
+      return {
+        headline: "Your return is back with us.",
+        cta: "View order",
+        note: "We're checking it over now. Your refund is the next email you'll get from us.",
+      };
+    case "refunded":
+      return {
+        headline: "Your refund is on its way.",
+        cta: "View order",
+        note: "Banks usually take 3–5 working days to show it. If it hasn't landed in five, reply to this email.",
+      };
+    case "cancelled":
+      return {
+        headline: "Your return has been closed.",
+        cta: "View order",
+        note: "You keep the piece and nothing is owed either way.",
+      };
+    default:
+      return { headline: "There's an update on your return.", cta: "View order" };
+  }
 }
 
 function firstNameOf(full: string): string {
@@ -770,6 +1219,17 @@ type Resolved = {
    * tag, so a replacement still alerts — see the long note in `public/sw.js`.
    */
   pushTag: string;
+  /**
+   * The structure an email gets on top of the owner's words — the item and its
+   * photograph, the numbers, and the one button.
+   *
+   * Resolved here rather than composed in `lib/email.ts` for the same reason
+   * the tokens are: this is the only function that has the row open. The words
+   * stay the owner's and the structure stays the engine's, so a template edit
+   * can change what a mail *says* but never leave it with an empty slot where
+   * a product card should be.
+   */
+  emailContext: EmailContext;
   /** Condition inputs, matched case-insensitively against the rule. */
   facts: Record<string, string>;
   /** False ⇒ the job is no longer relevant and should be cancelled, not sent. */
@@ -794,7 +1254,75 @@ async function resolveSubject(
     const order = await prisma.order.findUnique({ where: { id: entityId } });
     if (!order) return null;
     const { count, lines } = itemLines(order.items);
+
+    /**
+     * Where the parcel is, recovered from the order row rather than handed in
+     * by whoever raised the trigger.
+     *
+     * **This is the one fact in this function that could plausibly have come
+     * from `context`, and deliberately does not.** `Order.deliveryStatus` is
+     * the courier's own words for the latest scan, written by both the webhook
+     * and the poller *before* either raises a trigger, so the phase is already
+     * here — and putting it in `context` as well would give one fact two homes
+     * and two chances to disagree. Reading the row also means a call site added
+     * next year gets the RTO wording right without knowing the feature exists,
+     * and a *delayed* job resolves where the parcel is now rather than where it
+     * was when the job was queued, which is the late resolution the rest of
+     * this function already commits to.
+     */
+    const phase = courierPhase(order.deliveryStatus);
+    const rto = rtoStage(order.deliveryStatus);
+
+    // What the gateway was asked for. Not `order.total`: on a part-paid order
+    // the advance is the only sum that was ever charged online, and the
+    // balance was always going to be cash at the door.
+    const attempted = Math.max(0, order.total - order.balanceDue);
+
+    const shape = orderHeadline({
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      hasTracking: Boolean(order.trackingNumber),
+      rto,
+    });
     return {
+      emailContext: {
+        kicker: `Order ${order.orderNumber}`,
+        headline: shape.headline,
+        // The subject already summarises the event; the preheader's job is to
+        // add the fact the subject had no room for.
+        preheader: `${shape.headline} ${formatINR(order.total)} · ${count} item${count === 1 ? "" : "s"}`,
+        items: itemCards(order.items),
+        facts: [
+          { label: "Order total", value: formatINR(order.total) },
+          { label: "Payment", value: order.paymentMethod },
+          // The split, and **only when there genuinely is one**. On a prepaid
+          // order the advance *is* the total, so printing it would put the
+          // same rupee figure in the table twice under two labels — and would
+          // then prune any template line quoting the total, because
+          // `pruneFactLines` matches on the value. A part-paid order is the
+          // only case where these are two different numbers, which is exactly
+          // the case where a customer needs to see both.
+          ...(order.balanceDue > 0 && attempted > 0
+            ? [
+                { label: "Online now", value: formatINR(attempted) },
+                { label: "On delivery", value: formatINR(order.balanceDue) },
+              ]
+            : []),
+          ...(order.courier ? [{ label: "Courier", value: order.courier }] : []),
+          ...(order.trackingNumber
+            ? [{ label: "Tracking number", value: order.trackingNumber }]
+            : []),
+        ],
+        cta: {
+          label: shape.cta,
+          // Track only when there is genuinely something to track.
+          url:
+            shape.cta === "Track this parcel" && order.trackingUrl
+              ? order.trackingUrl
+              : absoluteUrl(`/order/${order.orderNumber}`),
+        },
+        note: shape.note,
+      },
       customerEmail: order.email,
       customerUserId: order.userId,
       deepLink: `/order/${order.orderNumber}`,
@@ -805,6 +1333,16 @@ async function resolveSubject(
       facts: {
         status: order.status,
         paymentMethod: order.paymentMethod,
+        // The money column, matched by `order.payment_changed`. It is a fact
+        // about the row like any other, so a rule scoped to "only when the
+        // payment failed" is re-checked at send time and cancels itself if the
+        // customer succeeded during a delay.
+        paymentStatus: order.paymentStatus,
+        // Where the parcel is, for `order.rto`. `stage` is the condition key;
+        // `phase` is offered beside it so a future rule can narrow on the
+        // finer vocabulary without this needing to change again.
+        stage: rto ?? "",
+        phase: phase ?? "",
       },
       applies: true,
       tokens: {
@@ -833,6 +1371,19 @@ async function resolveSubject(
         "order.courier": order.courier ?? "",
         "order.trackingNumber": order.trackingNumber ?? "",
         "order.trackingUrl": order.trackingUrl ?? "",
+        // Money, blank rather than ₹0 where zero is not a fact worth printing.
+        // "Still to pay: ₹0" on a prepaid order reads as a bug; an absent line
+        // is dropped whole by `pruneFactLines`.
+        "order.paymentStatus": order.paymentStatus,
+        "order.amountPaid": order.amountPaid > 0 ? formatINR(order.amountPaid) : "",
+        "order.balanceDue": order.balanceDue > 0 ? formatINR(order.balanceDue) : "",
+        "payment.attempted": attempted > 0 ? formatINR(attempted) : "",
+        "payment.previousStatus": context.previousPaymentStatus ?? "",
+        // The reverse journey. All three are blank for an ordinary parcel, so
+        // a template that mentions them is self-pruning on every other trigger.
+        "rto.stage": rto ?? "",
+        "rto.scan": rto ? (order.deliveryStatus ?? "") : "",
+        "rto.location": rto ? (order.deliveryLocation ?? "") : "",
       },
     };
   }
@@ -862,6 +1413,23 @@ async function resolveSubject(
 
     const name = lead.name ?? "";
     return {
+      emailContext: {
+        kicker: "Still in your cart",
+        headline: `${lead.productName} is waiting.`,
+        preheader: `${lead.productName}${lead.price != null ? ` · ${formatINR(lead.price)}` : ""}`,
+        // `Lead` stores no image — it is a product name, a quantity and a
+        // price. A card with a grey placeholder still reads better than a
+        // paragraph, and the shell renders one.
+        items: [
+          {
+            name: lead.productName,
+            quantity: lead.quantity,
+            price: lead.price != null ? formatINR(lead.price) : undefined,
+          },
+        ],
+        cta: { label: "Finish checkout", url: absoluteUrl("/shop") },
+        note: "Our drops are small and sizes go — this isn't held for you.",
+      },
       customerEmail: lead.email ?? "",
       // `Lead` has no account column at all — a cart lead is a visitor id and
       // maybe an address. A push rule on this trigger therefore reaches only
@@ -940,6 +1508,20 @@ async function resolveSubject(
     const readAt = outbound ? "/" : "/admin/messages";
 
     return {
+      emailContext: {
+        kicker: outbound ? `${settings.brandName} replied` : "New chat message",
+        headline: outbound ? "We've written back." : `${name || "Someone"} is waiting for a reply.`,
+        // The message itself, which is the only thing worth showing in an
+        // inbox list for a chat.
+        preheader: burst ? chatPreview(burst.head) : "",
+        cta: {
+          label: outbound ? "Open the chat" : "Open the conversation",
+          url: absoluteUrl(readAt),
+        },
+        note: outbound
+          ? "The chat panel picks up where you left off — nothing is lost."
+          : undefined,
+      },
       customerEmail: email,
       customerUserId: thread.userId,
       deepLink: outbound ? "/" : "/admin/messages",
@@ -986,6 +1568,11 @@ async function resolveSubject(
           // Only push needs this, and only through the order: a return has no
           // account of its own.
           userId: true,
+          // `ReturnRequest` captures the line by value (name, variant, price)
+          // but stores no photograph, and its own `images` are the customer's
+          // damage shots — the wrong picture entirely for "here is the piece
+          // coming back". The order line it came from has the real one.
+          items: true,
         },
       },
     },
@@ -994,7 +1581,43 @@ async function resolveSubject(
   // The variant matters on a return — "Fleece Hoodie" is not enough to tell a
   // customer which of two pieces is being collected.
   const piece = [ret.productName, ret.variantLabel].filter(Boolean).join(" — ");
+  const shape = returnHeadline(ret.status);
+  // Match on id where there is one, else on the captured name — a line that
+  // was returned by name still finds its photograph.
+  const orderLines: OrderItem[] = Array.isArray(ret.order.items)
+    ? (ret.order.items as OrderItem[])
+    : [];
+  const line = orderLines.find(
+    (i) =>
+      (ret.productId && (i as { productId?: string })?.productId === ret.productId) ||
+      i?.name === ret.productName
+  );
   return {
+    emailContext: {
+      kicker: `Return ${ret.requestNumber}`,
+      headline: shape.headline,
+      preheader: `${piece} · order ${ret.order.orderNumber}`,
+      items: [
+        {
+          name: piece,
+          image: line?.image ? absoluteUrl(line.image) : null,
+          quantity: ret.quantity,
+        },
+      ],
+      facts: [
+        { label: "Order", value: ret.order.orderNumber },
+        { label: "Reason given", value: ret.reason },
+        // Blank until a figure is agreed — a "₹0 refund" row reads as
+        // "you are getting nothing back". See the token note above.
+        ...(ret.refundAmount != null
+          ? [{ label: "Refund", value: formatINR(ret.refundAmount) }]
+          : []),
+        ...(ret.nimbusCourier ? [{ label: "Pickup courier", value: ret.nimbusCourier }] : []),
+        ...(ret.nimbusAwb ? [{ label: "Pickup tracking", value: ret.nimbusAwb }] : []),
+      ],
+      cta: { label: shape.cta, url: absoluteUrl(`/order/${ret.order.orderNumber}`) },
+      note: shape.note,
+    },
     customerEmail: ret.order.email,
     customerUserId: ret.order.userId,
     // The order page is where a return lives too — there is no return screen
@@ -1092,6 +1715,8 @@ export function describeConditions(trigger: string, conditions: Record<string, s
  * |--------------------------|--------------------------|----------------------------|
  * | `order.created`          | `<orderId>`              | once per order             |
  * | `order.status_changed`   | `<orderId>:<newStatus>`  | once per order per status  |
+ * | `order.payment_changed`  | `<orderId>:<paymentStatus>` | once per order per result |
+ * | `order.rto`              | `<orderId>:rto:<stage>`  | once per order per RTO stage |
  * | `cart.abandoned`         | `<leadId>`               | once per cart lead         |
  * | `return.requested`       | `<returnId>`             | once per return            |
  * | `return.status_changed`  | `<returnId>:<newStatus>` | once per return per status |
@@ -1129,6 +1754,18 @@ export function dedupeKeyFor(
   if (trigger === "order.status_changed" || trigger === "return.status_changed") {
     return `${entityId}:${(facts.status ?? "").toLowerCase()}`;
   }
+  // Once per order per payment result. A shopper who is declined, tries again
+  // and is declined again gets **one** message, not two — the second attempt
+  // is the same fact about the same order, and a store that mails you twice to
+  // say your card failed is a store you stop trying to buy from.
+  if (trigger === "order.payment_changed") {
+    return `${entityId}:${(facts.paymentStatus ?? "").toLowerCase()}`;
+  }
+  // Once per order per RTO stage. A parcel scanned "RTO In Transit" at four
+  // hubs is four scans of one journey, and they all resolve to `returning`.
+  if (trigger === "order.rto") {
+    return `${entityId}:rto:${(facts.stage ?? "").toLowerCase()}`;
+  }
   if (trigger === "chat.message_received" || trigger === "chat.reply_sent") {
     return `${entityId}:${facts.burst ?? "none"}`;
   }
@@ -1142,7 +1779,16 @@ export function dedupeKeyFor(
 export type TriggerSubject = {
   /** The row's real id. */
   id: string;
-  /** Extra facts the database cannot supply — currently only `previousStatus`. */
+  /**
+   * Extra facts the database cannot supply, because the row no longer holds
+   * them: `previousStatus`, `previousPaymentStatus`, and the chat `direction`.
+   *
+   * **Only what has been overwritten belongs here.** Anything still readable
+   * from the row is resolved in {@link resolveSubject} instead, so it has one
+   * home and a call site cannot forget it — which is why the courier phase
+   * behind `order.rto` is *not* in this bag even though the scan handler knows
+   * it. See the note on `phase` in that function.
+   */
   context?: Record<string, string>;
   /**
    * When the thing this trigger is about actually happened.
@@ -1401,7 +2047,13 @@ async function deliverJob(jobId: string): Promise<DeliveryResult> {
     }
 
     const subject = renderTemplate(rule.template.subject, resolved.tokens);
-    const bodyText = renderTemplate(rule.template.body, resolved.tokens);
+    // Pruned before substitution, and for every channel — a banner reading
+    // "Courier:" is exactly as broken as an email reading it. See
+    // `pruneFactLines`.
+    const bodyText = renderTemplate(
+      pruneFactLines(rule.template.body, resolved.tokens, resolved.emailContext.facts ?? []),
+      resolved.tokens
+    );
 
     /* ---- The one place the two channels differ ---- */
     if (rule.action === "push") {
@@ -1432,6 +2084,53 @@ async function deliverJob(jobId: string): Promise<DeliveryResult> {
       return await fail(outcome.detail);
     }
 
+    /* ---- The in-app feed: delivery is a write, not a send ---- */
+    //
+    // **This channel has no transport**, and that is the whole reason it is
+    // the one that always works. An email can be rejected by Resend and a push
+    // needs a device that has opted in; an in-app notification only has to
+    // exist somewhere the bell can read it, and the job row it is already
+    // sitting in *is* that somewhere.
+    //
+    // So delivery stamps the rendered copy onto `payload.inapp` and stops.
+    // Nothing is queried at read time, nothing is re-rendered, and the feed is
+    // one indexed `findMany` — which matters, because it is polled.
+    //
+    // Writing the copy at *delivery* rather than at enqueue is the same late
+    // resolution the rest of the engine uses: a delayed job renders what is
+    // true when it comes due, not what was true when it was raised.
+    if (rule.action === "inapp") {
+      const copy = pushCopyFrom(subject, bodyText);
+      if (!copy.title) {
+        return await fail("The template's subject line is empty, so there is nothing to show.");
+      }
+      const forAdmin = rule.recipient === "admin";
+      // The audience is stamped on the row so the feed can filter in SQL
+      // instead of resolving every job it reads. A customer's feed is
+      // matched on their account id, falling back to the address the email
+      // leg of the same rule would have used — which reaches exactly the
+      // same person and nobody else.
+      await prisma.automationJob.update({
+        where: { id: jobId },
+        data: {
+          payload: {
+            ...payload,
+            inapp: {
+              title: copy.title,
+              body: copy.body,
+              url: forAdmin ? (resolved.adminDeepLink ?? resolved.deepLink) : resolved.deepLink,
+              audience: forAdmin ? "admin" : "customer",
+              userId: forAdmin ? null : resolved.customerUserId,
+              email: forAdmin ? null : resolved.customerEmail.trim().toLowerCase(),
+              subjectType,
+              at: new Date().toISOString(),
+            },
+          } satisfies Prisma.InputJsonValue,
+        },
+      });
+      return "sent";
+    }
+
     const settings = await getSettings();
     const to =
       rule.recipient === "customer"
@@ -1452,6 +2151,29 @@ async function deliverJob(jobId: string): Promise<DeliveryResult> {
       subject,
       bodyText,
       title: rule.name,
+      // The item card, the numbers and the one button. Resolved from the row
+      // in `resolveSubject`, never typed into a template — see `emailContext`.
+      //
+      // The owner's own copy gets the structure too: "new order came in" is
+      // exactly the mail that benefits most from showing the piece and its
+      // photograph, because it is read on a phone while deciding whether to
+      // go and pack something.
+      //
+      // But the **button** has to change hands. `emailContext` is resolved for
+      // the customer, so its CTA opens the customer's own order page — the one
+      // screen on which the owner can do nothing about the thing they were
+      // just told. Same split as `adminDeepLink` makes for a notification, and
+      // for the same reason: one event, two readers, two screens.
+      context:
+        rule.recipient === "admin" && resolved.adminDeepLink
+          ? {
+              ...resolved.emailContext,
+              cta: {
+                label: "Open in your admin",
+                url: absoluteUrl(resolved.adminDeepLink),
+              },
+            }
+          : resolved.emailContext,
     });
 
     // `send()` never throws — it returns an error shape. An email Resend
@@ -1735,6 +2457,152 @@ We'll write again as soon as it moves.
 {{order.url}}
 
 {{store.name}}`,
+  },
+
+  /* ---- The money, which moves on its own ---- */
+  //
+  // **Two customer templates, not one, and that is the whole point of them.**
+  // A prepaid order and a part-paid one fail differently: prepaid means the
+  // entire total did not go through, partial means only the *advance* did and
+  // the balance was never going online at all. One template covering both would
+  // have to be vague exactly where a worried customer needs a number, or quote
+  // `{{order.total}}` — a figure a part-paid shopper was never charged. The
+  // rules that carry them are conditioned on `paymentMethod`, so neither can
+  // reach the wrong order.
+  //
+  // Nothing here says "declined". The bank's reason is not visible to us, and
+  // guessing at it in an inbox preview — where a subject line is read before
+  // the mail is opened — is how a customer concludes their card is blocked
+  // when the app simply timed out.
+  {
+    key: "payment-failed-prepaid",
+    name: "Payment didn't go through",
+    subject: "We couldn't take the payment for {{order.number}}",
+    body: `Hi {{customer.firstName}},
+
+The payment for your order {{order.number}} didn't go through, so the order isn't confirmed. We haven't taken any money — if your bank is showing a hold on {{payment.attempted}}, it clears on its own within a few days.
+
+Nothing is held for you while an order is unpaid, so the quickest fix is to place it again. A different card or UPI app usually works first time:
+{{store.url}}
+
+If it keeps failing, reply to this email or write to {{store.email}} and we'll take the order by hand rather than leave you fighting a payment page.
+
+{{order.url}}
+
+{{store.name}}`,
+  },
+  {
+    key: "payment-failed-partial",
+    name: "Advance payment didn't go through",
+    subject: "We couldn't take the advance for {{order.number}}",
+    body: `Hi {{customer.firstName}},
+
+The advance payment for your order {{order.number}} didn't go through, so the order isn't confirmed. That was the {{payment.attempted}} part — the rest of the order was always going to be cash when it reaches you, and none of it has been taken.
+
+Still to pay on delivery: {{order.balanceDue}}
+
+If your bank is showing a hold on {{payment.attempted}}, it clears on its own within a few days.
+
+Nothing is held for you while an order is unpaid, so the quickest fix is to place it again. A different card or UPI app usually works first time:
+{{store.url}}
+
+If you'd rather not pay an advance online at all, reply to this email and tell us — we'd rather sort it out than lose the order.
+
+{{order.url}}
+
+{{store.name}}`,
+  },
+  {
+    key: "payment-failed-admin",
+    name: "A payment failed (to you)",
+    // **Not a single token in the subject or the opening line that can come
+    // back blank**, and that is a rule rather than a style. This one rule has
+    // no `paymentMethod` condition — the owner should hear about a failed
+    // payment whatever the method — so it is the one template that can be
+    // reached by an order where nothing was ever charged online. It used to
+    // open with `{{payment.attempted}}`, which on such an order rendered
+    // "Payment failed on L7-1042 — didn't arrive" and a body starting with a
+    // space. The amount now sits on a `Label: {{token}}` line, which
+    // `pruneFactLines` deletes whole when there is nothing to put in it.
+    subject: "Payment failed on {{order.number}}",
+    body: `The payment on {{order.number}} did not go through. Nothing has been collected and the order is sitting unconfirmed.
+
+Attempted online: {{payment.attempted}}
+Attempted as: {{order.paymentMethod}}
+Still to collect on delivery: {{order.balanceDue}}
+
+{{customer.name}}
+{{customer.email}} · {{customer.phone}}
+
+This is the most valuable person in your store right now — they picked the pieces, typed the address and got as far as the payment page. A phone call usually recovers it.
+
+Open the order:
+{{order.url}}`,
+  },
+
+  /* ---- The parcel that turned around ---- */
+  //
+  // **None of these may use the word "cancelled", and that is the bug they
+  // exist to fix.** `mapNimbusStatus` stores a completed RTO as the order
+  // status `cancelled`, so before the `order.rto` trigger existed the customer
+  // was emailed "your order has been cancelled" for a parcel they had not
+  // cancelled, that was physically travelling back, and that they may have
+  // already paid for.
+  //
+  // The voice is the one CLAUDE.md sets for the reverse leg: a parcel going the
+  // other way is not an order making progress, so none of this borrows the
+  // forward wording. What a customer wants to know is that they have not lost
+  // their money and can still have the thing; what the owner wants to know is
+  // that stock is coming back and a refund may be owed.
+  {
+    key: "order-rto-returning",
+    name: "Parcel coming back (RTO)",
+    subject: "Your order {{order.number}} is on its way back to us",
+    body: `Hi {{customer.firstName}},
+
+Your order {{order.number}} couldn't be delivered, so the courier is bringing it back to us. You haven't cancelled anything, nothing has gone wrong at your end, and you haven't lost the order.
+
+This usually means nobody was in, the rider couldn't find the address, or the parcel was refused at the door by mistake.
+
+Reply to this email and we'll send it straight out again — a phone number that reaches you during the day is normally all it takes. If you'd rather not go ahead now, say so and we'll refund anything you've already paid.
+
+{{order.url}}
+
+{{store.name}}`,
+  },
+  {
+    key: "order-rto-returned",
+    name: "Parcel back with us (RTO)",
+    subject: "Your order {{order.number}} has reached us again",
+    body: `Hi {{customer.firstName}},
+
+The parcel for order {{order.number}} is back with us after the delivery didn't succeed. Nothing was cancelled by you.
+
+Paid online so far: {{order.amountPaid}}
+
+Tell us to send it out again and we will, to the same address or a different one. If you'd rather leave it, reply and we'll refund anything you've paid — you don't have to do anything else.
+
+{{order.url}}
+
+{{store.name}}`,
+  },
+  {
+    key: "order-rto-admin",
+    name: "A parcel came back to you (to you)",
+    subject: "RTO — {{order.number}} has come back",
+    body: `{{order.number}} failed to deliver and the parcel is back with you. The order status reads cancelled because there is no RTO status to store, but the customer cancelled nothing.
+
+Courier's last word: {{rto.scan}}
+Last seen: {{rto.location}}
+Paid online so far: {{order.amountPaid}}
+
+{{customer.name}}
+{{customer.email}} · {{customer.phone}}
+
+Two things: put the stock back, and check whether a refund is owed — anything already paid online is the customer's money, and this parcel is not going out again unless you send it.
+
+Open the order:
+{{order.url}}`,
   },
 
   /* ---- Carts ---- */
@@ -2254,6 +3122,430 @@ export const SYSTEM_RULES: SystemRule[] = [
     delayMinutes: 0,
     isActive: false,
   },
+
+  /* ---- The same events again, in the notification bell ---- */
+  //
+  // **This block is what makes the bell a feed instead of a broadcast log.**
+  // Before it, the only thing that ever appeared in a notification was
+  // something the owner had typed into Admin → Notifications and sent by hand:
+  // a chat message arriving, an order shipping, a return being approved —
+  // none of it showed up anywhere, because email and push were the only two
+  // channels and both of them leave the app.
+  //
+  // Three things about these rows are deliberate, and the first is the one
+  // that matters:
+  //
+  // 1. **They ship switched ON**, which is the opposite of the push rules
+  //    above and is not an inconsistency. A push wakes a phone and needs
+  //    consent; an in-app notification waits in a bell until somebody looks.
+  //    It cannot interrupt anybody, cannot be rejected by a provider and
+  //    needs no device, no install and no email address — so the argument for
+  //    shipping push off ("a deploy must not start buzzing people") simply
+  //    does not apply. A feed that ships empty is the bug being fixed.
+  // 2. **They reuse the email templates**, exactly as push does. One event,
+  //    one wording, three channels. `pushCopyFrom` takes the subject as the
+  //    headline and the opening paragraph as the line under it.
+  // 3. **Delay is always 0.** A notification that appears in the bell half an
+  //    hour after the event teaches people the bell is late, which is worse
+  //    than not having one. Nothing here waits for the cron.
+  //
+  // The two audiences get different events, because they need different
+  // things. The owner is told what *arrived* — an order, a message, a return
+  // request, a courier scan they did not cause. The customer is told what
+  // happened to *their* order or return. Neither is told about the other's
+  // half, so "we emailed the customer their refund" never clutters the
+  // owner's bell, and the owner's admin-only events never leak into a
+  // customer's.
+
+  /* -- The owner's bell -- */
+  {
+    name: "Show me new orders in the bell",
+    trigger: "order.created",
+    conditions: {},
+    templateKey: "order-admin-new",
+    recipient: "admin",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    // Delivery is the one forward status the owner did not cause — it arrives
+    // from a courier scan. Confirmed and shipped are things they just did, and
+    // telling somebody what they themselves did thirty seconds ago is how a
+    // feed becomes noise.
+    name: "Show me deliveries in the bell",
+    trigger: "order.status_changed",
+    conditions: { status: "delivered" },
+    templateKey: "order-delivered",
+    recipient: "admin",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show me chat messages in the bell",
+    trigger: "chat.message_received",
+    conditions: {},
+    templateKey: "chat-admin-new",
+    recipient: "admin",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show me return requests in the bell",
+    trigger: "return.requested",
+    conditions: {},
+    templateKey: "return-admin-new",
+    recipient: "admin",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show me collected returns in the bell",
+    trigger: "return.status_changed",
+    conditions: { status: "picked_up" },
+    templateKey: "return-picked-up",
+    recipient: "admin",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    // The one the money hangs on: a refund should not be paid until the piece
+    // is back, and this is what says it is.
+    name: "Show me returns that arrived back",
+    trigger: "return.status_changed",
+    conditions: { status: "received" },
+    templateKey: "return-received",
+    recipient: "admin",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    // Off, unlike its siblings. Every add-to-cart is a lead, so this is the
+    // one event in the store that can genuinely flood a feed — and the email
+    // rule for it ships off for the same reason.
+    name: "Show me cart activity in the bell",
+    trigger: "cart.abandoned",
+    conditions: {},
+    templateKey: "lead-admin-new",
+    recipient: "admin",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: false,
+  },
+
+  /* -- The customer's bell -- */
+  {
+    name: "Show the customer their order was placed",
+    trigger: "order.created",
+    conditions: {},
+    templateKey: "order-received",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show the customer their order is confirmed",
+    trigger: "order.status_changed",
+    conditions: { status: "confirmed" },
+    templateKey: "order-confirmed",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show the customer their order has shipped",
+    trigger: "order.status_changed",
+    conditions: { status: "shipped" },
+    templateKey: "order-shipped",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show the customer their order was delivered",
+    trigger: "order.status_changed",
+    conditions: { status: "delivered" },
+    templateKey: "order-delivered",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show the customer their order was cancelled",
+    trigger: "order.status_changed",
+    conditions: { status: "cancelled" },
+    templateKey: "order-cancelled",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show the customer their return was approved",
+    trigger: "return.status_changed",
+    conditions: { status: "approved" },
+    templateKey: "return-approved",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show the customer we couldn't accept their return",
+    trigger: "return.status_changed",
+    conditions: { status: "rejected" },
+    templateKey: "return-rejected",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show the customer their return was collected",
+    trigger: "return.status_changed",
+    conditions: { status: "picked_up" },
+    templateKey: "return-picked-up",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show the customer their return reached us",
+    trigger: "return.status_changed",
+    conditions: { status: "received" },
+    templateKey: "return-received",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show the customer their refund was sent",
+    trigger: "return.status_changed",
+    conditions: { status: "refunded" },
+    templateKey: "return-refunded",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    // **The asymmetric half of the chat rule.** Somebody who closed the tab
+    // cannot be reached by a polled widget at all — that is what email and
+    // push are for, and both of those ship off. This one is the compromise
+    // that is always safe: the reply waits in the bell, so a customer who
+    // comes back to the site an hour later finds it rather than having to
+    // remember to reopen the chat. Burst-collapsed like every other chat
+    // rule, so a four-message reply is one entry.
+    name: "Show the customer my chat replies",
+    trigger: "chat.reply_sent",
+    conditions: {},
+    templateKey: "chat-reply",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+
+  /* ================================================================== */
+  /*  A payment that did not arrive                                     */
+  /* ================================================================== */
+  //
+  // Grouped by *event* rather than split across the channel blocks above,
+  // because these are a new trigger rather than another channel for an old
+  // one — and a reader asking "what happens when a payment fails?" should find
+  // the whole answer in one place. The channel conventions are unchanged and
+  // are restated on each row.
+  //
+  // ### There is deliberately no rule for a payment that *succeeds*
+  //
+  // The trigger fires on success as well, and nothing listens. That is a
+  // decision, not an omission:
+  //
+  // - **The customer is already told, at the same instant.**
+  //   `verifyRazorpayPayment` raises `order.created` the moment a prepaid or
+  //   part-paid order verifies — the whole reason that call lives there rather
+  //   than in `placeOrder` is that this is where such an order becomes real.
+  //   "Thank the customer for their order" already prints the total, the
+  //   method and, now, the advance-and-balance split. A second mail in the same
+  //   request saying the money arrived is the two-senders-for-one-event trap
+  //   this engine was built to end.
+  // - **The owner is already told too**, by "Tell me an order came in" and the
+  //   bell entry beside it, raised from the same `order.created`.
+  // - **So the capability is left open and unused.** An owner who wants a
+  //   separate "money landed" alert — a real want on a part-paid order, where
+  //   an advance arriving and a balance still outstanding are two facts — can
+  //   build it in one tap against `paymentStatus: partial` without a deploy.
+  //   Shipping it switched on would just be the duplicate described above.
+  //
+  // The customer rules are **split by payment method**, which is the point of
+  // there being two of them: a failed prepaid payment and a failed advance are
+  // different amounts and different stories. COD is not offered as a condition
+  // and never reaches this trigger anyway — a cash order takes no online
+  // payment to fail — so no customer can be sent a message describing an order
+  // that is not theirs.
+  {
+    // Email, so it ships off — outbound messaging is the owner's to switch on.
+    name: "Tell the customer their payment didn't go through",
+    trigger: "order.payment_changed",
+    conditions: { paymentStatus: "failed", paymentMethod: "Razorpay" },
+    templateKey: "payment-failed-prepaid",
+    recipient: "customer",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    name: "Tell the customer their advance didn't go through",
+    trigger: "order.payment_changed",
+    conditions: { paymentStatus: "failed", paymentMethod: "Partial" },
+    templateKey: "payment-failed-partial",
+    recipient: "customer",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    // No method condition: the owner's copy is worded to be true of either leg,
+    // and an owner who is told about one kind of failed payment and not the
+    // other has a report they cannot trust.
+    name: "Tell me a payment failed",
+    trigger: "order.payment_changed",
+    conditions: { paymentStatus: "failed" },
+    templateKey: "payment-failed-admin",
+    recipient: "admin",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    // The one push rule here, and the only new event in this store that earns a
+    // lock screen: money that did not arrive, on an order the owner can still
+    // recover with a phone call. Ships off, like every other push rule.
+    name: "Notify me when a payment fails",
+    trigger: "order.payment_changed",
+    conditions: { paymentStatus: "failed" },
+    templateKey: "payment-failed-admin",
+    recipient: "admin",
+    action: "push",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    // The bell ships on, for the reason the in-app block above gives: it cannot
+    // interrupt anybody. For this event it is also the only channel that is
+    // certain to work — the customer is on the site at this exact moment, which
+    // is the one time a bell beats an inbox.
+    name: "Show the customer their payment didn't go through",
+    trigger: "order.payment_changed",
+    conditions: { paymentStatus: "failed", paymentMethod: "Razorpay" },
+    templateKey: "payment-failed-prepaid",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show the customer their advance didn't go through",
+    trigger: "order.payment_changed",
+    conditions: { paymentStatus: "failed", paymentMethod: "Partial" },
+    templateKey: "payment-failed-partial",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show me failed payments in the bell",
+    trigger: "order.payment_changed",
+    conditions: { paymentStatus: "failed" },
+    templateKey: "payment-failed-admin",
+    recipient: "admin",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+
+  /* ================================================================== */
+  /*  The parcel coming home                                            */
+  /* ================================================================== */
+  //
+  // Both stages are covered, and they are genuinely two events rather than one
+  // said twice. **Returning** is the one that stops the customer being told the
+  // word "cancelled" — it lands while the parcel is still moving, which is the
+  // only window in which they can say "yes, try again" and save the sale.
+  // **Returned** is the one the money hangs on: the goods are on the shelf, the
+  // order will not be delivered, and anything paid online is the customer's.
+  //
+  // The owner gets only the second, on purpose. The first is a courier event
+  // they can do nothing about; the second is stock to put away and a refund to
+  // decide.
+  {
+    name: "Tell the customer their parcel is coming back",
+    trigger: "order.rto",
+    conditions: { stage: "returning" },
+    templateKey: "order-rto-returning",
+    recipient: "customer",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    name: "Tell the customer their parcel reached us again",
+    trigger: "order.rto",
+    conditions: { stage: "returned" },
+    templateKey: "order-rto-returned",
+    recipient: "customer",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    name: "Tell me a parcel came back",
+    trigger: "order.rto",
+    conditions: { stage: "returned" },
+    templateKey: "order-rto-admin",
+    recipient: "admin",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    name: "Show the customer their parcel is coming back",
+    trigger: "order.rto",
+    conditions: { stage: "returning" },
+    templateKey: "order-rto-returning",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Show the customer their parcel reached us again",
+    trigger: "order.rto",
+    conditions: { stage: "returned" },
+    templateKey: "order-rto-returned",
+    recipient: "customer",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    // The owner's bell already carries deliveries; this is the other ending,
+    // and it is the one that costs money if it goes unnoticed.
+    name: "Show me parcels that came back",
+    trigger: "order.rto",
+    conditions: { stage: "returned" },
+    templateKey: "order-rto-admin",
+    recipient: "admin",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
 ];
 
 export type SeedReport = {
@@ -2383,6 +3675,141 @@ export const DIRECT_MAIL: { name: string; to: string; why: string }[] = [
     why: "The contact form's own delivery. Switching it off would bin messages the sender believes were sent.",
   },
 ];
+
+/* ------------------------------------------------------------------ */
+/*  The in-app feed                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One entry in the notification bell.
+ *
+ * `id` is the job's own id, which makes it stable across polls — the client
+ * dedupes on it, so a poll that overlaps a delivery cannot show the same
+ * notification twice.
+ */
+export type FeedItem = {
+  id: string;
+  title: string;
+  body: string;
+  /** Same-origin path the entry opens. */
+  url: string;
+  /** ISO timestamp — when it was delivered, not when the rule was written. */
+  at: string;
+  /** "order" | "return" | "chat" | "lead" — the bell picks an icon from it. */
+  kind: string;
+};
+
+type InAppPayload = {
+  title?: unknown;
+  body?: unknown;
+  url?: unknown;
+  at?: unknown;
+  subjectType?: unknown;
+};
+
+function readInApp(payload: unknown): InAppPayload | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const inapp = (payload as Record<string, unknown>).inapp;
+  if (!inapp || typeof inapp !== "object" || Array.isArray(inapp)) return null;
+  return inapp as InAppPayload;
+}
+
+/** How many entries a feed ever returns. A bell is a recent list, not an archive. */
+const FEED_LIMIT = 30;
+
+/**
+ * **What the notification bell reads.**
+ *
+ * The feed is not a table. It is the `AutomationJob` rows whose rule sends on
+ * the `inapp` channel, and that is the single design decision this whole
+ * feature rests on — so it is worth saying why, given that a `Notification`
+ * model is the obvious alternative.
+ *
+ * A job row already *is* a delivered notification. It is created exactly once
+ * per (rule, subject) by the unique index, claimed exactly once by the
+ * compare-and-set, held off by `occurredAt` and cancelled when it stops
+ * applying. A separate table would have to re-earn every one of those
+ * properties, and the first time the two disagreed — a job sent, no
+ * notification row, or the reverse — there would be no way to tell which was
+ * right. Reading the feed off the job row means **the thing the owner can
+ * pause in Admin → Automation and the thing that appears in the bell are the
+ * same row**, which is the property the brief asks for and the reason there is
+ * no second store to keep in step.
+ *
+ * It also means this needed no migration, which was a hard constraint.
+ *
+ * Two audiences, and the filter is the difference:
+ *
+ * - **admin** — every `inapp` job whose rule is addressed to `admin`. There is
+ *   one owner, so there is nothing further to narrow by.
+ * - **customer** — matched on the account id stamped at delivery, falling back
+ *   to the email address the *email* leg of the same rule would have used.
+ *   That fallback is not a guess: it reaches exactly the people the email
+ *   reaches, which is the same argument `lib/push-dispatch.ts` makes for
+ *   resolving a guest order's address to an account.
+ *
+ * Ordering is by `runAt`, not `sentAt`, so it rides the existing
+ * `@@index([status, runAt])`. Every `inapp` rule ships with `delayMinutes: 0`,
+ * which makes the two identical — and a delayed one would still sort by when
+ * it came due, which is the honest timestamp for "when were you told".
+ */
+export async function listNotifications(
+  viewer: { audience: "admin" } | { audience: "customer"; userId: string; email: string }
+): Promise<FeedItem[]> {
+  try {
+    const where: Prisma.AutomationJobWhereInput =
+      viewer.audience === "admin"
+        ? { status: "sent", rule: { action: "inapp", recipient: "admin" } }
+        : {
+            status: "sent",
+            rule: { action: "inapp", recipient: "customer" },
+            OR: [
+              { payload: { path: ["inapp", "userId"], equals: viewer.userId } },
+              {
+                payload: {
+                  path: ["inapp", "email"],
+                  equals: viewer.email.trim().toLowerCase(),
+                },
+              },
+            ],
+          };
+
+    const rows = await prisma.automationJob.findMany({
+      where,
+      orderBy: { runAt: "desc" },
+      take: FEED_LIMIT,
+      select: { id: true, payload: true, runAt: true, subjectType: true },
+    });
+
+    const items: FeedItem[] = [];
+    for (const row of rows) {
+      const inapp = readInApp(row.payload);
+      // A job claimed but not yet stamped, or one from before this channel
+      // existed. Skipping is right: a blank row in a feed reads as broken.
+      if (!inapp || typeof inapp.title !== "string" || !inapp.title) continue;
+      items.push({
+        id: row.id,
+        title: inapp.title,
+        body: typeof inapp.body === "string" ? inapp.body : "",
+        // Same-origin paths only. `lib/push.ts` refuses an absolute URL in a
+        // payload so a notification cannot become an open redirect; the same
+        // rule applies to a link rendered into the bell.
+        url:
+          typeof inapp.url === "string" && inapp.url.startsWith("/") && !inapp.url.startsWith("//")
+            ? inapp.url
+            : "/",
+        at: typeof inapp.at === "string" ? inapp.at : row.runAt.toISOString(),
+        kind: typeof inapp.subjectType === "string" ? inapp.subjectType : row.subjectType,
+      });
+    }
+    return items;
+  } catch (err) {
+    // The bell is polled. A feed that throws would turn one bad query into a
+    // console full of them, so it fails to empty and says nothing.
+    console.error("[automation] feed read failed:", err);
+    return [];
+  }
+}
 
 /** How many jobs are waiting, and how many of those are already due. */
 export async function jobBacklog(): Promise<{ pending: number; due: number }> {

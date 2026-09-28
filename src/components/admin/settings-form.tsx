@@ -65,6 +65,7 @@ import {
 } from "@/components/admin/settings-ui";
 import {
   AccessSection,
+  AlertsSection,
   IntegrationsSection,
   OrdersSection,
   PaymentsSection,
@@ -85,6 +86,7 @@ import {
 const SECTIONS: Record<TabKey, (p: SectionProps) => React.ReactElement> = {
   store: StoreSection,
   orders: OrdersSection,
+  alerts: AlertsSection,
   payments: PaymentsSection,
   integrations: IntegrationsSection,
   returns: ReturnsSection,
@@ -436,7 +438,17 @@ export function SettingsForm({
           <InfoTip term={meta.heading}>{meta.guide}</InfoTip>
         </div>
 
-        <Section f={draft} set={set} isDirty={isDirty} facts={facts} />
+        {/* `goTab` is `selectTab`, not a `<Link>`: a section that mirrors a
+            setting owned by another tab has to be able to send the owner
+            there, and a real navigation would remount this form and drop an
+            unsaved edit. Same `history.replaceState` the tab bar uses. */}
+        <Section
+          f={draft}
+          set={set}
+          isDirty={isDirty}
+          facts={facts}
+          goTab={selectTab}
+        />
       </div>
 
       <SaveBar keys={dirty} saving={saving} onSave={save} onDiscard={discard} />

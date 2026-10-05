@@ -31,12 +31,12 @@ export function generateMetadata(): Metadata {
   return { alternates: { canonical: "/" } };
 }
 
-// Real Level7 product photos used in the hero composition.
+// Demo product imagery (Unsplash CDN) used in the hero composition.
 const HERO_IMAGES = [
-  "/products/level7/Level7_Core_Front.png",
-  "/products/level7/05.10.2024-175.jpg",
-  "/products/level7/BottleGreenFront.png",
-  "/products/level7/05.10.2024-124.jpg",
+  "https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=1000&h=1250&q=80&fm=jpg&fit=crop",
+  "https://images.unsplash.com/photo-1527719327859-c6ce80353573?w=1000&h=1250&q=80&fm=jpg&fit=crop",
+  "https://images.unsplash.com/photo-1556821840-3a63f95609a7?w=1000&h=1250&q=80&fm=jpg&fit=crop",
+  "https://images.unsplash.com/photo-1588117305388-c2631a279f82?w=1000&h=1250&q=80&fm=jpg&fit=crop",
 ];
 
 /* Accent the final word of the headline in the brand violet */
@@ -357,7 +357,7 @@ export default async function HomePage() {
             <div className="relative">
               <div className="relative aspect-[5/4] overflow-hidden rounded-lg bg-muted shadow-2xl">
                 <Image
-                  src="/products/level7/Level7_Foundation_Front.png"
+                  src="https://images.unsplash.com/photo-1489987707025-afc232f7ea0f?w=1000&h=1250&q=80&fm=jpg&fit=crop"
                   alt="Our studio"
                   fill
                   sizes="(max-width:768px) 100vw, 50vw"

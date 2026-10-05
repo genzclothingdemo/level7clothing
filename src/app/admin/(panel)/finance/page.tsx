@@ -296,14 +296,14 @@ export default async function FinanceSection({
 
       <Panel
         title="Stock on hand"
-        tip="Σ Product.stock across the whole catalogue, as it stands right now. Not a windowed figure — stock is a present-tense fact and does not have a period."
+        tip="Σ Product.stock across the whole catalogue, as it stands right now. Not a windowed figure — stock is a present-tense fact and does not have a period. For a product counted per size, Product.stock is what its sizes can still sell: units on the shelf less those promised to open orders, with an oversold size counted as zero."
         note="Shown here because it is the one asset figure available, and it is the largest thing on the balance sheet this database knows about."
       >
         <TileGrid>
           <StatTile
             label="Units in stock"
             value={formatCount(report.catalogue.unitsInStock)}
-            tip="Σ Product.stock across every product, active or not, right now."
+            tip="Σ Product.stock across every product, active or not, right now. A product counted per size contributes what its sizes can still sell — units reserved for open orders are not in it."
             good="none"
           />
           <StatTile
@@ -316,7 +316,7 @@ export default async function FinanceSection({
           <StatTile
             label="Out of stock"
             value={formatCount(report.catalogue.outOfStock)}
-            tip="Active products whose stock is zero or less. Every one of these is a live product page that cannot be bought."
+            tip="Active products whose stock is zero or less — for a product counted per size, every size is sold out. Every one of these is a live product page that cannot be bought. A single sold-out size is not counted here; the products list shows it under Low stock."
             good="down"
           />
           <StatTile

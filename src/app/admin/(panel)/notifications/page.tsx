@@ -1,8 +1,12 @@
 import Link from "next/link";
-import { BellOff } from "lucide-react";
+import { BellOff, Laptop, Send, Smartphone, Tablet } from "lucide-react";
 import { AutomationFeed } from "@/components/admin/automation-feed";
-import { PushBroadcast } from "@/components/admin/push-broadcast";
-import { countSubscriptions, pushConfigured, PUSH_LIMITS } from "@/lib/push";
+import { formatStoreDateTime } from "@/components/admin/coupon-summary";
+import { Disclosure } from "@/components/store/disclosure";
+import { InfoTip } from "@/components/store/info-tip";
+import { channelShort } from "@/lib/notification-channels";
+import { prisma } from "@/lib/prisma";
+import { countSubscriptions, pushConfigured } from "@/lib/push";
 import { listPushDevices } from "@/lib/push-devices";
 
 export const dynamic = "force-dynamic";
@@ -21,180 +25,224 @@ function ago(date: Date): string {
 }
 
 /**
- * Admin → Notifications. Read the subscriber count, compose one push, send it.
+ * A glyph for the platform label `listPushDevices` derives. An element, never
+ * a component: this is a server page and the icon may cross into a client
+ * `Disclosure` (the RSC note in CLAUDE.md).
+ */
+function deviceIcon(platform: string) {
+  const cls = "h-4 w-4";
+  if (platform.startsWith("iPad")) return <Tablet className={cls} />;
+  if (platform === "Mac" || platform === "Windows" || platform === "Linux") {
+    return <Laptop className={cls} />;
+  }
+  return <Smartphone className={cls} />;
+}
+
+/**
+ * Admin → Notifications.
  *
- * The panel layout already redirects anyone without an admin session, but that
- * is not what protects this: `broadcastPush` re-checks the admin cookie itself,
- * because a server action is reachable by id from anywhere once it exists.
+ * ## One job per screen, in the order the owner asks the questions
+ *
+ * 1. **What has happened?** The feed, first and alone above the fold. It is
+ *    what somebody opens this screen to see, many times a day.
+ * 2. **Which devices get push?** One tap away, behind a `Disclosure`. It is a
+ *    diagnostic — "is my phone on here?" — not something to read every visit.
+ * 3. **Broadcast.** A link in the header to `/admin/notifications/send`. It is
+ *    rare, and it reaches real lock screens, so it is a deliberate step away
+ *    rather than a form sitting open under the feed. The link is absent — not
+ *    disabled — when there is nobody to send to.
+ *
+ * Every explanation (refresh cadence, iOS install rules, why the sound cannot
+ * be chosen, what "last visit" means) is behind an `(i)`.
+ *
+ * ## Not a second place to configure alerts
+ *
+ * **Which events land in this feed is decided in exactly one place:
+ * Settings → Alerts.** This page names that column and links to it, and says
+ * so plainly when nothing is switched on — a feed that stays empty for ever
+ * with no reason given reads as broken. It has no switch of its own, and must
+ * never grow one.
+ *
+ * The panel layout redirects anyone without an admin session, but that is not
+ * what protects the broadcast: `broadcastPush` re-checks the session itself
+ * (`requireAdminWrite`), because a server action is reachable by id from
+ * anywhere once it exists.
  */
 export default async function AdminNotifications() {
   const configured = pushConfigured();
-  const [{ total, signedIn }, devices] = await Promise.all([
+  const [{ total }, devices, bellAlerts] = await Promise.all([
     countSubscriptions(),
     listPushDevices(),
+    // The same filter `listNotifications` reads the feed with, as a count —
+    // read-only, and only ever used to explain an empty feed.
+    prisma.automationRule
+      .count({ where: { isActive: true, action: "inapp", recipient: "admin" } })
+      .catch(() => null),
   ]);
 
+  const canBroadcast = configured && total > 0;
+  const bell = channelShort("inapp");
+  const alertsLink = (
+    <Link
+      href="/admin/settings?tab=alerts"
+      className="font-medium text-foreground underline underline-offset-2 hover:text-accent"
+    >
+      Settings → Alerts
+    </Link>
+  );
+
   return (
-    <div>
-      <div>
-        <h1 className="font-serif text-2xl">Notifications</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {total} device{total === 1 ? "" : "s"} opted in
-          {total > 0 && ` · ${signedIn} linked to an account`}
-        </p>
-      </div>
-
-      {/*
-        **The feed comes first, and that ordering is the fix.**
-
-        This page used to open with a compose box, which is why the only
-        notifications that existed were the ones typed into it. The list of
-        what the shop has actually announced — orders, chat, returns, courier
-        scans — is what somebody opens this screen to see; sending a broadcast
-        by hand is the rare errand and now sits below it.
-
-        It is a client component because it polls. The rest of the page is
-        server-rendered, so nothing else here pays for that.
-      */}
-      <div className="mt-8 max-w-2xl">
-        <AutomationFeed />
-        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-          These are the events your store announced, newest first — the same
-          rules you can pause or reword in{" "}
+    <div className="min-w-0 max-w-2xl">
+      {/* ---------------- Header ----------------
+          The title and the broadcast link share a row and the subtitle runs
+          underneath both. Beside a two-line block the link wrapped onto its
+          own full-width row at 375px, which made the rarest action on the
+          page the biggest thing above the feed. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+        <h1 className="flex min-w-0 items-center gap-1 font-serif text-2xl">
+          Notifications
+          <InfoTip term="Notifications">
+            Everything your store has told you, newest first. The list
+            refreshes by itself every 30 seconds, and straight away when you
+            come back to this tab. Read marks are kept per browser, so your
+            phone keeps its own.
+          </InfoTip>
+        </h1>
+        {canBroadcast && (
           <Link
-            href="/admin/automation"
-            className="underline underline-offset-2 hover:text-foreground"
+            href="/admin/notifications/send"
+            className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-lg border border-border px-4 text-[11px] font-medium uppercase tracking-widest transition-colors hover:bg-muted"
           >
-            Automation
+            <Send className="h-4 w-4" aria-hidden /> Send a push
           </Link>
-          . Nothing here was typed by hand. It refreshes on its own every 30
-          seconds, and immediately whenever you come back to this tab.
-        </p>
+        )}
       </div>
-
-      <div className="mt-10 border-t border-border pt-8">
-        <h2 className="font-serif text-xl">Send one yourself</h2>
-        <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-          A one-off notification to every opted-in device — a drop, a delay, a
-          sale. Nothing on this half happens automatically.
-        </p>
-      </div>
-
-      {!configured ? (
-        <div className="mt-8 rounded-2xl border border-dashed border-border p-12 text-center">
-          <BellOff className="mx-auto h-10 w-10 text-muted-foreground" />
-          <p className="mt-4 font-serif text-xl">Push isn&apos;t configured</p>
-          <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
-            Set <code className="font-mono text-xs">NEXT_PUBLIC_VAPID_PUBLIC_KEY</code>,{" "}
-            <code className="font-mono text-xs">VAPID_PRIVATE_KEY</code> and{" "}
-            <code className="font-mono text-xs">VAPID_SUBJECT</code> in the deployment&apos;s
-            environment variables, then redeploy. Until then no device can subscribe and
-            nothing can be sent.
-          </p>
-        </div>
-      ) : (
-        <div className="mt-6">
-          <PushBroadcast
-            limits={{ title: PUSH_LIMITS.title, body: PUSH_LIMITS.body, url: PUSH_LIMITS.url }}
-            deviceCount={total}
-            configured={configured}
-          />
-        </div>
-      )}
-
-      {/*
-        The device list. A count alone cannot answer the question people
-        actually bring to this screen — "is my phone on here?" — so each
-        subscription names its platform, whose push service holds it, and when
-        it last checked in. The endpoint itself is never rendered: it is a
-        capability URL that would let anyone holding it send to that device.
-      */}
-      {configured && devices.length > 0 && (
-        <div className="mt-8 max-w-2xl">
-          <h2 className="text-[11px] uppercase leading-none tracking-[0.16em] text-muted-foreground">
-            Subscribed devices
-          </h2>
-          <ul className="mt-3 divide-y divide-border rounded-2xl border border-border">
-            {devices.map((device) => (
-              <li
-                key={device.id}
-                className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-4 py-3"
-              >
-                <span className="text-sm text-foreground">
-                  {device.platform}
-                  <span className="text-muted-foreground"> · {device.browser}</span>
-                </span>
-                <span className="text-xs text-muted-foreground">
-                  {device.service} push · {device.signedIn ? "signed in" : "guest"} · last seen{" "}
-                  {ago(device.lastSeenAt)}
-                </span>
-              </li>
-            ))}
-          </ul>
-          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-            &ldquo;Last seen&rdquo; is the last time that device opened the store
-            with notifications on — not the last notification it received.
-            iPhones only appear here once the store is installed to the home
-            screen, which is the only place iOS delivers web push.
-          </p>
-        </div>
-      )}
-
-      {/*
-        This used to read "Nothing is sent automatically", which was true when
-        it was written and stopped being true on 2026-09-26: push became a
-        second action on the automation engine, so an order event can now
-        notify a phone the same way it emails. Everything on *this* page is
-        still a one-off you compose by hand — the distinction is the whole
-        point of the sentence, and it has to name where the other kind lives.
-      */}
-      <p className="mt-6 max-w-2xl text-xs leading-relaxed text-muted-foreground">
-        Everything on this page is a one-off you compose and send yourself.
-        Notifications that go out <em>on their own</em> — when an order is
-        confirmed or shipped, and when a chat message is written in either
-        direction — are rules in{" "}
-        <Link
-          href="/admin/automation"
-          className="underline underline-offset-2 hover:text-foreground"
-        >
-          Automation
-        </Link>
-        , alongside the emails; &ldquo;Restore shipped rules&rdquo; there adds
-        four for exactly that, switched off until you want them. A rule only
-        reaches a customer who has installed the store and allowed
-        notifications; everyone else is skipped with a reason rather than
-        counted as a failure. Subscriptions that a push service reports as gone
-        (the customer uninstalled the app or cleared their data) are deleted
-        automatically during a send, so the count above stays honest without any
-        maintenance.
+      <p className="mt-1 text-sm text-muted-foreground">
+        What&apos;s happened in your store, newest first.
       </p>
 
-      {/*
-        The one fact that decides whether a notification to YOU can work, and
-        the one an owner has no way to discover. `recipient: "admin"` resolves
-        through Settings → the notify address → a customer account holding it →
-        that account's devices. No account, no device, and every such job
-        cancels itself with a reason nobody is watching for. Stated here
-        because this is the page where the device list lives — the rule editor
-        in Automation prints the same number beside the choice.
-      */}
-      {configured && (
-        <p className="mt-3 max-w-2xl text-xs leading-relaxed text-muted-foreground">
-          A rule that notifies <em>you</em> finds your phone through the
-          notify-me address in{" "}
-          <Link
-            href="/admin/settings?tab=store"
-            className="underline underline-offset-2 hover:text-foreground"
-          >
-            Settings
-          </Link>
-          : it reaches whichever customer account uses that address. So your
-          phone only hears from those rules once you have signed in to the
-          storefront with it, installed the store, and allowed notifications.
-          Until then those jobs are skipped with that reason rather than
-          failing.
+      {/* ---------------- The feed ---------------- */}
+      <div className="mt-6">
+        <AutomationFeed />
+        {/* Read-only, one link. The on/off for every alert lives in
+            Settings → Alerts and nowhere else. */}
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          {bellAlerts === 0 ? (
+            <>
+              Nothing is switched on in the {bell} column of {alertsLink}, so
+              nothing will show up here.
+            </>
+          ) : (
+            <>
+              What shows up here is the {bell} column in {alertsLink}.
+            </>
+          )}
         </p>
-      )}
+      </div>
+
+      {/* ---------------- Devices ----------------
+          The endpoint is never rendered: it is a capability URL that would
+          let anyone holding it send to that device. `listPushDevices` does
+          not even return it. */}
+      <section aria-labelledby="push-devices-heading" className="mt-10">
+        <h2
+          id="push-devices-heading"
+          className="flex items-center gap-1 text-[11px] font-medium uppercase leading-none tracking-[0.16em] text-muted-foreground"
+        >
+          Push notifications
+          <InfoTip term="Push notifications">
+            Devices that have allowed notifications from your store — a push
+            can only reach these. &ldquo;Last visit&rdquo; is when a device last
+            opened the store, not when it last received a push. The alert sound
+            is the device&apos;s own; a web app can&apos;t choose it.
+          </InfoTip>
+        </h2>
+
+        <div className="mt-3 rounded-2xl border border-border bg-card px-4">
+          {!configured ? (
+            <p className="flex min-h-12 flex-wrap items-center gap-x-1.5 py-3 text-sm text-muted-foreground">
+              <BellOff className="h-4 w-4 shrink-0" aria-hidden />
+              Push isn&apos;t set up on this deployment.
+              <InfoTip term="Setting up push">
+                Set <code className="font-mono">NEXT_PUBLIC_VAPID_PUBLIC_KEY</code>,{" "}
+                <code className="font-mono">VAPID_PRIVATE_KEY</code> and{" "}
+                <code className="font-mono">VAPID_SUBJECT</code>{" "}
+                in the deployment&apos;s environment variables, then redeploy. Until
+                then no device can subscribe and nothing can be sent. The list
+                above works either way.
+              </InfoTip>
+            </p>
+          ) : total === 0 ? (
+            <p className="flex min-h-12 flex-wrap items-center gap-x-1 py-3 text-sm text-muted-foreground">
+              No device has allowed notifications yet.
+              <PhoneHelp />
+            </p>
+          ) : (
+            <Disclosure
+              label="Devices"
+              icon={<Smartphone className="h-4 w-4" />}
+              summary={`${total} opted in`}
+            >
+              <ul className="divide-y divide-border border-t border-border">
+                {devices.map((device) => (
+                  <li key={device.id} className="flex items-start gap-3 py-3">
+                    <span aria-hidden className="mt-0.5 shrink-0 text-muted-foreground">
+                      {deviceIcon(device.platform)}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                        <p className="min-w-0 break-words text-sm text-foreground">
+                          {device.platform}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Last visit{" "}
+                          <time
+                            dateTime={device.lastSeenAt.toISOString()}
+                            title={formatStoreDateTime(device.lastSeenAt)}
+                          >
+                            {ago(device.lastSeenAt)}
+                          </time>
+                        </p>
+                      </div>
+                      <p className="mt-0.5 break-words text-xs text-muted-foreground">
+                        {device.browser} · {device.service} push ·{" "}
+                        {device.signedIn ? "signed in" : "guest"}
+                      </p>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              {total > devices.length && (
+                <p className="border-t border-border pt-3 text-xs text-muted-foreground">
+                  Showing the {devices.length} most recently active of {total}.
+                </p>
+              )}
+              <p className="flex flex-wrap items-center gap-x-1 border-t border-border pt-2 text-xs text-muted-foreground">
+                Phone not getting alerts?
+                <PhoneHelp />
+              </p>
+            </Disclosure>
+          )}
+        </div>
+      </section>
     </div>
+  );
+}
+
+/**
+ * The three reasons a phone that should get push does not, in the order they
+ * bite. One tip, used by both the empty state and the device list, so the
+ * explanation has one wording.
+ */
+function PhoneHelp() {
+  return (
+    <InfoTip term="Phone setup">
+      On an iPhone, add the store to the Home Screen first (Share → Add to Home
+      Screen, iOS 16.4 or later), open it from there and allow notifications —
+      a Safari tab never gets push. Alerts meant for you only reach a device
+      signed in with the account that uses your alert address in Settings →
+      Alerts. A device that deletes the app or clears its data drops off this
+      list after the next send.
+    </InfoTip>
   );
 }

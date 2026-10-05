@@ -3,6 +3,13 @@ import { Plus, Package, Download } from "lucide-react";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { fuzzyFilter } from "@/lib/search";
+import {
+  getLowStockThreshold,
+  productStockState,
+  unitStockState,
+} from "@/lib/products";
+import type { StockState } from "@/lib/inventory-types";
+import { axisOrderOf, variantLabel } from "@/components/admin/inventory-ui";
 import { ProductsTable } from "@/components/admin/products-table";
 import { ProductFilters } from "@/components/admin/product-filters";
 
@@ -49,20 +56,35 @@ function buildWhere(sp: SP): Prisma.ProductWhereInput {
     conditions.push({ isActive: sp.status === "active" });
   }
 
-  if (sp.stock) {
-    if (sp.stock === "instock") {
-      conditions.push({ stock: { gt: 0 } });
-    } else if (sp.stock === "lowstock") {
-      conditions.push({ stock: { lte: 5 } });
-    } else if (sp.stock === "outofstock") {
-      conditions.push({ stock: 0 });
-    }
-  }
+  // `sp.stock` is not here either — see `STOCK_FACETS` below.
 
   if (conditions.length === 0) return {};
   if (conditions.length === 1) return conditions[0];
   return { AND: conditions };
 }
+
+/**
+ * The stock facet, applied after the query like the text search.
+ *
+ * It used to be SQL on `Product.stock` with a hardcoded `lte: 5`, which stopped
+ * being the question once stock became per size: "low" is now a size at or
+ * under **its own** line (`lowStockAt`, else the store's
+ * `lowStockThreshold`), and a tee can be low in M while the product total
+ * looks healthy. So every facet reads `productStockState()` — the rule the
+ * storefront and the dashboard use — rather than a SQL copy of it.
+ *
+ * - `instock` — something can still be bought (`Product.stock > 0`; low counts).
+ * - `lowstock` — still buyable, but a size is at or under its line.
+ * - `outofstock` — nobody can buy it: every size is sold out. The same set the
+ *   dashboard's "out of stock" chip counts.
+ * - `oversold` — a size has promised more than it holds.
+ */
+const STOCK_FACETS: Record<string, (s: { stock: number; state: StockState }) => boolean> = {
+  instock: (s) => s.stock > 0,
+  lowstock: (s) => s.state === "low",
+  outofstock: (s) => s.stock <= 0,
+  oversold: (s) => s.state === "oversold",
+};
 
 function buildOrderBy(sort?: string): Prisma.ProductOrderByWithRelationInput {
   switch (sort) {
@@ -88,32 +110,74 @@ export default async function AdminProducts({
   const sp = await searchParams;
   const where = buildWhere(sp);
   const orderBy = buildOrderBy(sp.sort);
+  const stockFacet = sp.stock ? STOCK_FACETS[sp.stock] : undefined;
   const hasFilters =
-    Object.keys(where).length > 0 || !!sp.q?.trim() || (sp.sort && sp.sort !== "newest");
+    Object.keys(where).length > 0 ||
+    !!sp.q?.trim() ||
+    !!stockFacet ||
+    (sp.sort && sp.sort !== "newest");
 
-  const [allMatching, totalCount, categoriesList] = await Promise.all([
+  const [allMatching, totalCount, categoriesList, lowStockLine] = await Promise.all([
     prisma.product
       .findMany({
         where,
         orderBy,
-        include: { subcategory: { select: { name: true } } },
+        include: {
+          subcategory: { select: { name: true } },
+          // A tracked product's sizes, in the same query — the table says
+          // which ones are low or oversold. Untracked products' rows hold no
+          // stock yet, so none come back for them.
+          variantRows: {
+            where: { isActive: true, product: { trackInventory: true } },
+            orderBy: { sortOrder: "asc" },
+            select: {
+              combo: true,
+              onHand: true,
+              reserved: true,
+              available: true,
+              lowStockAt: true,
+            },
+          },
+        },
       })
       .catch(() => []),
     prisma.product.count().catch(() => 0),
     prisma.category.findMany({ orderBy: { name: "asc" } }),
+    getLowStockThreshold().catch(() => 5),
   ]);
+
+  // Each product's stock state and the sizes behind it, computed once and
+  // used by both the stock facet and the table.
+  const withStock = allMatching.map((p) => {
+    const state = productStockState(p, p.variantRows, lowStockLine);
+    const axes = axisOrderOf(p.attributes);
+    const attention = p.trackInventory
+      ? p.variantRows
+          .map((v) => ({
+            label: variantLabel(v.combo, axes),
+            available: v.available,
+            state: unitStockState(v, lowStockLine),
+          }))
+          .filter((v) => v.state !== "ok")
+      : [];
+    return { ...p, stockState: state, attention };
+  });
+
+  const faceted = stockFacet
+    ? withStock.filter((p) => stockFacet({ stock: p.stock, state: p.stockState }))
+    : withStock;
 
   // Typo-tolerant text search, ranked by relevance. Applied after the facet
   // filters so "hoodei" still respects the category and stock pickers.
   const products = sp.q?.trim()
-    ? fuzzyFilter(allMatching, sp.q, [
+    ? fuzzyFilter(faceted, sp.q, [
         { name: "name", weight: 0.5 },
         { name: "tags", weight: 0.2 },
         { name: "category", weight: 0.12 },
         { name: "secondaryCategory", weight: 0.08 },
         { name: "description", weight: 0.1 },
       ])
-    : allMatching;
+    : faceted;
 
   const subcategoriesList = await prisma.subcategory
     .findMany({
@@ -161,6 +225,7 @@ export default async function AdminProducts({
         <ProductFilters
           categories={categories}
           subcategories={subcategories}
+          lowStockLine={lowStockLine}
         />
       </div>
 
@@ -200,6 +265,9 @@ export default async function AdminProducts({
             subcategoryName: p.subcategory?.name ?? null,
             price: p.price,
             stock: p.stock,
+            tracked: p.trackInventory,
+            stockState: p.stockState,
+            attention: p.attention,
             isActive: p.isActive,
             isFeatured: p.isFeatured,
           }))}

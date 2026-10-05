@@ -458,9 +458,11 @@ export default async function AdminSettings({
         <InfoTip term="Branding & settings">
           Everything the store is configured by, in one place — your brand, how
           checkout behaves, what happens to an order automatically, and your
-          return policy. Each tab names what it is for. Nothing is written until
-          you press Save, and the bar that appears lists every field that will
-          change. Saved changes reach the storefront immediately.
+          return policy. Each tab names what it is for. Most tabs share one Save
+          bar, which appears the moment something changes and lists every field
+          it will write; Returns has its own Save policy button, and the Alerts
+          grid and Access act the moment you press. Saved changes reach the
+          storefront immediately.
         </InfoTip>
       </h1>
 

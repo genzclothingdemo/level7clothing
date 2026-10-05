@@ -35,11 +35,23 @@
  * invocations — a cron run and the admin's "Run due jobs now" landing together
  * — have exactly one winner per job. The full argument is in the header of
  * `lib/automation.ts`.
+ *
+ * ## It also expires stock holds
+ *
+ * Before the drain, `reconcileStockHolds` (lib/fulfilment.ts) releases the
+ * stock an unpaid online checkout is still holding once `PAYMENT_HOLD_MINUTES`
+ * have passed, and settles any hold a failed cancel or ship left behind. It
+ * rides on this job rather than getting a URL of its own because this job is
+ * already scheduled every 15 minutes at cron-job.org — a new URL would need a
+ * new job there, and CLAUDE.md records what a job nobody created looks like:
+ * nothing, silently. It is also not a `vercel.json` cron, for the reason that
+ * file has none. A sweep that fails is logged and never stops the drain.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { revalidatePath } from "next/cache";
 import { drainDueJobs } from "@/lib/automation";
+import { reconcileStockHolds } from "@/lib/fulfilment";
 
 export const dynamic = "force-dynamic";
 // Jobs are delivered one at a time to stay inside the Prisma connection pool
@@ -66,6 +78,14 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // Stock first: it is quick, it touches nothing the drain reads, and an
+  // abandoned checkout should not keep a size "sold out" for one more pass.
+  // Caught here so a ledger problem can never cost the queue its drain.
+  const holds = await reconcileStockHolds().catch((err) => {
+    console.error("[automation] stock-hold sweep failed:", err);
+    return null;
+  });
+
   // `drainDueJobs` never throws — it reports. A queue that failed to drain is a
   // line in the log and a backlog on the admin screen, not a 500 that Vercel
   // retries into a second pass over the same jobs.
@@ -74,6 +94,11 @@ export async function GET(req: NextRequest) {
   console.log(
     `[automation] swept ${report.swept} returns · ${report.due} due · ${report.sent} sent · ${report.failed} failed · ${report.skipped} skipped`
   );
+  if (holds && holds.holding > 0) {
+    console.log(
+      `[automation] stock holds: ${holds.holding} open · ${holds.expired} expired · ${holds.closed} closed · ${holds.orphaned} orphaned · ${holds.sold} sold late · ${holds.failed} failed`
+    );
+  }
 
   if (report.due > 0 || report.swept > 0) {
     try {
@@ -83,5 +108,5 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  return NextResponse.json(report);
+  return NextResponse.json({ ...report, holds });
 }

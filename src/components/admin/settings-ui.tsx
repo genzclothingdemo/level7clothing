@@ -22,6 +22,24 @@
  * Explanation lives in an `InfoTip` or behind `ExpandableText`, never in a
  * paragraph under a field — same rule as `form-kit`.
  *
+ * ## Four ways to say something, and which one to reach for
+ *
+ * The owner reads a tab in three passes — the first five seconds, one tap in,
+ * and the explanation — so every sentence on this screen has to pick one:
+ *
+ *   **Printed** — a value, a state, or a warning about *this* configuration.
+ *     `Callout` is the only printed paragraph shape, and its body is one line:
+ *     the headline is what must be read, the why is behind its `(i)`.
+ *   **`(i)`** — what a term means, in two or three sentences. `InfoTip`.
+ *   **`Explainer`** — how something works, when it is a paragraph long. One
+ *     quiet row that opens in place; a paragraph in a bubble is a wall in a
+ *     smaller box.
+ *   **`SetOnce`** — controls that are decided once. Folded, with a summary
+ *     that answers the question without opening it.
+ *
+ * Anything that is true on every visit forever is onboarding text, and never
+ * belongs in the first pass.
+ *
  * ## Two writers, one save bar
  *
  * The order-pipeline columns moved in from the Orders screen, and they keep
@@ -33,8 +51,16 @@
  */
 
 import { TABS, type TabKey } from "@/lib/settings-tabs";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowUpRight, Loader2, RotateCcw } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowUpRight,
+  Eye,
+  Info,
+  Loader2,
+  RotateCcw,
+} from "lucide-react";
 import { InfoTip } from "@/components/store/info-tip";
 import { Disclosure } from "@/components/store/disclosure";
 import { Btn } from "@/components/admin/order-ui";
@@ -322,6 +348,25 @@ export const SETTINGS_PANEL_ID = "settings-panel";
  * bar stays one line tall so the form starts in the same place on every
  * screen. `overscroll-x-contain` keeps the swipe from chaining out to the
  * browser's back gesture.
+ *
+ * ## Three things this bar used to get wrong
+ *
+ * 1. **A stray vertical scrollbar beside the tabs, on every screen.** Each tab
+ *    carried `-mb-px` to sit its underline on the bar's `border-b`, which made
+ *    the content one pixel taller than the box — and `overflow-x: auto` turns
+ *    `overflow-y` to `auto` with it. So there was a 1px vertical scroll, and a
+ *    scrollbar to go with it. The baseline is now an inset shadow painted
+ *    *under* the tabs, so the underline covers it without overflowing.
+ * 2. **On a phone the selected tab could be off screen.** Access is the last of
+ *    seven, so `?tab=add_admin` opened on a bar showing Store to Integrations
+ *    and nothing saying where you were. The selected tab is now scrolled into
+ *    view whenever it changes.
+ * 3. **Nothing said the bar scrolled.** The scrollbar is hidden — on a phone it
+ *    is noise, and it was the thing drawing the stray bar above — and an edge
+ *    fade appears on whichever side has more tabs instead.
+ *
+ * Arrow keys move between tabs (the WAI-ARIA tabs pattern, activation follows
+ * focus), with a roving tabindex so Tab leaves the bar in one press.
  */
 export function SettingsTabs({
   tab,
@@ -332,11 +377,92 @@ export function SettingsTabs({
   onChange: (t: TabKey) => void;
   dirtyByTab: Record<TabKey, number>;
 }) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ left: false, right: false });
+
+  /** Which sides have tabs scrolled out of sight — drives the edge fade. */
+  const readEdges = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const left = el.scrollLeft > 1;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+    setEdges((prev) =>
+      prev.left === left && prev.right === right ? prev : { left, right }
+    );
+  }, []);
+
+  // Keep the selected tab on screen. `scrollLeft` on the bar itself rather than
+  // `scrollIntoView`, which would also scroll the page vertically.
+  useEffect(() => {
+    const list = listRef.current;
+    const el = list?.querySelector<HTMLElement>(`[data-tab="${tab}"]`);
+    if (!list || !el) return;
+    const PAD = 32;
+    const start = el.offsetLeft - PAD;
+    const end = el.offsetLeft + el.offsetWidth + PAD - list.clientWidth;
+    if (list.scrollLeft > start) list.scrollLeft = Math.max(0, start);
+    else if (list.scrollLeft < end) list.scrollLeft = end;
+    // Measured after the browser has applied the scroll, not inside it.
+    const frame = requestAnimationFrame(readEdges);
+    return () => cancelAnimationFrame(frame);
+  }, [tab, readEdges]);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(readEdges);
+    window.addEventListener("resize", readEdges);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", readEdges);
+    };
+  }, [readEdges]);
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    const i = TABS.findIndex((t) => t.key === tab);
+    const next =
+      e.key === "ArrowRight"
+        ? (i + 1) % TABS.length
+        : e.key === "ArrowLeft"
+          ? (i - 1 + TABS.length) % TABS.length
+          : e.key === "Home"
+            ? 0
+            : e.key === "End"
+              ? TABS.length - 1
+              : -1;
+    if (next < 0) return;
+    e.preventDefault();
+    const key = TABS[next].key;
+    onChange(key);
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-tab="${key}"]`)
+      ?.focus({ preventScroll: true });
+  }
+
+  const FADE = 28;
+  const mask =
+    edges.left || edges.right
+      ? `linear-gradient(to right, ${edges.left ? "transparent" : "#000"} 0, #000 ${
+          edges.left ? FADE : 0
+        }px, #000 calc(100% - ${edges.right ? FADE : 0}px), ${
+          edges.right ? "transparent" : "#000"
+        } 100%)`
+      : undefined;
+
   return (
     <div
+      ref={listRef}
       role="tablist"
       aria-label="Settings sections"
-      className="-mx-1 flex max-w-full gap-1 overflow-x-auto overscroll-x-contain border-b border-border px-1"
+      onKeyDown={onKeyDown}
+      onScroll={readEdges}
+      style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
+      className={cn(
+        "relative -mx-1 flex max-w-full gap-1 overflow-x-auto overflow-y-hidden overscroll-x-contain px-1",
+        // The baseline. An inset shadow is painted beneath the tabs, so the
+        // selected tab's underline covers it with no negative margin — which
+        // is what used to overflow the bar by a pixel.
+        "shadow-[inset_0_-1px_0_var(--border)]",
+        "[scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      )}
     >
       {TABS.map((t) => {
         const active = t.key === tab;
@@ -346,14 +472,16 @@ export function SettingsTabs({
             key={t.key}
             type="button"
             role="tab"
+            data-tab={t.key}
             id={`settings-tab-${t.key}`}
             aria-selected={active}
+            tabIndex={active ? 0 : -1}
             // Only the selected tab names the panel: it is the only one that
             // has a panel on screen to point at.
             aria-controls={active ? SETTINGS_PANEL_ID : undefined}
             onClick={() => onChange(t.key)}
             className={cn(
-              "-mb-px inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 border-b-2 px-3 text-sm font-medium transition-colors",
+              "inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 border-b-2 px-3 text-sm font-medium transition-colors",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
               active
                 ? "border-accent text-foreground"
@@ -711,6 +839,253 @@ export function ReadRow({
   );
 }
 
+/**
+ * A fixed fact that is not a setting, in one line — for what used to take a
+ * whole `ManagedElsewhere` card to say "this cannot be changed here".
+ *
+ * A card with a heading, a "read-only" label and three rows gave a value nobody
+ * can edit the same weight as the switches around it. One dashed row with an
+ * `(i)` says the same thing at the size it deserves.
+ */
+export function FixedRow({
+  label,
+  value,
+  tip,
+  tone,
+}: {
+  label: string;
+  value: React.ReactNode;
+  tip?: React.ReactNode;
+  tone?: "warn";
+}) {
+  return (
+    <div className="flex min-h-11 min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-2xl border border-dashed border-border bg-muted/20 px-4 py-2">
+      <span className="flex items-center gap-1 text-xs text-muted-foreground">
+        {label}
+        {tip && <InfoTip term={label}>{tip}</InfoTip>}
+      </span>
+      <span
+        className={cn(
+          "min-w-0 text-right text-xs font-medium",
+          tone === "warn" && "text-orange-700 dark:text-orange-300"
+        )}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Printed warnings, and prose that opens in place                    */
+/* ------------------------------------------------------------------ */
+
+const CALLOUT_TONE = {
+  danger: { box: "border-danger/40 bg-danger/10", text: "text-danger" },
+  warn: {
+    box: "border-orange-500/40 bg-orange-500/10",
+    text: "text-orange-700 dark:text-orange-300",
+  },
+  info: { box: "border-border bg-muted/40", text: "text-foreground" },
+} as const;
+
+export type CalloutTone = keyof typeof CALLOUT_TONE;
+
+/**
+ * The one printed-paragraph shape on this screen: a warning about the
+ * configuration as it stands right now.
+ *
+ * Every tab had grown its own copy of this box — a bold line, then a paragraph
+ * under it — and the paragraph was always the *why*, which is the part you
+ * need once. So the headline is printed (a warning behind an `(i)` is a warning
+ * nobody reads) and the why is behind the `(i)` beside it. `children` is for a
+ * second line only when it is something to act on — a value, a button — never
+ * the explanation again.
+ *
+ * Rendered only while the state it describes is true. A callout that is always
+ * on screen is onboarding text wearing a warning's colours.
+ */
+export function Callout({
+  tone = "warn",
+  title,
+  term,
+  tip,
+  icon,
+  children,
+  className,
+}: {
+  tone?: CalloutTone;
+  /** The sentence that must be read. */
+  title: React.ReactNode;
+  /** Names the `(i)` when `title` is not a plain string. */
+  term?: string;
+  /** Why it matters and what to do about it. */
+  tip?: React.ReactNode;
+  /** A rendered element. Defaults to a warning triangle, or (i) for `info`. */
+  icon?: React.ReactNode;
+  /** One actionable line under the headline — a button, a value. */
+  children?: React.ReactNode;
+  className?: string;
+}) {
+  const t = CALLOUT_TONE[tone];
+  return (
+    <div className={cn("min-w-0 rounded-lg border px-3 py-2", t.box, className)}>
+      <div
+        className={cn(
+          "flex items-start gap-1.5 text-xs font-medium leading-relaxed",
+          t.text
+        )}
+      >
+        <span
+          aria-hidden="true"
+          className="mt-0.5 shrink-0 [&>svg]:h-3.5 [&>svg]:w-3.5"
+        >
+          {icon ?? (tone === "info" ? <Info /> : <AlertTriangle />)}
+        </span>
+        <p className="min-w-0 flex-1">
+          {title}
+          {tip && (
+            <InfoTip
+              term={term ?? (typeof title === "string" ? title : "More about this")}
+            >
+              {tip}
+            </InfoTip>
+          )}
+        </p>
+      </div>
+      {children && (
+        <div className="mt-1 pl-5 text-xs leading-relaxed text-foreground">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * "How does this work?" as one quiet row that opens in place.
+ *
+ * For a paragraph too long for an `(i)` — a rule with three moving parts, a
+ * worked consequence. It used to be printed (or clamped to two lines behind
+ * "View more", which is still two lines of standing text on every visit). The
+ * label is phrased as the question the owner would ask, so the closed row is
+ * itself the table of contents.
+ */
+export function Explainer({
+  label,
+  children,
+  className,
+}: {
+  label: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={cn("min-w-0 border-t border-border/60", className)}>
+      <Disclosure
+        label={label}
+        icon={<Info className="h-3.5 w-3.5" aria-hidden="true" />}
+      >
+        <div className="space-y-2 pl-5 text-xs leading-relaxed text-muted-foreground">
+          {children}
+        </div>
+      </Disclosure>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Links out                                                          */
+/* ------------------------------------------------------------------ */
+
+export type SeeAlsoLink = {
+  label: string;
+  /** Another admin screen. */
+  href?: string;
+  /**
+   * Another tab of *this* screen. Takes precedence over `href`, for the reason
+   * `ManagedElsewhere.onJump` gives: a real navigation would remount the form
+   * and drop an unsaved edit.
+   */
+  onJump?: () => void;
+};
+
+/**
+ * Redirection instead of duplication: one dashed row of links to where a
+ * related thing actually lives.
+ *
+ * The owner's standing rule is that a fact has one home and every other screen
+ * links to it. A mirror card restating another tab's values is the thing that
+ * rule removes — this is what replaces it.
+ */
+export function SeeAlso({
+  title = "Elsewhere",
+  tip,
+  links,
+}: {
+  title?: string;
+  tip?: React.ReactNode;
+  links: SeeAlsoLink[];
+}) {
+  const cls = cn(
+    "inline-flex min-h-11 items-center gap-1 rounded-lg px-2 text-[11px] font-medium uppercase tracking-wider text-accent transition-colors hover:text-foreground",
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+  );
+  return (
+    <nav
+      aria-label={title}
+      className="flex min-w-0 flex-wrap items-center gap-x-1 rounded-2xl border border-dashed border-border px-3 py-1 sm:px-4"
+    >
+      <span className="mr-1 flex items-center gap-1 text-xs text-muted-foreground">
+        {title}
+        {tip && <InfoTip term={title}>{tip}</InfoTip>}
+      </span>
+      {links.map((l) =>
+        l.onJump ? (
+          <button
+            key={l.label}
+            type="button"
+            onClick={l.onJump}
+            className={cn(cls, "cursor-pointer")}
+          >
+            {l.label}
+            <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        ) : l.href ? (
+          <Link key={l.label} href={l.href} className={cls}>
+            {l.label}
+            <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </Link>
+        ) : null
+      )}
+    </nav>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  View-only viewers                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Printed once, above whichever tab is open, for a view-only temporary admin.
+ *
+ * It used to exist on the Access tab only, so a view-only holder could edit six
+ * tabs' worth of fields and learn at Save that none of it could land. This is
+ * the UI reflecting the rule, never the rule: every writer refuses the account
+ * in `requireAdminWrite` and records the attempt, whatever this screen shows.
+ */
+export function ReadOnlyNotice() {
+  return (
+    <Callout
+      tone="warn"
+      icon={<Eye />}
+      term="View-only access"
+      title="View-only access — you can open every tab, but nothing here can be saved."
+      tip="The server refuses every change this account tries, on every screen, and records the attempt in the store owner's activity log. Ask the owner for full access if you need to change something."
+    />
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  Save bar                                                           */
 /* ------------------------------------------------------------------ */
@@ -723,17 +1098,28 @@ export function ReadRow({
  *
  * Rendered only while dirty, and animated on opacity alone — never parked
  * offscreen with a transform (see the modal note in CLAUDE.md).
+ *
+ * `readOnly` drops the Save button rather than disabling it — a control that
+ * cannot apply is absent, not greyed — and says why in its place. The form's
+ * own `save()` still refuses a view-only viewer, and the server refuses them
+ * whatever the browser sends; this is only the screen being honest first.
+ *
+ * Pinned above the home indicator through `--sa-bottom`, never `env()`
+ * directly (CLAUDE.md, "Safe areas").
  */
 export function SaveBar({
   keys,
   saving,
   onSave,
   onDiscard,
+  readOnly = false,
 }: {
   keys: DraftKey[];
   saving: boolean;
   onSave: () => void;
   onDiscard: () => void;
+  /** The viewer cannot write. Save is absent; Discard stays. */
+  readOnly?: boolean;
 }) {
   if (keys.length === 0) return null;
 
@@ -746,18 +1132,19 @@ export function SaveBar({
     // and a live region would read the whole thing out each time.
     <section
       aria-label="Unsaved changes"
-      className="sticky bottom-3 z-20 mt-4 rounded-2xl border border-accent/40 bg-card/95 p-3 shadow-lg backdrop-blur animate-[fadeIn_0.15s_ease-out_both] motion-reduce:animate-none"
+      className="sticky bottom-[calc(0.75rem+var(--sa-bottom))] z-20 mt-4 rounded-2xl border border-accent/40 bg-card/95 p-3 shadow-lg backdrop-blur animate-[fadeIn_0.15s_ease-out_both] motion-reduce:animate-none"
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <p className="min-w-0 flex-1 text-xs leading-relaxed">
           <span className="font-medium">
-            {keys.length} unsaved change{keys.length === 1 ? "" : "s"}
+            {readOnly
+              ? "View-only — these edits can't be saved"
+              : `${keys.length} unsaved change${keys.length === 1 ? "" : "s"}`}
           </span>
           <span className="text-muted-foreground">
-            {" — "}
+            {" · "}
             {shown.join(", ")}
-            {extra > 0 && ` and ${extra} more`}. Nothing is written until you
-            press Save.
+            {extra > 0 && ` and ${extra} more`}
           </span>
         </p>
 
@@ -766,10 +1153,12 @@ export function SaveBar({
             <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
             Discard
           </Btn>
-          <Btn tone="solid" onClick={onSave} disabled={saving}>
-            {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            Save changes
-          </Btn>
+          {!readOnly && (
+            <Btn tone="solid" onClick={onSave} disabled={saving}>
+              {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              Save changes
+            </Btn>
+          )}
         </div>
       </div>
     </section>

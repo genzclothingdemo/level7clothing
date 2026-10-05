@@ -1,61 +1,50 @@
 "use server";
 
 /**
- * Writes for Admin → Automation.
+ * Writes for Admin → Automation — **and deliberately nothing that touches a
+ * rule.**
  *
- * Two traps from CLAUDE.md are designed out rather than guarded against, the
- * same way `actions/promotions.ts` does it:
+ * This module used to create, edit, pause and delete `AutomationRule` rows,
+ * which made Admin → Automation a second editor for the same switches
+ * Settings → Alerts draws. Two editors meant the owner's own example: tick
+ * "order shipped → email → customer" in Alerts, build the same rule again
+ * here, and the customer is emailed twice — each rule deduped perfectly
+ * against itself, neither knowing about the other.
  *
- * 1. **"Zod strips anything not in the schema — silently."** Each model has
- *    exactly one column list — {@link ruleRow} and {@link templateRow} — and
- *    both writers use it. There is no second place a field can be forgotten,
- *    which is the failure mode that made the Returns control save nothing.
- * 2. **An optional value collapses to `null`, never `undefined`.** `undefined`
- *    in a Prisma `update` means "leave this column alone", so detaching a
- *    template by choosing "none" would silently keep the old one.
+ * Those actions are **removed, not hidden.** A server action is a public
+ * endpoint addressable by its id, so a missing button is not a missing writer;
+ * the only safe version of "you can't do that here" is a function that no
+ * longer exists. Every rule write now goes through `setAlert` in
+ * `lib/automation.ts`, reached only from `actions/notification-settings.ts`.
  *
- * Conditions get a third rule of their own: they are **rebuilt from the
- * trigger's catalogue**, never copied from the request. A `conditions` column
- * is `Json`, so without that a form post could write any key it liked into a
- * blob the engine then matches on — and a condition key the engine never reads
- * is a rule that looks narrowed on screen and fires on everything.
+ * What is left is the other half of the screen:
+ *
+ * - **the wording** — `updateEmailTemplate`. Creating or deleting a template
+ *   went with the rule editor: a new template could never be attached to
+ *   anything, and every template the store has is one it ships.
+ * - **the queue** — run it now, cancel a queued job, retry a failed one. These
+ *   touch `AutomationJob` rows, and each is protected by the same claim the
+ *   cron uses, so none of them can send anything twice.
+ *
+ * Every write here goes through `requireAdminWrite()` — the permission and the
+ * temporary-admin activity log in one call — so a view-only admin is refused
+ * whatever the browser sends.
  */
 
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireAdminWrite } from "@/lib/auth";
-import {
-  IMPLEMENTED_ACTIONS,
-  TRIGGER_KEYS,
-  drainDueJobs,
-  isTriggerKey,
-  syncSystemAutomation,
-  triggerSpec,
-  type DrainReport,
-} from "@/lib/automation";
-import { isPushRecipient } from "@/lib/push-dispatch";
-
-/**
- * Identity **and** permission for every write in this module, routed through
- * the one write gate in `lib/auth.ts`. See the long note there: it is also
- * where a temporary admin's activity is recorded, so a new action that calls
- * this is gated and logged without its author doing anything.
- */
-async function requireAdmin(what?: string, opts?: { quiet?: boolean }) {
-  return requireAdminWrite(what, opts);
-}
+import { AdminReadOnlyError } from "@/lib/temp-admin";
+import { drainDueJobs, type DrainReport } from "@/lib/automation";
 
 export type AutomationActionResult = { success: boolean; error?: string };
 
 /**
- * Refresh the two screens these writes affect.
- *
- * Wrapped, because `revalidatePath` throws outside a request context — the same
- * reason `/api/cron/nimbus-sync` guards its call. Every caller here runs it
- * *after* the database write has committed, so letting it escape would turn a
- * save that worked into an error message, and the admin would press Save again
- * on a rule that was already saved.
+ * Refresh the screens these writes affect. Wrapped, because `revalidatePath`
+ * throws outside a request context and every caller runs it after the write
+ * has committed — letting it escape would report a save that worked as a
+ * failure.
  */
 function revalidateAutomation() {
   try {
@@ -70,227 +59,19 @@ function explain(error: unknown): string {
   if (error instanceof z.ZodError) {
     return error.issues[0]?.message ?? "Check the fields and try again.";
   }
+  // A view-only temporary admin, refused by the gate. Its own sentence says
+  // what happened and who to ask — "couldn't save, try again" would send them
+  // round in a loop that can never succeed.
+  if (error instanceof AdminReadOnlyError) return error.message;
   if (error instanceof Error && error.message === "Unauthorized") {
     return "Your session expired. Sign in again.";
-  }
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    (error as { code?: string }).code === "P2002"
-  ) {
-    return "Something with that name already exists — pick another.";
   }
   console.error("[automation] write failed:", error);
   return "Couldn't save. Please try again.";
 }
 
 /* ------------------------------------------------------------------ */
-/*  Rules                                                              */
-/* ------------------------------------------------------------------ */
-
-const ruleInput = z
-  .object({
-    name: z
-      .string()
-      .trim()
-      .min(2, "Give the rule a name you'll recognise in a list")
-      .max(80, "Keep the name under 80 characters"),
-    trigger: z
-      .string()
-      .refine(isTriggerKey, { message: "Pick what sets this rule off." }),
-    action: z
-      .string()
-      .refine((v) => (IMPLEMENTED_ACTIONS as readonly string[]).includes(v), {
-        message: "That channel isn't something this build can send.",
-      }),
-    // "" from the select means "no template", which is only valid while the
-    // rule is switched off — enforced in the superRefine below.
-    templateId: z.string().trim(),
-    recipient: z
-      .string()
-      .trim()
-      .min(1, "Say who this email goes to")
-      .max(120, "That address is too long"),
-    delayMinutes: z.coerce
-      .number()
-      .int("Use a whole number of minutes")
-      .min(0, "A delay can't be negative")
-      .max(43200, "30 days is the longest delay — anything longer is a campaign, not a rule"),
-    isActive: z.boolean(),
-  })
-  .superRefine((v, ctx) => {
-    /**
-     * **A notification goes to a device, and a device belongs to an account.**
-     *
-     * So the two named recipients are the only ones a push rule can carry:
-     * `customer` resolves through the order's account (or the account holding
-     * its email), and `admin` through `adminNotifyEmail`. A literal address is
-     * refused here rather than at send time, because the alternative is a rule
-     * that looks configured, sits in the list looking healthy, and cancels
-     * every job it ever creates. The editor hides the option; this is what
-     * makes hiding it a rule — a server action is callable by id from
-     * anywhere, so a hidden control is not a constraint.
-     */
-    if (v.action === "push" && !isPushRecipient(v.recipient)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["recipient"],
-        message:
-          "A notification can only go to the customer or to you — an email address has no device behind it.",
-      });
-    } else if (
-      v.action !== "push" &&
-      v.recipient !== "customer" &&
-      v.recipient !== "admin" &&
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.recipient)
-    ) {
-      // A literal recipient has to look like an address, or the job only fails
-      // at send time — hours later, on a screen nobody is watching.
-      ctx.addIssue({
-        code: "custom",
-        path: ["recipient"],
-        message: "Enter a valid email address, or pick the customer or yourself.",
-      });
-    }
-    // An active rule with no template sends nothing and reports a failed job
-    // for every order — on either channel, since push takes its title from the
-    // template's subject line. Refuse it up front; allow it while paused so a
-    // half-built rule can be saved.
-    if (v.isActive && !v.templateId) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["templateId"],
-        message: "Choose a template, or save the rule switched off.",
-      });
-    }
-  });
-
-type ParsedRule = z.output<typeof ruleInput>;
-
-/**
- * Conditions, rebuilt from the catalogue.
- *
- * Only keys the chosen trigger actually declares survive, and only values it
- * offers. Anything blank is dropped entirely rather than stored as `""`, so
- * "any status" is the *absence* of the key — which is what
- * `conditionsMatch` treats as "no opinion".
- */
-function readConditionsFrom(formData: FormData, trigger: string): Record<string, string> {
-  const spec = triggerSpec(trigger);
-  const out: Record<string, string> = {};
-  for (const field of spec?.conditions ?? []) {
-    const raw = String(formData.get(`condition.${field.key}`) ?? "").trim();
-    if (!raw) continue;
-    if (!field.options.some((o) => o.value === raw)) continue;
-    out[field.key] = raw;
-  }
-  return out;
-}
-
-function readRule(formData: FormData) {
-  return {
-    name: String(formData.get("name") ?? ""),
-    trigger: String(formData.get("trigger") ?? ""),
-    action: String(formData.get("action") ?? "email"),
-    templateId: String(formData.get("templateId") ?? ""),
-    recipient: String(formData.get("recipient") ?? "customer"),
-    delayMinutes: formData.get("delayMinutes"),
-    isActive: formData.get("isActive") === "true",
-  };
-}
-
-/** The single column list for `AutomationRule`. Both writers use it. */
-function ruleRow(v: ParsedRule, conditions: Record<string, string>) {
-  return {
-    name: v.name,
-    trigger: v.trigger,
-    conditions,
-    action: v.action,
-    // Explicit `null`, never `undefined` — see note 2 in the header.
-    templateId: v.templateId || null,
-    recipient: v.recipient,
-    delayMinutes: v.delayMinutes,
-    isActive: v.isActive,
-  };
-}
-
-export async function createAutomationRule(
-  formData: FormData
-): Promise<AutomationActionResult> {
-  try {
-    await requireAdmin("createAutomationRule");
-    const parsed = ruleInput.parse(readRule(formData));
-    const conditions = readConditionsFrom(formData, parsed.trigger);
-    await prisma.automationRule.create({ data: ruleRow(parsed, conditions) });
-    revalidateAutomation();
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: explain(error) };
-  }
-}
-
-export async function updateAutomationRule(
-  id: string,
-  formData: FormData
-): Promise<AutomationActionResult> {
-  try {
-    await requireAdmin("updateAutomationRule");
-    const parsed = ruleInput.parse(readRule(formData));
-    const conditions = readConditionsFrom(formData, parsed.trigger);
-    await prisma.automationRule.update({
-      where: { id },
-      data: ruleRow(parsed, conditions),
-    });
-    revalidateAutomation();
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: explain(error) };
-  }
-}
-
-/**
- * The list's pause switch — the one edit worth making without opening a form,
- * and the fastest way to stop a rule that is emailing the wrong people.
- */
-export async function setAutomationRuleActive(
-  id: string,
-  isActive: boolean
-): Promise<AutomationActionResult> {
-  try {
-    await requireAdmin("setAutomationRuleActive");
-    await prisma.automationRule.update({ where: { id }, data: { isActive } });
-    revalidateAutomation();
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: explain(error) };
-  }
-}
-
-/**
- * Deleting a rule cascades its jobs (`onDelete: Cascade`), which includes the
- * `sent` ones. That history is what proves an email went out, so any queued
- * work is cancelled first and the count is reported — deleting is still a
- * choice, but not a silent one.
- */
-export async function deleteAutomationRule(
-  id: string
-): Promise<AutomationActionResult> {
-  try {
-    await requireAdmin("deleteAutomationRule");
-    await prisma.automationJob.updateMany({
-      where: { ruleId: id, status: "pending" },
-      data: { status: "cancelled", error: "Cancelled — the rule was deleted." },
-    });
-    await prisma.automationRule.delete({ where: { id } });
-    revalidateAutomation();
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: explain(error) };
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Templates                                                          */
+/*  Templates — the words                                              */
 /* ------------------------------------------------------------------ */
 
 const templateInput = z.object({
@@ -311,108 +92,30 @@ const templateInput = z.object({
     .max(8000, "That's longer than an email should be"),
 });
 
-type ParsedTemplate = z.output<typeof templateInput>;
-
-function readTemplate(formData: FormData) {
-  return {
-    name: String(formData.get("name") ?? ""),
-    subject: String(formData.get("subject") ?? ""),
-    body: String(formData.get("body") ?? ""),
-  };
-}
-
 /**
- * The single column list for `EmailTemplate`.
+ * Save a template's wording.
  *
- * `key` and `isSystem` are deliberately absent. `key` is the stable handle the
- * seeder uses and is generated once, on create; `isSystem` is only ever set by
- * the seeder. Neither is a form field, so neither can be flipped by a post —
- * which is what stops a system template being renamed into deletability.
+ * The column list is written out — `name`, `subject`, `body` and nothing else
+ * — so `key` (the stable handle the sync matches on) and `isSystem` can never
+ * be changed by a post. The alert that uses a template is not chosen here
+ * either: which template an alert sends is fixed by the catalogue it ships in.
  */
-function templateRow(v: ParsedTemplate) {
-  return { name: v.name, subject: v.subject, body: v.body };
-}
-
-/** Slug from the name, with a short suffix so two "Welcome" templates can coexist. */
-function keyFrom(name: string): string {
-  const slug =
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "")
-      .slice(0, 40) || "template";
-  return `${slug}-${Math.random().toString(36).slice(2, 7)}`;
-}
-
-export async function createEmailTemplate(
-  formData: FormData
-): Promise<AutomationActionResult> {
-  try {
-    await requireAdmin("createEmailTemplate");
-    const parsed = templateInput.parse(readTemplate(formData));
-    await prisma.emailTemplate.create({
-      data: { ...templateRow(parsed), key: keyFrom(parsed.name), isSystem: false },
-    });
-    revalidateAutomation();
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: explain(error) };
-  }
-}
-
-/** System templates are editable — only deleting them is refused. */
 export async function updateEmailTemplate(
   id: string,
   formData: FormData
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin("updateEmailTemplate");
-    const parsed = templateInput.parse(readTemplate(formData));
-    await prisma.emailTemplate.update({ where: { id }, data: templateRow(parsed) });
-    revalidateAutomation();
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: explain(error) };
-  }
-}
-
-/**
- * Two refusals, and both are enforced here rather than only in the UI, because
- * a hidden button is not a rule:
- *
- * - **A system template is never deletable.** The store ships with it and the
- *   seeder expects it to exist; editing it covers every legitimate reason to
- *   want it gone.
- * - **A template in use is never deletable.** `onDelete: SetNull` would leave
- *   the rules pointing at nothing — still active, still matching orders, and
- *   failing a job every time. Naming the rules is more useful than refusing
- *   blankly.
- */
-export async function deleteEmailTemplate(
-  id: string
-): Promise<AutomationActionResult> {
-  try {
-    await requireAdmin("deleteEmailTemplate");
-    const template = await prisma.emailTemplate.findUnique({
-      where: { id },
-      include: { rules: { select: { name: true } } },
+    await requireAdminWrite("updateEmailTemplate");
+    const parsed = templateInput.parse({
+      name: String(formData.get("name") ?? ""),
+      subject: String(formData.get("subject") ?? ""),
+      body: String(formData.get("body") ?? ""),
     });
-    if (!template) return { success: false, error: "That template no longer exists." };
-    if (template.isSystem) {
-      return {
-        success: false,
-        error:
-          "This is one of the templates the store ships with. You can edit every word of it, but it can't be deleted.",
-      };
-    }
-    if (template.rules.length > 0) {
-      const names = template.rules.map((r) => `"${r.name}"`).join(", ");
-      return {
-        success: false,
-        error: `${names} ${template.rules.length === 1 ? "uses" : "use"} this template. Point ${template.rules.length === 1 ? "it" : "them"} somewhere else first.`,
-      };
-    }
-    await prisma.emailTemplate.delete({ where: { id } });
+    const res = await prisma.emailTemplate.updateMany({
+      where: { id: String(id) },
+      data: { name: parsed.name, subject: parsed.subject, body: parsed.body },
+    });
+    if (res.count === 0) return { success: false, error: "That template no longer exists." };
     revalidateAutomation();
     return { success: true };
   } catch (error) {
@@ -421,23 +124,19 @@ export async function deleteEmailTemplate(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Jobs                                                               */
+/*  The queue                                                          */
 /* ------------------------------------------------------------------ */
 
 /**
- * Drain the queue by hand.
- *
- * The cron is the real drain; this exists because the cron's schedule is coarse
- * (see `vercel.json`) and because "did that actually send?" is a question an
- * owner asks immediately, not tomorrow. It calls the same `drainDueJobs` and is
- * protected by the same claim, so pressing it twice — or pressing it while the
- * cron is mid-pass — cannot send anything twice.
+ * Drain the queue by hand — the same `drainDueJobs` as the cron, protected by
+ * the same claim, so pressing it twice, or while the cron is mid-pass, cannot
+ * send anything twice.
  */
 export async function runDueAutomationJobs(): Promise<
   AutomationActionResult & { report?: DrainReport }
 > {
   try {
-    await requireAdmin("runDueAutomationJobs");
+    await requireAdminWrite("runDueAutomationJobs");
     const report = await drainDueJobs();
     revalidateAutomation();
     return { success: true, report };
@@ -446,15 +145,15 @@ export async function runDueAutomationJobs(): Promise<
   }
 }
 
-/** Withdraw a queued job without touching the rule that made it. */
+/** Withdraw a queued job without touching the alert that made it. */
 export async function cancelAutomationJob(
   id: string
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin("cancelAutomationJob");
+    await requireAdminWrite("cancelAutomationJob");
     // Scoped to `pending` so this can never rewrite a job that already sent.
     const res = await prisma.automationJob.updateMany({
-      where: { id, status: "pending" },
+      where: { id: String(id), status: "pending" },
       data: { status: "cancelled", error: "Cancelled by hand from the admin." },
     });
     if (res.count === 0) {
@@ -467,73 +166,29 @@ export async function cancelAutomationJob(
   }
 }
 
-/** Re-queue a failed job so the next drain retries it. */
+/**
+ * Re-queue a failed or skipped job so the next drain tries it again.
+ *
+ * Safe against a double send for three reasons, none of which is this
+ * function: a `sent` job is not selectable here; the drain claims the job with
+ * a compare-and-set before anything leaves; and delivery re-asks every
+ * question at send time — including whether the alert is still switched on —
+ * so a job skipped because it no longer applied is skipped again.
+ */
 export async function retryAutomationJob(
   id: string
 ): Promise<AutomationActionResult> {
   try {
-    await requireAdmin("retryAutomationJob");
+    await requireAdminWrite("retryAutomationJob");
     const res = await prisma.automationJob.updateMany({
-      where: { id, status: { in: ["failed", "cancelled"] } },
+      where: { id: String(id), status: { in: ["failed", "cancelled"] } },
       data: { status: "pending", runAt: new Date(), error: null, sentAt: null },
     });
     if (res.count === 0) {
-      return { success: false, error: "Only a failed or cancelled job can be retried." };
+      return { success: false, error: "Only a failed or skipped job can be retried." };
     }
     revalidateAutomation();
     return { success: true };
-  } catch (error) {
-    return { success: false, error: explain(error) };
-  }
-}
-
-/** Exported for the rule form's trigger picker; keeps the list in one place. */
-export async function listTriggerKeys(): Promise<readonly string[]> {
-  return TRIGGER_KEYS;
-}
-
-/* ------------------------------------------------------------------ */
-/*  What the store ships with                                          */
-/* ------------------------------------------------------------------ */
-
-/**
- * Put back any shipped template or rule that is missing.
- *
- * This is the only way the store's own mail gets into a database, and it is
- * deliberately a **button, not a startup hook**. Running it on every boot would
- * mean a rule you deleted comes back on the next deploy, which is a store that
- * argues with its owner.
- *
- * It is additive: it never edits words you have written, never re-points a rule
- * at a different template and never un-pauses anything. Pressing it twice does
- * nothing the second time, so it is safe to press when you are not sure.
- */
-export async function restoreSystemAutomation(): Promise<
-  AutomationActionResult & { summary?: string }
-> {
-  try {
-    await requireAdmin("restoreSystemAutomation");
-    const report = await syncSystemAutomation();
-    revalidateAutomation();
-
-    const added: string[] = [];
-    if (report.templatesCreated.length) {
-      added.push(
-        `${report.templatesCreated.length} template${report.templatesCreated.length === 1 ? "" : "s"}`
-      );
-    }
-    if (report.rulesCreated.length) {
-      added.push(
-        `${report.rulesCreated.length} rule${report.rulesCreated.length === 1 ? "" : "s"}`
-      );
-    }
-
-    return {
-      success: true,
-      summary: added.length
-        ? `Restored ${added.join(" and ")}. Nothing you had already was changed.`
-        : "Nothing was missing — every template and rule the store ships with is already here.",
-    };
   } catch (error) {
     return { success: false, error: explain(error) };
   }

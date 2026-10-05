@@ -19,29 +19,37 @@
  *   3. **Behind an `(i)`** — every explanation longer than a label. Not a
  *      paragraph under the field, which is what made this a wall.
  *
+ * Printed paragraphs are down to one shape, `Callout`: a warning about the
+ * configuration as it is right now, headline printed and why behind its `(i)`.
+ * A "how it works" paragraph is an `Explainer` row that opens in place, and a
+ * value another tab owns is a `SeeAlso` link, never a read-only copy. See the
+ * header of `settings-ui.tsx` for which to reach for.
+ *
  * The one exception is the Returns tab, which mounts the returns agent's
  * `ReturnPolicyCard` whole — it carries its own tree and its own Save.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowUpRight,
   Banknote,
   CreditCard,
   HandCoins,
   KeyRound,
   Loader2,
   Mail,
+  Save,
   Smartphone,
   Truck,
   Upload,
   X,
 } from "lucide-react";
 import { InfoTip } from "@/components/store/info-tip";
-import { ExpandableText } from "@/components/store/expandable-text";
 import { Card, Check, SwitchRow } from "@/components/admin/form-kit";
 import { Badge, Btn } from "@/components/admin/order-ui";
 import { DispatchSettings } from "@/components/admin/dispatch-settings";
@@ -56,9 +64,12 @@ import { TempAdminPanel } from "@/components/admin/temp-admin-panel";
 import type { AdminMode, TempAdminRow } from "@/lib/temp-admin";
 import {
   AreaField,
+  Callout,
+  Explainer,
+  FixedRow,
   LinesField,
-  ManagedElsewhere,
   ReadRow,
+  SeeAlso,
   SetOnce,
   TextField,
   type DraftKey,
@@ -231,8 +242,19 @@ function anyDirty(isDirty: (k: DraftKey) => boolean, keys: DraftKey[]): boolean 
  * reach you", both are published in the footer, and neither was more than four
  * fields. Nothing else was regrouped — a fold that merges two unlike things to
  * save a row is how a summary stops being able to tell the truth.
+ *
+ * ## No mirror of the Alerts tab
+ *
+ * This tab used to end on a read-only card restating three values the Alerts
+ * tab owns — the alert inbox, the sender address and how many alerts were on —
+ * so "the pair could be read side by side". The owner's rule is the opposite:
+ * a fact has one home and every other screen *links* to it, and a restated
+ * value is read as duplication, not as help. The same-inbox warning that card
+ * carried is printed on Alerts, beside the only input for that address. What
+ * is left here is one row of links, which is also the only way into the
+ * newsletter list from anywhere in the admin — so it must not go.
  */
-export function StoreSection({ f, set, isDirty, facts, goTab }: SectionProps) {
+export function StoreSection({ f, set, isDirty, goTab }: SectionProps) {
   const [uploading, setUploading] = useState(false);
 
   async function onLogo(e: React.ChangeEvent<HTMLInputElement>) {
@@ -260,8 +282,9 @@ export function StoreSection({ f, set, isDirty, facts, goTab }: SectionProps) {
   }
 
   const socials = [f.instagram, f.facebook, f.whatsapp].filter((v) => v.trim());
-  const sameAsPublic =
-    f.adminNotifyEmail.trim().toLowerCase() === f.contactEmail.trim().toLowerCase();
+  const bullets = (s: string) => s.split("\n").filter((l) => l.trim()).length;
+  const care = bullets(f.defaultMaterialsCare);
+  const shipping = bullets(f.defaultShippingInfo);
 
   return (
     <div className="space-y-4">
@@ -414,7 +437,7 @@ export function StoreSection({ f, set, isDirty, facts, goTab }: SectionProps) {
             ? `${f.contactEmail} · no social links`
             : `${f.contactEmail} · ${socials.length} social link${socials.length === 1 ? "" : "s"}`
         }
-        tip="Published on the store — the contact page, the footer and order emails. This is what a customer uses to reach you, so it is not the address the courier collects from, and not where your own alerts are sent (that is Your alerts, further down this tab). Each social link is rendered only when it is filled in, so an empty box removes the icon rather than leaving a dead link."
+        tip="Published on the store — the contact page, the footer and order emails — and the address customers' replies come back to. It is not the address the courier collects from, and not where your own alerts go: that inbox is on the Alerts tab. A social link is shown only when it is filled in, so an empty box removes the icon rather than leaving a dead link."
         dirty={anyDirty(isDirty, [
           "contactEmail",
           "contactPhone",
@@ -503,16 +526,22 @@ export function StoreSection({ f, set, isDirty, facts, goTab }: SectionProps) {
 
       <SetOnce
         label="Product page info"
-        summary="Materials & Care · Shipping & Delivery"
+        summary={
+          care === 0 && shipping === 0
+            ? "Both hidden"
+            : `${care ? `${care} care` : "Care hidden"} · ${
+                shipping ? `${shipping} shipping` : "shipping hidden"
+              }`
+        }
         tip={
           <>
             The accordion under every product, written once here and inherited
             by the whole catalogue — a product only needs its own version when
-            it genuinely differs. One line per bullet, and an empty box hides
-            that section across the store. The accordion has five blocks: two
-            are set here, <b>Product details</b> is each product&apos;s own
-            description, <b>Customer reviews</b> is driven by approved reviews,
-            and <b>Returns &amp; refunds</b> belongs to the Returns tab.
+            it genuinely differs. One line per bullet; an empty box hides that
+            section everywhere. Of its five blocks, two are set here,{" "}
+            <b>Product details</b> is each product&apos;s own description,{" "}
+            <b>Customer reviews</b> come from approved reviews, and{" "}
+            <b>Returns &amp; refunds</b> belongs to the Returns tab.
           </>
         }
         dirty={anyDirty(isDirty, ["defaultMaterialsCare", "defaultShippingInfo"])}
@@ -533,69 +562,18 @@ export function StoreSection({ f, set, isDirty, facts, goTab }: SectionProps) {
         />
       </SetOnce>
 
-      {/* ---- Read-only: the private half of the pair, owned by Alerts ----
-          The alert address used to be edited here, because it only makes
-          sense read next to the public contact email above. It is now edited
-          on Alerts, beside the address mail is *sent from* and the grid of
-          what actually gets sent — and it is mirrored here so the pair is
-          still readable side by side. Read-only, and never an input: two
-          editable copies of one column is the `defaultReturnsInfo` lost
-          update, which cost a silent overwrite with no error anywhere. */}
-      <ManagedElsewhere
-        title="Where the store writes"
-        onJump={() => goTab("alerts")}
-        where="Alerts"
-        why="Your own alert address, the address customer mail is sent from, and which events send at all — all one errand, so they are one tab. Shown here because the public contact email above is the address this one deliberately is not."
-      >
-        <ReadRow
-          label="Your alerts go to"
-          value={f.adminNotifyEmail || "Not set"}
-          tone={sameAsPublic ? "warn" : undefined}
-          tip={
-            sameAsPublic
-              ? "This is the same as your public contact email, so your own alerts and your customers' replies share one inbox. That works, but a busy contact inbox is where a new order notice gets lost."
-              : "Never shown to a customer. New orders, new enquiries and new interested customers are written here."
-          }
-        />
-        <ReadRow
-          label="Customer mail is sent from"
-          value={facts.notifications.identity.fromAddress}
-          tone={identityTone(facts.notifications.identity) === "ok" ? undefined : "warn"}
-          tip="Set in the deployment's environment, not on any screen. Replies to it come back to your public contact email above."
-        />
-        <ReadRow
-          label="Alerts switched on"
-          value={`${Object.values(facts.notifications.matrix.byChannel).reduce(
-            (a, b) => a + b,
-            0
-          )} across all channels`}
-          tone="muted"
-        />
-      </ManagedElsewhere>
-
-      <div className="min-w-0 rounded-2xl border border-border bg-card p-4 sm:p-5">
-        <div className="mb-3 flex items-center gap-1">
-          <h2 className="font-serif text-lg leading-none">Other channels</h2>
-          <InfoTip term="Other channels">
-            Two more ways the store reaches people. Neither has a setting to
-            configure — each one is a message you compose and send, so each has
-            its own screen. What goes out <em>automatically</em> is the Alerts
-            tab.
-          </InfoTip>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <ChannelLink
-            href="/admin/notifications"
-            label="Push notifications"
-            detail="Compose and broadcast"
-          />
-          <ChannelLink
-            href="/admin/newsletter"
-            label="Newsletter"
-            detail="Subscriber list"
-          />
-        </div>
-      </div>
+      {/* Redirection, not a mirror — see "No mirror of the Alerts tab" above.
+          The first link is a tab jump (`goTab`), because a real navigation
+          would remount this form and drop an unsaved edit. */}
+      <SeeAlso
+        title="Elsewhere"
+        tip="Where the store writes to people lives on its own screens. Your own alert inbox, the address customer mail is sent from, and which events send at all are on the Alerts tab. Push messages and the newsletter are composed and sent from their own pages — neither has anything to configure here."
+        links={[
+          { label: "Alerts & sender", onJump: () => goTab("alerts") },
+          { label: "Push notifications", href: "/admin/notifications" },
+          { label: "Newsletter", href: "/admin/newsletter" },
+        ]}
+      />
     </div>
   );
 }
@@ -973,7 +951,9 @@ const MODE_COPY: Record<OrderConfirmMode, { blurb: string; tip: string }> = {
     tip: "The safest setting, and the default. Orders land in Pending — including ones already paid in full online — and stay there until you press Confirm. Nothing is staged with the courier until then.",
   },
   byPayment: {
-    blurb: "Decide per payment method, using the three switches below.",
+    // Not "the three switches below": they only exist once this is picked,
+    // so the sentence pointed at nothing while it was being chosen.
+    blurb: "Paid orders can confirm themselves — you pick which methods.",
     tip: "The usual middle ground: let money that has already arrived skip the queue, and keep a human on the ones where it has not. A payment that failed never confirms, whatever these switches say.",
   },
   auto: {
@@ -1110,25 +1090,22 @@ export function OrdersSection({ f, set, isDirty, facts }: SectionProps) {
           only in the single configuration that spends real money with nobody
           looking, and a warning behind an (i) is a warning nobody reads. */}
       {unattended && (
-        <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5">
-          <p className="flex items-start gap-1.5 text-xs font-medium text-danger">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-            <span>Automatic + book the AWB = no human in the loop.</span>
-          </p>
-          <p className="mt-1 pl-5 text-xs leading-relaxed text-foreground">
-            Every order confirms itself and books a real courier, charging your
-            NimbusPost wallet, before you have seen it.
-            <InfoTip term="No human in the loop">
+        <Callout
+          tone="danger"
+          term="No human in the loop"
+          title="No human in the loop — every order confirms itself and books a paid AWB before you see it."
+          tip={
+            <>
               A wrong address, a joke order or a cash-on-delivery order nobody
-              intends to accept all go out the same way, and the only way to
-              stop one is to cancel the shipment in NimbusPost before the
-              courier collects. If you want the speed without the exposure, set
-              confirmation to <b>Stage a draft</b>: orders still confirm
-              themselves instantly, and each one waits as a free draft for one
-              press of Ship now.
-            </InfoTip>
-          </p>
-        </div>
+              intends to accept all go out the same way, charged to your
+              NimbusPost wallet, and the only way to stop one is to cancel the
+              shipment in NimbusPost before the courier collects. For the speed
+              without the exposure, set confirmation to <b>Stage a draft</b>:
+              orders still confirm instantly, and each waits as a free draft for
+              one press of Ship now.
+            </>
+          }
+        />
       )}
     </div>
   );
@@ -1283,7 +1260,7 @@ const METHOD_META: {
   },
 ];
 
-export function PaymentsSection({ f, set, isDirty, facts }: SectionProps) {
+export function PaymentsSection({ f, set, isDirty, facts, goTab }: SectionProps) {
   const gatewayReady = f.razorpayEnabled && facts.razorpayConfigured;
 
   /** Mirrors `methodAvailability()` in actions/orders.ts. */
@@ -1301,12 +1278,27 @@ export function PaymentsSection({ f, set, isDirty, facts }: SectionProps) {
   const threshold = Number(f.freeShippingThreshold);
   const thresholdSet = f.freeShippingThreshold.trim() !== "" && threshold > 0;
 
+  // The closed fold's one line: every number in it, so it never has to be
+  // opened just to be read.
+  const feeSummary =
+    codFee === 0 && partialFee === 0
+      ? "No cash fees"
+      : [
+          codFee > 0 && `COD +${formatINR(codFee)}`,
+          partialFee > 0 && `part-pay +${formatINR(partialFee)}`,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+  const shippingSummary = thresholdSet
+    ? `free shipping over ${formatINR(threshold)}`
+    : "no free-shipping threshold";
+
   return (
     <div className="space-y-4">
       {/* ---- Weekly: which methods are offered ---- */}
       <Card
         title="How customers can pay"
-        tip="Three things have to agree before a method is offered: this switch, the gateway (for the two online methods), and the product's own allowed methods. A method is shown only where all three say yes — which is why a switch here can remove an option that every product in the catalogue allows."
+        tip="A method is offered at checkout only when three things agree: its switch here, Razorpay (for the two online methods), and every product in the basket. The line under each switch is how many active products allow it."
         aside={
           <Badge tone={liveCount === 0 ? "danger" : liveCount === 1 ? "warn" : "neutral"}>
             {liveCount} live
@@ -1345,56 +1337,62 @@ export function PaymentsSection({ f, set, isDirty, facts }: SectionProps) {
           leaves only cash — and it deserves a warning rather than a block.
         */}
         {allOff ? (
-          <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5">
-            <p className="flex items-start gap-1.5 text-xs font-medium text-danger">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-              <span>All three methods are off — this will not save.</span>
-            </p>
-            <p className="mt-1 pl-5 text-xs leading-relaxed text-muted-foreground">
-              There is no fourth option to fall back to. Checkout would have
-              nothing to offer, every order would be refused, and the shop would
-              look broken rather than closed. Leave at least one on, or take the
-              products offline.
-            </p>
-          </div>
+          <Callout
+            tone="danger"
+            title="All three are off — this will not save."
+            tip="There is no fallback method. Checkout would have nothing to offer, every order would be refused, and the shop would look broken rather than closed. Leave at least one on, or take the products offline instead."
+          />
         ) : (
           liveCount === 0 && (
-            <div className="rounded-lg border border-orange-500/40 bg-orange-500/10 p-2.5">
-              <p className="flex items-start gap-1.5 text-xs font-medium text-orange-600 dark:text-orange-400">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-                <span>Nothing is offered at checkout right now.</span>
-              </p>
-              <p className="mt-1 pl-5 text-xs leading-relaxed text-muted-foreground">
-                The only methods still on need Razorpay, and Razorpay is
-                {facts.razorpayConfigured ? " off" : " not configured"} — see the
-                Integrations tab. Until that changes, nobody can check out.
-              </p>
-            </div>
+            <Callout
+              tone="warn"
+              title="Nobody can check out right now."
+              tip={`The methods still switched on all need Razorpay, and Razorpay is ${
+                facts.razorpayConfigured ? "switched off" : "not configured"
+              }. Until that changes, checkout has nothing to offer.`}
+            >
+              <button
+                type="button"
+                onClick={() => goTab("integrations")}
+                className="cursor-pointer font-medium text-accent underline-offset-2 hover:underline"
+              >
+                Open Integrations
+              </button>
+            </Callout>
           )
         )}
 
-        <ExpandableText lines={2} contentClassName="text-xs leading-relaxed text-muted-foreground">
+        <Explainer label="How checkout decides">
           <p>
-            A product lists the methods it accepts in the product editor, and a
-            product that lists none is treated as Prepaid + COD. Checkout offers
-            the methods that <b>every</b> item in the basket allows, then hides
-            any that are off here — so one item allowing only Prepaid removes
-            COD from a basket of four. If that leaves nothing, checkout says so
-            and the order cannot be placed. The counts above are per product, not
-            per basket, so they are the ceiling rather than the promise.
+            A product lists the methods it accepts in the product editor; one
+            that lists none is treated as Prepaid + COD. Checkout offers only
+            the methods <b>every</b> item in the basket allows, then hides any
+            switched off here — so one item that allows only Prepaid removes COD
+            from a basket of four. If nothing is left, checkout says so and the
+            order cannot be placed.
           </p>
-        </ExpandableText>
+          <p>
+            The counts are per product, not per basket, so they are the ceiling
+            rather than the promise.
+          </p>
+        </Explainer>
       </Card>
 
-      {/* ---- Weekly: what checkout adds to the basket ---- */}
-      <Card
-        title="What checkout adds"
-        tip="Two charges that move the total after the products are priced. The cash-handling fees add, the free-shipping threshold takes away. Both are shown to the customer as their own line — a total that moves with no word for why is what makes people abandon a basket."
-        aside={
-          <Badge tone={codFee > 0 || partialFee > 0 ? "accent" : "neutral"}>
-            {codFee > 0 || partialFee > 0 ? "Fees on" : "Absorbed"}
-          </Badge>
-        }
+      {/* ---- Set once: what checkout adds to the basket ----
+          Folded because it is decided once and then left, and the summary
+          carries every number in it, so the closed row already answers "are we
+          charging for cash?". `dirty` re-opens it on a tab switch, so an
+          unsaved fee is never hidden behind a fold the save bar is promising
+          to write. */}
+      <SetOnce
+        label="Checkout charges"
+        summary={`${feeSummary} · ${shippingSummary}`}
+        tip="What checkout adds or takes away after the products are priced: a flat fee for handling cash, and a basket total above which shipping is free. Each is shown to the customer as its own line — a total that moves with no word for why is what makes people abandon a basket."
+        dirty={anyDirty(isDirty, [
+          "codFeeAmount",
+          "partialFeeAmount",
+          "freeShippingThreshold",
+        ])}
       >
         <div className="grid gap-4 sm:grid-cols-2">
           <TextField
@@ -1429,14 +1427,6 @@ export function PaymentsSection({ f, set, isDirty, facts }: SectionProps) {
           />
         </div>
 
-        <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-          Paying online in full never carries a fee — there is no cash to
-          collect. Whatever is charged is frozen onto the order, so changing
-          these numbers never rewrites what a past customer paid, and it is{" "}
-          <b>not refunded</b> on a return: the courier&apos;s charge was paid
-          whatever happened to the goods.
-        </p>
-
         <TextField
           label="Free shipping above"
           type="number"
@@ -1449,33 +1439,44 @@ export function PaymentsSection({ f, set, isDirty, facts }: SectionProps) {
           hint={
             thresholdSet
               ? `Baskets of ${formatINR(threshold)} or more ship free.`
-              : "No threshold — every basket pays whatever its products charge."
+              : "Empty — every basket pays whatever its products charge."
           }
         />
+
+        <Explainer label="How the fees behave">
+          <p>
+            Paying online in full never carries a fee — there is no cash to
+            collect. A fee is frozen onto the order when it is placed, so
+            changing these numbers never rewrites what a past customer paid.
+          </p>
+          <p>
+            It is <b>not refunded</b> on a return: the courier&apos;s collection
+            charge was paid whatever happened to the goods.
+          </p>
+        </Explainer>
+
         <Link
           href="/admin/products"
-          className="inline-flex min-h-8 items-center text-[11px] font-medium uppercase tracking-wider text-accent transition-colors hover:text-foreground"
+          className="inline-flex min-h-11 items-center gap-1 text-[11px] font-medium uppercase tracking-wider text-accent transition-colors hover:text-foreground sm:min-h-8"
         >
           Per-product shipping rules
+          <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
         </Link>
-      </Card>
+      </SetOnce>
 
-      {/* ---- Fixed in code ---- */}
-      <ManagedElsewhere
-        title="Currency"
-        why="SiteSettings.currency is a real column and nothing reads it — prices go through formatINR and the Razorpay order is created in INR, both hard-wired. It is listed here rather than given an input, because a control that changes nothing is worse than no control."
-        note={
-          <>
-            Fixed in code, not a setting. Selling in a second currency means
-            changing how prices are formatted and how the gateway order is
-            created — not flipping a value here.
-          </>
+      {/* ---- Fixed in code ----
+          One line, not a card: a value nobody can edit should not carry the
+          weight of the switches above it. */}
+      <FixedRow
+        label="Currency"
+        value={
+          facts.currency === "INR"
+            ? "INR (₹) · fixed"
+            : `INR (₹) · fixed — stored “${facts.currency}” is ignored`
         }
-      >
-        <ReadRow label="Stored value" value={facts.currency} />
-        <ReadRow label="Prices rendered in" value="INR (₹), fixed" tone="muted" />
-        <ReadRow label="Gateway charges in" value="INR, fixed" tone="muted" />
-      </ManagedElsewhere>
+        tone={facts.currency === "INR" ? undefined : "warn"}
+        tip="Prices are formatted in INR and the Razorpay order is created in INR, both in code. SiteSettings.currency is stored but nothing reads it, so it is shown rather than given an input — a control that changes nothing is worse than no control. Selling in a second currency is a code change, not a setting."
+      />
     </div>
   );
 }
@@ -1541,17 +1542,11 @@ export function IntegrationsSection({ f, set, isDirty, facts }: SectionProps) {
         />
 
         {gatewayLive && (
-          <div className="rounded-lg border border-danger/40 bg-danger/10 p-2.5">
-            <p className="flex items-start gap-1.5 text-xs font-medium text-danger">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-              <span>Real money can move while this is on.</span>
-            </p>
-            <p className="mt-1 pl-5 text-xs leading-relaxed text-muted-foreground">
-              Checkout uses whichever keys the deployment holds. If they are live
-              keys, a customer paying is a real charge and a real refund to undo.
-              Leave this off while you are demonstrating the store.
-            </p>
-          </div>
+          <Callout
+            tone="danger"
+            title="Real money can move while this is on."
+            tip="Checkout uses whichever keys the deployment holds. If they are live keys, a customer paying is a real charge and a real refund to undo. Leave this off while you are demonstrating the store."
+          />
         )}
       </Card>
 
@@ -1588,29 +1583,16 @@ export function IntegrationsSection({ f, set, isDirty, facts }: SectionProps) {
 
         {/* The warehouse name is not a secret — it is a label in the NimbusPost
             dashboard — and it is the single most common reason a booking goes
-            to the wrong pickup address, so it is worth stating. */}
-        <dl className="space-y-1.5 rounded-lg border border-border bg-muted/40 p-3">
+            to the wrong pickup address, so it is worth stating. Where it is
+            set used to be a second row; it is one clause of the (i) now. */}
+        <dl className="rounded-lg border border-border bg-muted/40 px-3 py-2">
           <ReadRow
             label="Pickup warehouse"
             value={facts.nimbusWarehouse || "Not set — the primary one is used"}
-            tip="NIMBUSPOST_WAREHOUSE_NAME, matched against the warehouses on your NimbusPost account by name, display name or code. A name that matches nothing falls back to your primary warehouse with a warning rather than failing the booking."
-          />
-          <ReadRow
-            label="Set in"
-            value="Deployment environment"
-            tone="muted"
-            tip="Like the key pair, this is an environment variable rather than a setting — changing it is a deployment change, not a save on this screen."
+            tip="NIMBUSPOST_WAREHOUSE_NAME, set in the deployment's environment like the keys — changing it is a redeploy, not a save here. It is matched against the warehouses on your NimbusPost account by name, display name or code; a name that matches nothing falls back to your primary warehouse with a warning rather than failing the booking."
           />
         </dl>
       </Card>
-
-      <p className="rounded-2xl border border-dashed border-border bg-muted/20 p-4 text-xs leading-relaxed text-muted-foreground">
-        <b className="text-foreground">Keys are never shown here.</b> Both key
-        pairs live in the deployment&apos;s environment variables, and this
-        screen reads only whether they are present — the values never reach the
-        browser and there is no field to type one into. To rotate a key, change
-        it where it is set and redeploy; nothing on this page needs to change.
-      </p>
     </div>
   );
 }
@@ -1623,6 +1605,11 @@ export function IntegrationsSection({ f, set, isDirty, facts }: SectionProps) {
  * the question "can I edit it here?", and it is one careless change away from
  * being unmasked. Present or absent is the whole question this screen needs to
  * answer.
+ *
+ * Configured is one quiet line — it is the normal state and needs no reading —
+ * with the variable names and the "never shown here" rule behind its `(i)`.
+ * That rule used to be a paragraph of its own at the foot of the tab. Missing
+ * is a warning, and prints the two names, because they are what to act on.
  */
 function KeyStatus({
   configured,
@@ -1633,40 +1620,33 @@ function KeyStatus({
   names: [string, string];
   what: string;
 }) {
+  if (!configured) {
+    return (
+      <Callout
+        tone="warn"
+        title={`No key pair in this deployment — ${what} is skipped whatever the switch says.`}
+        term="No key pair"
+        tip="The keys are environment variables, not settings. Add both where the deployment's environment is managed and redeploy; this screen only ever reads whether they are there."
+      >
+        Set <code className="font-mono text-[11px]">{names[0]}</code> and{" "}
+        <code className="font-mono text-[11px]">{names[1]}</code>.
+      </Callout>
+    );
+  }
+
   return (
-    <div
-      className={`flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border px-3 py-2 text-xs ${
-        configured ? "border-border bg-muted/40" : "border-orange-500/40 bg-orange-500/10"
-      }`}
-    >
-      {configured ? (
-        <KeyRound className="h-3.5 w-3.5 shrink-0 text-success" aria-hidden />
-      ) : (
-        <AlertTriangle
-          className="h-3.5 w-3.5 shrink-0 text-orange-600 dark:text-orange-400"
-          aria-hidden
-        />
-      )}
-      <span className="font-medium">
-        {configured ? "Key pair configured" : "No key pair"}
-      </span>
-      <span className="min-w-0 text-muted-foreground">
-        {configured ? (
-          <>
-            Set as{" "}
-            <code className="font-mono text-[11px]">{names[0]}</code> and{" "}
-            <code className="font-mono text-[11px]">{names[1]}</code> — values
-            are not readable from this screen.
-          </>
-        ) : (
-          <>
-            Set <code className="font-mono text-[11px]">{names[0]}</code> and{" "}
-            <code className="font-mono text-[11px]">{names[1]}</code> in the
-            deployment, or {what} is skipped whatever the switch says.
-          </>
-        )}
-      </span>
-    </div>
+    <p className="flex min-h-8 flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
+      <KeyRound className="h-3.5 w-3.5 shrink-0 text-success" aria-hidden />
+      <span className="font-medium text-foreground">Key pair set</span>
+      in the deployment
+      <InfoTip term="Keys">
+        <code className="font-mono text-[11px]">{names[0]}</code> and{" "}
+        <code className="font-mono text-[11px]">{names[1]}</code> are
+        environment variables. This screen checks only that both are present —
+        the values never reach the browser, and there is no field to type one
+        into. To rotate a key, change it where it is set and redeploy.
+      </InfoTip>
+    </p>
   );
 }
 
@@ -1689,15 +1669,53 @@ function KeyStatus({
  * `/admin/returns?tab=policy` now shows `ReturnPolicySummary`, read-only, and
  * links here through `RETURN_POLICY_HREF` — which is `?tab=returns`, i.e. this
  * tab. If that constant and this tab key ever disagree the link lands on Store.
+ *
+ * ## The one thing said around it
+ *
+ * Every other tab saves through the sticky bar, which appears the moment a
+ * field changes. This one never shows it — the card is its own writer — and
+ * its **Save policy** button is at the very end of the longest tab on the
+ * screen. An owner who changes the window and waits for the bar waits forever.
+ * So the tab opens on one line saying how it saves, with a jump to the button.
+ * Nothing inside the card is touched from here.
  */
 export function ReturnsSection({ facts }: SectionProps) {
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  function jumpToSave() {
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    // The card ends on its Save row, so aligning the card's end with the
+    // viewport's puts the button on screen without reaching inside it.
+    cardRef.current?.scrollIntoView({
+      behavior: reduce ? "auto" : "smooth",
+      block: "end",
+    });
+  }
+
   return (
     <div className="space-y-4">
-      <ReturnPolicyCard
-        initial={facts.returnPolicy}
-        facts={facts.returnFacts}
-        todayISO={facts.todayISO}
-      />
+      <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground">
+        <Save className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span>
+          Saved on its own with <b className="font-medium text-foreground">Save policy</b>, not the bar other tabs use.
+        </span>
+        <button
+          type="button"
+          onClick={jumpToSave}
+          className="inline-flex min-h-9 cursor-pointer items-center gap-1 rounded-sm text-[11px] font-medium uppercase tracking-wider text-accent transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          Go to Save
+          <ArrowDown className="h-3 w-3" aria-hidden="true" />
+        </button>
+      </p>
+
+      <div ref={cardRef} className="scroll-mb-4">
+        <ReturnPolicyCard
+          initial={facts.returnPolicy}
+          facts={facts.returnFacts}
+          todayISO={facts.todayISO}
+        />
+      </div>
     </div>
   );
 }
@@ -1725,163 +1743,5 @@ export function AccessSection({ facts }: SectionProps) {
       viewerTempAdminId={facts.viewerTempAdminId}
       todayISO={facts.todayISO}
     />
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  7. Storefront copy & product defaults                              */
-/* ------------------------------------------------------------------ */
-
-export function StorefrontSection({ f, set, isDirty }: SectionProps) {
-  return (
-    <div className="space-y-4">
-      {/* ---- The most-rewritten copy on the store ---- */}
-      <Card
-        title="Home page hero"
-        tip="The first screen a visitor sees. The headline is also the page's H1, so it is what search engines read as the subject of the site."
-      >
-        <TextField
-          label="Hero headline"
-          maxLength={120}
-          value={f.heroHeadline}
-          dirty={isDirty("heroHeadline")}
-          onChange={(v) => set("heroHeadline", v)}
-        />
-        <AreaField
-          label="Hero subtext"
-          rows={3}
-          maxLength={400}
-          value={f.heroSubtext}
-          dirty={isDirty("heroSubtext")}
-          onChange={(v) => set("heroSubtext", v)}
-          hint={`${f.heroSubtext.length}/400 characters`}
-        />
-      </Card>
-
-      {/* ---- Set once ---- */}
-      <SetOnce
-        label="About text"
-        summary={`${f.aboutText.length} characters`}
-        tip="Used on the About page and as the fallback description for link previews and search results when a page has none of its own."
-        dirty={isDirty("aboutText")}
-      >
-        <AreaField
-          label="About text"
-          rows={6}
-          maxLength={2000}
-          value={f.aboutText}
-          dirty={isDirty("aboutText")}
-          onChange={(v) => set("aboutText", v)}
-          hint={`${f.aboutText.length}/2000 characters`}
-        />
-      </SetOnce>
-
-      <SetOnce
-        label="Product page info"
-        summary="Materials & Care · Shipping & Delivery"
-        tip={
-          <>
-            The accordion under every product, written once here and inherited
-            by the whole catalogue — a product only needs its own version when
-            it genuinely differs. One line per bullet, and an empty box hides
-            that section across the store. The accordion has five blocks: two
-            are set here, <b>Product details</b> is each product&apos;s own
-            description, <b>Customer reviews</b> is driven by approved reviews,
-            and <b>Returns &amp; refunds</b> belongs to the Returns tab.
-          </>
-        }
-        dirty={anyDirty(isDirty, ["defaultMaterialsCare", "defaultShippingInfo"])}
-      >
-        <LinesField
-          label="Materials & Care"
-          value={f.defaultMaterialsCare}
-          dirty={isDirty("defaultMaterialsCare")}
-          onChange={(v) => set("defaultMaterialsCare", v)}
-          tip="Fabric, wash and iron instructions. The most common thing a shopper opens before buying a tee."
-        />
-        <LinesField
-          label="Shipping & Delivery"
-          value={f.defaultShippingInfo}
-          dirty={isDirty("defaultShippingInfo")}
-          onChange={(v) => set("defaultShippingInfo", v)}
-          tip="Dispatch time, tracking and COD availability as the customer reads them. This is copy, not a rule — it does not change what checkout actually charges."
-        />
-      </SetOnce>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  7. Notifications & email                                           */
-/* ------------------------------------------------------------------ */
-
-export function EmailSection({ f, set, isDirty }: SectionProps) {
-  const sameAsPublic =
-    f.adminNotifyEmail.trim().toLowerCase() === f.contactEmail.trim().toLowerCase();
-
-  return (
-    <div className="space-y-4">
-      <Card
-        title="Your alerts"
-        tip="Where the store writes to you — a new order, a new enquiry, a new interested customer. This address is never shown to a customer, which is why it is separate from the public contact email. Customer-facing email (the order confirmation, the status update, the return decision) goes out through Resend and replies come back to your contact email on the Store tab, not to this one."
-      >
-        <TextField
-          label="Send order & lead emails to"
-          type="email"
-          inputMode="email"
-          required
-          value={f.adminNotifyEmail}
-          dirty={isDirty("adminNotifyEmail")}
-          onChange={(v) => set("adminNotifyEmail", v)}
-          hint={
-            sameAsPublic
-              ? "Same as your public contact email — your alerts and your customers share one inbox."
-              : undefined
-          }
-        />
-      </Card>
-
-      <SetOnce
-        label="Other channels"
-        summary="Push · Newsletter"
-        tip="Two more ways the store reaches people. Neither has a setting to configure — each one is a message you compose and send, so each has its own screen."
-      >
-        <div className="flex flex-wrap gap-2">
-          <ChannelLink
-            href="/admin/notifications"
-            label="Push notifications"
-            detail="Compose and broadcast"
-          />
-          <ChannelLink
-            href="/admin/newsletter"
-            label="Newsletter"
-            detail="Subscriber list"
-          />
-        </div>
-      </SetOnce>
-    </div>
-  );
-}
-
-/** A link styled as an admin button — used for the two send-only channels. */
-function ChannelLink({
-  href,
-  label,
-  detail,
-}: {
-  href: string;
-  label: string;
-  detail: string;
-}) {
-  return (
-    <Link
-      href={href}
-      className="inline-flex min-h-11 flex-col justify-center rounded-lg border border-border bg-card px-3 py-1.5 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-    >
-      <span className="text-[11px] font-medium uppercase tracking-wider">
-        {label}
-      </span>
-      <span className="text-[10px] text-muted-foreground">{detail}</span>
-    </Link>
   );
 }

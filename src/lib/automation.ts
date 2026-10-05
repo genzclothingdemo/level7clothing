@@ -19,10 +19,12 @@ import "server-only";
  * what their store actually emailed.
  *
  * All three are gone. Every message the store sends on an event is now a row in
- * {@link SYSTEM_RULES}, pointing at an editable template, and pausing the rule
- * genuinely stops the mail. The two exceptions — the password reset and the
- * contact form — are listed in {@link DIRECT_MAIL} with the reason, and shown
- * read-only on the same screen so it stays the whole picture.
+ * {@link SYSTEM_RULES}, pointing at an editable template, and switching the
+ * alert off genuinely stops the mail — including jobs already queued, which
+ * `deliverJob` re-checks at the moment of sending. The three exceptions — the
+ * one-time code, the password reset and the contact form — are `ALWAYS_SENT`
+ * in `lib/notification-channels.ts`, and Settings → Alerts shows them as
+ * read-only rows so that screen is the whole picture.
  *
  * ## The one entry point
  *
@@ -111,6 +113,39 @@ import "server-only";
  * everything push-shaped — who has a device, what fits in a banner, what
  * counts as a failure — lives in `lib/push-dispatch.ts` so that adding it
  * could not change how email behaves.
+ *
+ * ## One writer for the rules themselves — {@link setAlert}
+ *
+ * Everything above stops **one rule** sending twice for one event. It says
+ * nothing about **two rules** for one event, and that is the duplicate the
+ * owner actually described: tick "order shipped → email → customer" on
+ * Settings → Alerts, build the same thing again on Admin → Automation, switch
+ * both on, and the customer gets two emails — each rule deduped perfectly
+ * against itself.
+ *
+ * So there is exactly one function that can insert an `AutomationRule` or
+ * change its `isActive`, and it is keyed by the alert's **signature**
+ * (`alertSignature` in `lib/notification-channels.ts` — trigger, recipient,
+ * channel and case-folded conditions; the header there says why each column
+ * is in or out). It holds three invariants, in one transaction, under a
+ * Postgres advisory lock on the alert's group so two tabs or a tab and the
+ * sync cannot interleave:
+ *
+ * 1. **Never a second row for a signature.** An existing row is found and
+ *    returned; nothing is created beside it.
+ * 2. **Never two switched-on rules that can match one event** on one channel
+ *    for one person — `{}` ("any status") beside `{status: shipped}` is two
+ *    signatures and one shipped order. Switching one on while the other is on
+ *    is refused and names the other rule.
+ * 3. **Never a new alert the store does not ship.** A row is created only for
+ *    an event in {@link SYSTEM_RULES}; the rule editor that could invent one
+ *    is gone, and so are its server actions.
+ *
+ * Its two callers are the Alerts grid and {@link syncSystemAutomation}, and
+ * the sync is the grid's create-only twin: it creates what is missing, never
+ * flips an existing row's switch, and matches by signature rather than by
+ * name — the name match is how renaming a shipped rule used to make the next
+ * restore put a second copy beside it.
  */
 
 import { prisma } from "@/lib/prisma";
@@ -118,7 +153,24 @@ import { getSettings } from "@/lib/settings";
 import { sendAutomationEmail, type EmailContext } from "@/lib/email";
 import { absoluteUrl } from "@/lib/site-url";
 import { formatINR } from "@/lib/utils";
-import { dispatchAutomationPush, pushCopyFrom } from "@/lib/push-dispatch";
+import { SYSTEM_TEMPLATES } from "@/lib/email-templates";
+import { dispatchAutomationPush, isPushRecipient, pushCopyFrom } from "@/lib/push-dispatch";
+// Pure modules, shared with the browser. The alert identity helpers live in
+// `notification-channels` so the grid's cells and this writer are keyed by the
+// same function; the stock vocabulary lives in `inventory-types` so a
+// low-stock alert agrees exactly with what the inventory screen shows.
+import {
+  ALWAYS_SENT,
+  alertGroupOf,
+  alertSignature,
+  channelLabel,
+  composeFallbackLabel,
+  conditionsOverlap,
+  eventLabel,
+  normaliseRecipient,
+  type AlertIdentity,
+} from "@/lib/notification-channels";
+import { STOCK_STATE_META, stockStateOf, type StockState } from "@/lib/inventory-types";
 // The courier table, read for its third column. `Order.deliveryStatus` holds
 // the courier's raw words, so the phase is recoverable from the row at send
 // time — which is why no call site has to remember to pass it. See the note in
@@ -146,12 +198,16 @@ export const TRIGGER_KEYS = [
   "return.status_changed",
   "chat.message_received",
   "chat.reply_sent",
+  // The first trigger that is about the shop's own shelf rather than a
+  // customer. Raised by a sweep, like the reverse-leg returns — see
+  // `sweepLowStock` for why, and `dedupeKeyFor` for "once per dip".
+  "inventory.low_stock",
 ] as const;
 
 export type TriggerKey = (typeof TRIGGER_KEYS)[number];
 
 /** What kind of row a job is about. Narrower than a string so the drain can switch. */
-export type SubjectType = "order" | "lead" | "return" | "chat";
+export type SubjectType = "order" | "lead" | "return" | "chat" | "variant";
 
 export function isTriggerKey(v: unknown): v is TriggerKey {
   return (TRIGGER_KEYS as readonly unknown[]).includes(v);
@@ -299,6 +355,30 @@ const CHAT_TOKENS: TokenSpec[] = [
   { token: "chat.unread", describes: "How many messages are waiting unread" },
   { token: "chat.url", describes: "Link to the conversation, for whoever is being told" },
   { token: "customer.phone", describes: "Their mobile, if the conversation has one" },
+];
+
+/**
+ * Tokens for one sellable size running low — the `inventory-low-stock`
+ * template's whole vocabulary.
+ *
+ * There is no customer in this event, so `customer.*` is deliberately absent:
+ * a stock alert that could render "Hi ," would be a template bug waiting for
+ * somebody to copy an order mail. `inventory.state` is the same label the
+ * inventory screen prints (`STOCK_STATE_META`), so the alert and the screen
+ * say the same word for the same shelf.
+ */
+const STOCK_TOKENS: TokenSpec[] = [
+  { token: "store.name", describes: "Your brand name" },
+  { token: "store.url", describes: "The storefront address" },
+  { token: "inventory.productName", describes: "e.g. Samurai Oversized Tee" },
+  { token: "inventory.variant", describes: "The size, e.g. Size: M — blank for a one-size product" },
+  { token: "inventory.sku", describes: "e.g. L7-SAMURAI-M" },
+  { token: "inventory.state", describes: "Low stock / Out of stock / Oversold" },
+  { token: "inventory.available", describes: "What can still be sold" },
+  { token: "inventory.onHand", describes: "Physically on the shelf" },
+  { token: "inventory.reserved", describes: "Promised to orders that have not shipped" },
+  { token: "inventory.threshold", describes: "The low-stock line this size is measured against" },
+  { token: "inventory.url", describes: "Link to the product in your admin" },
 ];
 
 const ORDER_STATUSES = [
@@ -575,6 +655,29 @@ export const TRIGGERS: TriggerSpec[] = [
     conditions: [],
     tokens: [...COMMON_TOKENS, ...CHAT_TOKENS],
   },
+  /* ---- The shelf ---- */
+  //
+  // **"Low" is `stockStateOf()`, not a second definition.** The inventory
+  // screen and the storefront read that one function against
+  // `ProductVariant.lowStockAt ?? SiteSettings.lowStockThreshold`, and so does
+  // this — an alert that disagreed with the screen it links to would be the
+  // two-homes problem in a new costume. Low, out and oversold are all "at or
+  // under the line", and one dip is one alert whichever of them it reaches.
+  //
+  // No conditions, for the reason chat has none: the shipped alert is "tell me
+  // when a size needs restocking", and a size that sold out is the most urgent
+  // form of that, not a different event.
+  {
+    key: "inventory.low_stock",
+    label: "A size runs low on stock",
+    blurb:
+      "A tracked size drops to its low-stock line or sells out. Once per dip: it does not repeat on every sale, and it comes back only after the size is restocked above the line and falls again.",
+    subjectType: "variant",
+    firesFrom:
+      "the automation pass, which checks every tracked size of an active product against its low-stock line",
+    conditions: [],
+    tokens: STOCK_TOKENS,
+  },
 ];
 
 export function triggerSpec(key: string): TriggerSpec | null {
@@ -837,6 +940,18 @@ export const SAMPLE_TOKENS: TokenBag = {
   "chat.message": "Hi — is the stone hoodie coming back in a medium?",
   "chat.unread": "2",
   "chat.url": "https://clothingdemoshop.vercel.app/admin/messages",
+  // A size two short of the line with one promised to an order — the case a
+  // preview has to show, because it is the only one where available, on-hand
+  // and reserved are three different numbers.
+  "inventory.productName": "Samurai Oversized Tee",
+  "inventory.variant": "Size: M",
+  "inventory.sku": "L7-SAMURAI-M",
+  "inventory.state": "Low stock",
+  "inventory.available": "3",
+  "inventory.onHand": "4",
+  "inventory.reserved": "1",
+  "inventory.threshold": "5",
+  "inventory.url": "https://clothingdemoshop.vercel.app/admin/inventory",
 };
 
 /** Every token any trigger offers, deduped — what a template may safely use. */
@@ -913,10 +1028,27 @@ function itemCards(items: unknown): NonNullable<EmailContext["items"]> {
  * The button follows the same rule. Before an AWB exists there is nothing to
  * track and a "Track" button would open a courier page saying the number does
  * not exist, so it says "View order" until the parcel is real.
+ *
+ * ### The event decides, not only the status
+ *
+ * A brand-new cash-on-delivery order is `pending`, and so is an order an admin
+ * sent *back* to pending. The status column cannot tell them apart, and this
+ * function used to be given nothing else — so the receipt for every COD order
+ * (and the owner's own new-order mail) headlined "We're taking another look at
+ * your order. Nothing is wrong on your side", a sentence written for a reopen.
+ * `event` is the trigger that fired, carried in the job's payload, and
+ * `order.created` now has a branch of its own whose note is derived from how
+ * the order is being paid for — the one thing a new customer wants confirmed.
  */
 function orderHeadline(order: {
+  /** The trigger this message is for, e.g. `order.created`. */
+  event: string;
   status: string;
   paymentStatus: string;
+  paymentMethod: string;
+  total: number;
+  amountPaid: number;
+  balanceDue: number;
   hasTracking: boolean;
   /** Non-null ⇒ the courier is carrying this parcel back to us. */
   rto: RtoStage | null;
@@ -960,6 +1092,24 @@ function orderHeadline(order: {
     };
   }
 
+  // 3. The order has only just been placed. Whatever the status column says —
+  //    `pending` for a COD order, `confirmed` if the store auto-confirms — this
+  //    is a receipt, and what a receipt must get right is the money.
+  if (order.event === "order.created") {
+    const next = "Tracking details follow as soon as it ships.";
+    const onlineNow = Math.max(0, order.amountPaid || order.total - order.balanceDue);
+    const method = order.paymentMethod.trim().toLowerCase();
+    const note =
+      method === "cod"
+        ? `Pay ${formatINR(order.balanceDue > 0 ? order.balanceDue : order.total)} in cash when it arrives. ${next}`
+        : order.balanceDue > 0 && onlineNow > 0
+          ? `${formatINR(onlineNow)} paid online; ${formatINR(order.balanceDue)} to pay in cash on delivery. ${next}`
+          : order.paymentStatus === "paid"
+            ? `Paid online, so there's nothing more to pay. ${next}`
+            : next;
+    return { headline: "Thanks — we've got your order.", cta: "View order", note };
+  }
+
   switch (status) {
     case "confirmed":
       return {
@@ -988,11 +1138,16 @@ function orderHeadline(order: {
         note: "Anything already paid is refunded to the original payment method.",
       };
     case "pending":
-      return {
-        headline: "We're taking another look at your order.",
-        cta: "View order",
-        note: "Nothing is wrong on your side, and nothing extra is owed.",
-      };
+      // Only a genuine move *back* to pending earns this sentence. Any other
+      // event about a pending order — a payment landing, say — is an update,
+      // not a reopen, and must not tell a new customer "nothing is wrong".
+      return order.event === "order.status_changed"
+        ? {
+            headline: "We're taking another look at your order.",
+            cta: "View order",
+            note: "Nothing is wrong on your side, and nothing extra is owed.",
+          }
+        : { headline: "There's an update on your order.", cta: "View order" };
     default:
       return { headline: "There's an update on your order.", cta: "View order" };
   }
@@ -1057,6 +1212,17 @@ function returnHeadline(status: string): { headline: string; cta: string; note?:
 
 function firstNameOf(full: string): string {
   return full.trim().split(/\s+/)[0] ?? "";
+}
+
+/**
+ * A stored photo as an address a mail client can load. Photos are either a
+ * site path (`/products/level7/…`) or an uploaded blob that is already
+ * absolute, and `absoluteUrl` only understands the first.
+ */
+function absoluteMedia(src: string | null | undefined): string | null {
+  const value = src?.trim();
+  if (!value) return null;
+  return /^https?:\/\//i.test(value) ? value : absoluteUrl(value);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1236,12 +1402,26 @@ type Resolved = {
   applies: boolean;
   /** Why it stopped applying, for the job's `error` column. */
   reason?: string;
+  /**
+   * False ⇒ there is nothing to be told about **right now**, so do not even
+   * queue a job. Only a state-driven subject sets it: a size that is not low
+   * has no dip to announce, and a cancelled job parked on a made-up dedupe key
+   * would be a row that means nothing. Absent means true, which keeps every
+   * event-driven trigger exactly as it was.
+   */
+  enqueue?: boolean;
 };
 
 async function resolveSubject(
   subjectType: SubjectType,
   entityId: string,
-  context: Record<string, string>
+  context: Record<string, string>,
+  /**
+   * The trigger this is being resolved for. The engine has always stored it on
+   * the job's payload; it is passed through now because a row's status alone
+   * cannot say what just happened — see `orderHeadline`.
+   */
+  trigger: string
 ): Promise<Resolved | null> {
   const settings = await getSettings();
   const base: TokenBag = {
@@ -1279,11 +1459,19 @@ async function resolveSubject(
     const attempted = Math.max(0, order.total - order.balanceDue);
 
     const shape = orderHeadline({
+      event: trigger,
       status: order.status,
       paymentStatus: order.paymentStatus,
+      paymentMethod: order.paymentMethod,
+      total: order.total,
+      amountPaid: order.amountPaid,
+      balanceDue: order.balanceDue,
       hasTracking: Boolean(order.trackingNumber),
       rto,
     });
+    // Nothing is collected at the door of an order that was delivered or
+    // cancelled, so "to pay on delivery" stops being a fact at that point.
+    const doorStillAhead = order.status !== "delivered" && order.status !== "cancelled";
     return {
       emailContext: {
         kicker: `Order ${order.orderNumber}`,
@@ -1295,18 +1483,27 @@ async function resolveSubject(
         facts: [
           { label: "Order total", value: formatINR(order.total) },
           { label: "Payment", value: order.paymentMethod },
-          // The split, and **only when there genuinely is one**. On a prepaid
-          // order the advance *is* the total, so printing it would put the
-          // same rupee figure in the table twice under two labels — and would
-          // then prune any template line quoting the total, because
-          // `pruneFactLines` matches on the value. A part-paid order is the
-          // only case where these are two different numbers, which is exactly
-          // the case where a customer needs to see both.
+          // The advance, only on a part-paid order — the one case where it is
+          // a different number from the total. "Advance", not "paid": on a
+          // failed advance the same line has to stay true.
           ...(order.balanceDue > 0 && attempted > 0
-            ? [
-                { label: "Online now", value: formatINR(attempted) },
-                { label: "On delivery", value: formatINR(order.balanceDue) },
-              ]
+            ? [{ label: "Advance (online)", value: formatINR(attempted) }]
+            : []),
+          // **What is still owed in cash**, for COD and for the rest of a
+          // part-paid order. A COD customer used to be told only "Payment:
+          // COD" and never the sum, and no template could add it:
+          // `pruneFactLines` drops a line whose value is already in this table,
+          // and for COD the balance *is* the order total. So the table says it.
+          ...(order.balanceDue > 0 && doorStillAhead
+            ? [{ label: "To pay on delivery", value: formatINR(order.balanceDue) }]
+            : []),
+          // Prepaid and settled: say so, rather than leave a gateway's name as
+          // the only word on how it was paid for. Scoped to the online method,
+          // because an admin can mark a *cash* order paid once it is collected.
+          ...(order.paymentMethod.trim().toLowerCase() === "razorpay" &&
+          order.paymentStatus === "paid" &&
+          order.balanceDue <= 0
+            ? [{ label: "Paid online", value: "In full" }]
             : []),
           ...(order.courier ? [{ label: "Courier", value: order.courier }] : []),
           ...(order.trackingNumber
@@ -1326,9 +1523,10 @@ async function resolveSubject(
       customerEmail: order.email,
       customerUserId: order.userId,
       deepLink: `/order/${order.orderNumber}`,
-      // There is no `/admin/orders/[id]` route — the list is the screen, and
-      // it opens the row from there.
-      adminDeepLink: "/admin/orders",
+      // There is no `/admin/orders/[id]` route — the list is the screen. `?q=`
+      // is its search, so the owner lands on this order's row rather than on
+      // the top of the list.
+      adminDeepLink: `/admin/orders?q=${encodeURIComponent(order.orderNumber)}`,
       pushTag: `l7-order-${order.orderNumber}`,
       facts: {
         status: order.status,
@@ -1412,22 +1610,35 @@ async function resolveSubject(
     }
 
     const name = lead.name ?? "";
+    // The piece itself, when it is still on sale — a nudge that lands on the
+    // product is one tap from buying; one that lands on the shop is a search.
+    const product = lead.productId
+      ? await prisma.product
+          .findUnique({ where: { id: lead.productId }, select: { slug: true, isActive: true } })
+          .catch(() => null)
+      : null;
+    const backTo = product?.isActive ? `/product/${product.slug}` : "/shop";
     return {
       emailContext: {
         kicker: "Still in your cart",
         headline: `${lead.productName} is waiting.`,
         preheader: `${lead.productName}${lead.price != null ? ` · ${formatINR(lead.price)}` : ""}`,
-        // `Lead` stores no image — it is a product name, a quantity and a
-        // price. A card with a grey placeholder still reads better than a
-        // paragraph, and the shell renders one.
         items: [
           {
             name: lead.productName,
+            // `Lead.productImage` is the photo captured when it went in the
+            // cart — site path or uploaded blob, both made absolute for mail.
+            image: absoluteMedia(lead.productImage),
             quantity: lead.quantity,
             price: lead.price != null ? formatINR(lead.price) : undefined,
           },
         ],
-        cta: { label: "Finish checkout", url: absoluteUrl("/shop") },
+        // Not "Finish checkout": neither address is a checkout, and a button
+        // should say where it goes.
+        cta: {
+          label: product?.isActive ? "See it again" : "Back to the shop",
+          url: absoluteUrl(backTo),
+        },
         note: "Our drops are small and sizes go — this isn't held for you.",
       },
       customerEmail: lead.email ?? "",
@@ -1435,7 +1646,10 @@ async function resolveSubject(
       // maybe an address. A push rule on this trigger therefore reaches only
       // somebody who *also* holds an account for that address.
       customerUserId: null,
-      deepLink: "/shop",
+      deepLink: backTo,
+      // The owner's copy — "something went in a cart" — opens the list of
+      // interested customers, not a nudge addressed to the shopper.
+      adminDeepLink: "/admin/leads",
       pushTag: `l7-cart-${lead.id}`,
       facts: { status: lead.status },
       applies,
@@ -1556,6 +1770,10 @@ async function resolveSubject(
     };
   }
 
+  if (subjectType === "variant") {
+    return resolveVariant(entityId, base);
+  }
+
   const ret = await prisma.returnRequest.findUnique({
     where: { id: entityId },
     include: {
@@ -1623,7 +1841,9 @@ async function resolveSubject(
     // The order page is where a return lives too — there is no return screen
     // of its own to open.
     deepLink: `/order/${ret.order.orderNumber}`,
-    adminDeepLink: "/admin/returns",
+    // The returns list searches by number; `status=all` so a closed return is
+    // still found rather than filtered out by the default "open" view.
+    adminDeepLink: `/admin/returns?q=${encodeURIComponent(ret.requestNumber)}&status=all`,
     pushTag: `l7-return-${ret.requestNumber}`,
     facts: { status: ret.status },
     applies: true,
@@ -1649,6 +1869,194 @@ async function resolveSubject(
       "return.trackingNumber": ret.nimbusAwb ?? "",
       "order.number": ret.order.orderNumber,
       "order.url": absoluteUrl(`/order/${ret.order.orderNumber}`),
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Stock — one alert per dip                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The store-wide low-stock line, read from the column itself.
+ *
+ * Not `getSettings()`: that DTO is the storefront's branding shape and has no
+ * inventory columns. 5 is the schema default, so a failed read degrades to the
+ * number the inventory screen would also be using.
+ */
+async function lowStockLine(): Promise<number> {
+  const row = await prisma.siteSettings
+    .findUnique({ where: { id: "main" }, select: { lowStockThreshold: true } })
+    .catch(() => null);
+  return row?.lowStockThreshold ?? 5;
+}
+
+/** `{ Size: "M", color: "red" }` → `"Size: M · color: red"`, as the ledger labels a size. */
+function comboText(combo: unknown): string {
+  if (!combo || typeof combo !== "object" || Array.isArray(combo)) return "";
+  return Object.entries(combo as Record<string, unknown>)
+    .filter(([, v]) => typeof v === "string" && v.trim())
+    .map(([k, v]) => `${k}: ${String(v).trim()}`)
+    .join(" · ");
+}
+
+/**
+ * **Which dip a size is in — the thing "one alert per dip" is keyed on.**
+ *
+ * A dip starts at the ledger entry that took the size from above its line to
+ * at-or-under it, and it lasts until an entry puts it back above. So the
+ * anchor is *the first entry after the newest one that left the size above the
+ * line* — or the size's very first entry, if it has never been above it.
+ *
+ * Why the ledger and not a column: the brief was one alert per episode, "not
+ * one per sale and not one ever", and both wrong answers are what the obvious
+ * keys give. A bare `<variantId>` alerts once in the size's whole life; a key
+ * with the stock level in it alerts on every sale down the slope. The anchor
+ * is stable for exactly as long as the dip lasts — five sales from 4 to 0 all
+ * resolve to the same entry, so the unique index refuses the second enqueue
+ * the way it refuses a second "order shipped" — and a restock followed by a
+ * new drop produces a new anchor, so the next dip is told about. No
+ * `lastAlertedAt` column, no migration, and nothing to keep in step: the
+ * ledger is append-only, so an anchor, once written, never moves.
+ *
+ * Measured against the line as it is **now**. Raising a size's line can put it
+ * into a dip without any stock moving, and the anchor then is the first entry
+ * after it was last above the new line — which is the honest answer to "since
+ * when has this been low, by the standard you just set".
+ *
+ * `null` for a size with no ledger at all: it has never had stock recorded, so
+ * there is no dip to date and nothing to announce.
+ */
+async function lowStockEpisode(
+  variantId: string,
+  line: number
+): Promise<{ id: string; at: Date } | null> {
+  // The newest entry that left the size above the line. `available` after an
+  // entry is `onHandAfter - reservedAfter` — the ledger stores both balances
+  // precisely so any row can be read on its own.
+  const healthy = await prisma.$queryRaw<{ id: string; createdAt: Date }[]>`
+    SELECT "id", "createdAt"
+    FROM "StockMovement"
+    WHERE "variantId" = ${variantId}
+      AND ("onHandAfter" - "reservedAfter") > ${line}
+    ORDER BY "createdAt" DESC, "id" DESC
+    LIMIT 1`;
+  const lastAbove = healthy[0];
+
+  const first = await prisma.stockMovement.findFirst({
+    where: {
+      variantId,
+      ...(lastAbove
+        ? {
+            OR: [
+              { createdAt: { gt: lastAbove.createdAt } },
+              { createdAt: lastAbove.createdAt, id: { gt: lastAbove.id } },
+            ],
+          }
+        : {}),
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: { id: true, createdAt: true },
+  });
+  return first ? { id: first.id, at: first.createdAt } : null;
+}
+
+/**
+ * A size, as an alert. Resolved at send time like every other subject, so a
+ * delayed alert about a size that was restocked in the meantime cancels itself
+ * instead of telling the owner to reorder something already on the shelf.
+ */
+async function resolveVariant(entityId: string, base: TokenBag): Promise<Resolved | null> {
+  const variant = await prisma.productVariant.findUnique({
+    where: { id: entityId },
+    select: {
+      id: true,
+      sku: true,
+      combo: true,
+      onHand: true,
+      reserved: true,
+      available: true,
+      lowStockAt: true,
+      isActive: true,
+      product: {
+        select: { id: true, name: true, images: true, isActive: true, trackInventory: true },
+      },
+    },
+  });
+  if (!variant) return null;
+
+  const line = variant.lowStockAt ?? (await lowStockLine());
+  const state: StockState = stockStateOf(variant, line);
+  const tracked = variant.product.trackInventory && variant.isActive && variant.product.isActive;
+  const low = tracked && state !== "ok";
+  const episode = low ? await lowStockEpisode(variant.id, line) : null;
+
+  const size = comboText(variant.combo);
+  const piece = [variant.product.name, size].filter(Boolean).join(" — ");
+  const label = STOCK_STATE_META[state].label;
+  // The product's own stock page. There is no per-size route — the product is
+  // the screen, and it lists its sizes.
+  const adminPath = `/admin/inventory/${variant.product.id}`;
+  const headline =
+    state === "out"
+      ? `${piece} has sold out.`
+      : state === "oversold"
+        ? `${piece} is oversold.`
+        : `${piece} is running low.`;
+
+  return {
+    emailContext: {
+      kicker: "Stock",
+      headline,
+      preheader: `${label} · ${variant.available} available · line is ${line}`,
+      items: [
+        {
+          name: variant.product.name,
+          image: absoluteMedia(variant.product.images[0]),
+          options: size || undefined,
+        },
+      ],
+      facts: [
+        { label: "Available", value: String(variant.available) },
+        { label: "On the shelf", value: String(variant.onHand) },
+        ...(variant.reserved > 0
+          ? [{ label: "Promised to orders", value: String(variant.reserved) }]
+          : []),
+        { label: "Low-stock line", value: String(line) },
+      ],
+      cta: { label: "Open in your admin", url: absoluteUrl(adminPath) },
+      note:
+        state === "oversold"
+          ? "More is promised to open orders than is on the shelf — some of them cannot be filled from stock."
+          : undefined,
+    },
+    // Nobody but the owner is ever told about the shelf.
+    customerEmail: "",
+    customerUserId: null,
+    deepLink: adminPath,
+    adminDeepLink: adminPath,
+    pushTag: `l7-stock-${variant.id}`,
+    facts: {
+      state,
+      // Not a condition anybody sets — the dedupe key reads it.
+      episode: episode?.id ?? "",
+    },
+    applies: low,
+    reason: !tracked
+      ? "Cancelled — this size is no longer tracked or on sale."
+      : "Cancelled — the size was restocked above its line before this was due.",
+    enqueue: low && episode !== null,
+    tokens: {
+      ...base,
+      "inventory.productName": variant.product.name,
+      "inventory.variant": size,
+      "inventory.sku": variant.sku,
+      "inventory.state": label,
+      "inventory.available": String(variant.available),
+      "inventory.onHand": String(variant.onHand),
+      "inventory.reserved": String(variant.reserved),
+      "inventory.threshold": String(line),
+      "inventory.url": absoluteUrl(adminPath),
     },
   };
 }
@@ -1722,6 +2130,7 @@ export function describeConditions(trigger: string, conditions: Record<string, s
  * | `return.status_changed`  | `<returnId>:<newStatus>` | once per return per status |
  * | `chat.message_received`  | `<threadId>:<burstAnchor>` | once per run of messages |
  * | `chat.reply_sent`        | `<threadId>:<burstAnchor>` | once per run of messages |
+ * | `inventory.low_stock`    | `<variantId>:low:<dipAnchor>` | once per dip under the line |
  *
  * The status variant is the interesting one and it is not an optimisation: with
  * a bare `<orderId>` a single "keep the customer posted" rule would email on
@@ -1769,6 +2178,11 @@ export function dedupeKeyFor(
   if (trigger === "chat.message_received" || trigger === "chat.reply_sent") {
     return `${entityId}:${facts.burst ?? "none"}`;
   }
+  // Once per dip. The anchor is the ledger entry that took the size under its
+  // line — see `lowStockEpisode` for why that is stable for exactly one dip.
+  if (trigger === "inventory.low_stock") {
+    return `${entityId}:low:${facts.episode || "none"}`;
+  }
   return entityId;
 }
 
@@ -1793,11 +2207,16 @@ export type TriggerSubject = {
   /**
    * When the thing this trigger is about actually happened.
    *
-   * Only the sweep sets it, and it exists for one reason: **a rule must never
-   * fire for something that happened before the rule was written.** The sweep
-   * re-offers every recent return on every pass, so without this, creating a
-   * "tell them it's refunded" rule on a Tuesday would mail everyone refunded
-   * the week before — people who have already had their money and their email.
+   * Only the sweeps set it, and it exists for one reason: **a rule must never
+   * fire for something that happened before the rule was switched on.** The
+   * return sweep re-offers every recent return on every pass, so without this,
+   * switching on "tell them it's refunded" on a Tuesday would mail everyone
+   * refunded the week before — people who have already had their money.
+   *
+   * **Switched on, not created** — see {@link liveSince}. The guard used to
+   * compare against `createdAt`, which is right for a rule written a minute
+   * ago and wrong for one that shipped paused on the 23rd and was ticked on
+   * today: everything since the 23rd was fair game.
    *
    * A direct call site leaves it undefined, because there the trigger *is* the
    * event: it is happening now, and every active rule should see it.
@@ -1813,6 +2232,22 @@ export type TriggerOutcome = {
 };
 
 const NOTHING: TriggerOutcome = { matched: 0, queued: 0, sent: 0, skipped: 0 };
+
+/**
+ * When a rule last became able to fire — the line a swept event's
+ * `occurredAt` is held against.
+ *
+ * `updatedAt` moves only when the rule's switch or its template link changes:
+ * {@link setAlert} (on and off) and the sync's template repair are the only
+ * Prisma writes to this table, and the engine's own run counters go through
+ * raw SQL precisely so that they do not touch it. So a rule ticked on today
+ * reads today, and one never touched since it was created reads `createdAt`.
+ * Without a schema change there is no `activatedAt`; this is the same fact,
+ * kept honest by keeping every other writer off the column.
+ */
+function liveSince(rule: { createdAt: Date; updatedAt: Date }): Date {
+  return rule.updatedAt > rule.createdAt ? rule.updatedAt : rule.createdAt;
+}
 
 /**
  * **Run every active rule for one trigger. The only function to call from
@@ -1855,7 +2290,8 @@ export async function runAutomationTrigger(
     const resolved = await resolveSubject(
       spec.subjectType,
       subject.id,
-      subject.context ?? {}
+      subject.context ?? {},
+      trigger
     );
     if (!resolved) {
       console.warn(
@@ -1863,13 +2299,16 @@ export async function runAutomationTrigger(
       );
       return NOTHING;
     }
+    // A state-driven subject with nothing to announce right now — a size that
+    // is back above its line by the time the sweep reached it. See `enqueue`.
+    if (resolved.enqueue === false) return NOTHING;
 
     const now = new Date();
     const out: TriggerOutcome = { matched: 0, queued: 0, sent: 0, skipped: 0 };
 
     for (const rule of rules) {
       // A rule is not retroactive. See `TriggerSubject.occurredAt`.
-      if (subject.occurredAt && subject.occurredAt < rule.createdAt) {
+      if (subject.occurredAt && subject.occurredAt < liveSince(rule)) {
         out.skipped += 1;
         continue;
       }
@@ -1910,13 +2349,15 @@ export async function runAutomationTrigger(
         throw err;
       }
 
-      // Counters are best-effort telemetry for the admin list, never a lock.
-      await prisma.automationRule
-        .update({
-          where: { id: rule.id },
-          data: { lastRunAt: now, runCount: { increment: 1 } },
-        })
-        .catch(() => {});
+      // Counters are best-effort telemetry, never a lock — and written in raw
+      // SQL on purpose. A Prisma `update` would stamp `@updatedAt`, and
+      // `updatedAt` is what `liveSince` reads as "switched on at": every firing
+      // would then move that line forward, and a sweep would skip a courier
+      // scan that landed a minute before the last send.
+      await prisma.$executeRaw`
+        UPDATE "AutomationRule"
+        SET "lastRunAt" = ${now}, "runCount" = "runCount" + 1
+        WHERE "id" = ${rule.id}`.catch(() => {});
 
       if (rule.delayMinutes > 0) {
         out.queued += 1;
@@ -1968,6 +2409,9 @@ async function deliverJob(jobId: string): Promise<DeliveryResult> {
       : {};
   const entityId = String(payload.entityId ?? "");
   const context = (payload.context ?? {}) as Record<string, string>;
+  // Stored at enqueue since the first version of this table, so every job —
+  // including one queued before the headline learned about events — has it.
+  const jobTrigger = String(payload.trigger ?? "");
 
   // --- The claim. One winner, decided by Postgres, not by this process. ---
   const claim = await prisma.automationJob.updateMany({
@@ -2019,6 +2463,16 @@ async function deliverJob(jobId: string): Promise<DeliveryResult> {
 
   try {
     const rule = job.rule;
+    // **Switched off means stopped, including what was already queued.** A
+    // 24-hour cart nudge enqueued this morning and an alert switched off at
+    // lunch used to go out anyway, because nothing between the queue and the
+    // send asked the rule again. Re-read here, at the moment of sending — the
+    // same late resolution as the subject below — so the switch on Settings →
+    // Alerts is honest about messages already on their way. Cancelled, not
+    // failed: there is nothing to fix, and a retry re-asks the same question.
+    if (!rule.isActive) {
+      return await cancel("Cancelled — the alert was switched off before this was due.");
+    }
     if (!isActionKey(rule.action)) {
       return await cancel(
         `Action "${rule.action}" is not implemented in this build, so nothing was sent.`
@@ -2031,7 +2485,7 @@ async function deliverJob(jobId: string): Promise<DeliveryResult> {
     }
 
     const subjectType = (job.subjectType as SubjectType) ?? "order";
-    const resolved = await resolveSubject(subjectType, entityId, context);
+    const resolved = await resolveSubject(subjectType, entityId, context, jobTrigger);
     if (!resolved) {
       return await cancel(`The ${subjectType} this job was about no longer exists.`);
     }
@@ -2151,6 +2605,12 @@ async function deliverJob(jobId: string): Promise<DeliveryResult> {
       subject,
       bodyText,
       title: rule.name,
+      // Stated, never inferred. `resolveSubject` builds the structure in the
+      // customer's voice ("We couldn't take your payment."), and the shell in
+      // `lib/email.ts` re-voices it for the owner only when it knows the mail
+      // is theirs. Inferring that from where the button points was a fallback
+      // for callers written before the field existed; the engine knows.
+      audience: rule.recipient === "admin" ? "admin" : "customer",
       // The item card, the numbers and the one button. Resolved from the row
       // in `resolveSubject`, never typed into a template — see `emailContext`.
       //
@@ -2202,6 +2662,8 @@ export type DrainReport = {
   skipped: number;
   /** Return rows the sweep offered to the engine before draining. */
   swept: number;
+  /** Tracked sizes found at or under their line and offered as a low-stock dip. */
+  stock: number;
 };
 
 /**
@@ -2264,6 +2726,117 @@ async function sweepReturnStatuses(limit = 100): Promise<number> {
 }
 
 /**
+ * Find every tracked size that is at or under its line, and offer each one's
+ * current dip to the engine.
+ *
+ * **Why a sweep, the same argument as the returns above.** Stock moves in
+ * `lib/inventory.ts` — at checkout, at shipping, on a cancellation, a return,
+ * an RTO and every hand-recorded entry — and none of those call sites belong
+ * to the engine. A sweep reads the one thing all of them leave behind (the
+ * variant's counters and the ledger) without any of them having to know alerts
+ * exist. It is also why the alert cannot disagree with the screen: both read
+ * `stockStateOf` against the same line.
+ *
+ * **Why re-offering is safe on every pass**, and neither guard is a "have we
+ * told them?" query:
+ *
+ * 1. The dedupe key is `<variantId>:low:<dipAnchor>` ({@link lowStockEpisode}),
+ *    so the unique index refuses the second enqueue for a dip already told.
+ * 2. `occurredAt` is when the dip began, so an alert switched on today does not
+ *    announce every size that has been low since last month — the same
+ *    no-retroactivity rule the return sweep keeps.
+ *
+ * {@link notifyLowStock} is the same routine for a caller that has just moved
+ * stock and would rather not wait for the next pass; both paths land on the
+ * same key, so calling both costs nothing.
+ */
+async function sweepLowStock(limit = 100): Promise<number> {
+  try {
+    const live = await prisma.automationRule.count({
+      where: { trigger: "inventory.low_stock", isActive: true },
+    });
+    if (live === 0) return 0;
+
+    const line = await lowStockLine();
+    // The highest line any size is measured against bounds the scan. A size
+    // with its own `lowStockAt` above the store line still has to be found.
+    const highest = await prisma.productVariant.aggregate({
+      where: { isActive: true, product: { trackInventory: true } },
+      _max: { lowStockAt: true },
+    });
+    const ceiling = Math.max(line, highest._max.lowStockAt ?? line);
+
+    const candidates = await prisma.productVariant.findMany({
+      where: {
+        isActive: true,
+        available: { lte: ceiling },
+        product: { trackInventory: true, isActive: true },
+      },
+      orderBy: { available: "asc" },
+      take: limit,
+      select: { id: true },
+    });
+
+    return await notifyLowStock(candidates.map((c) => c.id), line);
+  } catch (err) {
+    console.error("[automation] stock sweep failed:", err);
+    return 0;
+  }
+}
+
+/**
+ * Offer these sizes' current dips to the engine. Returns how many were at or
+ * under their line.
+ *
+ * Exported for the inventory side: calling it after a movement makes the
+ * alert immediate instead of waiting for the next automation pass. It cannot
+ * throw and cannot double-send — the sweep and a direct call resolve the same
+ * dip to the same key.
+ */
+export async function notifyLowStock(variantIds: string[], storeLine?: number): Promise<number> {
+  try {
+    if (variantIds.length === 0) return 0;
+    const live = await prisma.automationRule.count({
+      where: { trigger: "inventory.low_stock", isActive: true },
+    });
+    if (live === 0) return 0;
+
+    const line = storeLine ?? (await lowStockLine());
+    const rows = await prisma.productVariant.findMany({
+      where: { id: { in: [...new Set(variantIds)] } },
+      select: {
+        id: true,
+        onHand: true,
+        reserved: true,
+        available: true,
+        lowStockAt: true,
+        isActive: true,
+        product: { select: { trackInventory: true, isActive: true } },
+      },
+    });
+
+    let low = 0;
+    // Sequential, for the pool — see the drain below.
+    for (const row of rows) {
+      if (!row.isActive || !row.product.trackInventory || !row.product.isActive) continue;
+      const own = row.lowStockAt ?? line;
+      if (stockStateOf(row, own) === "ok") continue;
+      const episode = await lowStockEpisode(row.id, own);
+      if (!episode) continue;
+      low += 1;
+      await runAutomationTrigger("inventory.low_stock", {
+        id: row.id,
+        occurredAt: episode.at,
+      });
+    }
+    return low;
+  } catch (err) {
+    console.error("[automation] low-stock check failed:", err);
+    return 0;
+  }
+}
+
+/**
  * One full pass of the engine: **sweep, then deliver every job whose time has
  * come.** Called by `/api/cron/automation`, by `/api/cron/nimbus-sync` (which
  * carries the schedule on the Hobby plan's two-cron budget) and by the "Run due
@@ -2283,11 +2856,12 @@ async function sweepReturnStatuses(limit = 100): Promise<number> {
  * whatever is left is picked up on the next run.
  */
 export async function drainDueJobs(limit = 50): Promise<DrainReport> {
-  const report: DrainReport = { due: 0, sent: 0, failed: 0, skipped: 0, swept: 0 };
+  const report: DrainReport = { due: 0, sent: 0, failed: 0, skipped: 0, swept: 0, stock: 0 };
   // Before the queue, ask what changed while nobody was looking. A rule with no
   // delay sends during this call; one with a delay queues a job the loop below
   // will not find due yet, which is correct.
   report.swept = await sweepReturnStatuses();
+  report.stock = await sweepLowStock();
   try {
     const due = await prisma.automationJob.findMany({
       where: { status: "pending", runAt: { lte: new Date() } },
@@ -2313,527 +2887,26 @@ export async function drainDueJobs(limit = 50): Promise<DrainReport> {
 /*  What the store ships with                                          */
 /* ------------------------------------------------------------------ */
 
-/**
- * **Every email this store sends, as data.**
- *
- * Before this list existed the shipped rules were three rows somebody had typed
- * into the live database by hand, and the mail that actually reached customers
- * was hardcoded HTML in `lib/email.ts` firing *beside* them. Two senders for
- * one event, which is why the seeded order rules had to be switched off.
- *
- * Now there is one place. A message the store sends is a row here, an editable
- * template in the admin, and a rule the owner can pause — and pausing it
- * genuinely stops the mail, because nothing else sends.
- *
- * `key` is the stable handle. It is generated once on create and never written
- * by the form (see `templateRow` in `actions/automation.ts`), which is what
- * stops a system template being renamed into deletability.
- */
-export type SystemTemplate = {
-  key: string;
-  name: string;
-  subject: string;
-  body: string;
-};
-
-export const SYSTEM_TEMPLATES: SystemTemplate[] = [
-  /* ---- Orders, forward ---- */
-  {
-    key: "order-received",
-    name: "Order received",
-    subject: "We've got your order {{order.number}}",
-    body: `Hi {{customer.firstName}},
-
-Thank you for your order. Here's what you bought:
-
-{{order.items}}
-
-Total: {{order.total}}
-Payment: {{order.paymentMethod}}
-Delivering to: {{order.address}}
-
-You can check on it any time here:
-{{order.url}}
-
-We'll email you again the moment it's on its way.
-
-{{store.name}}`,
-  },
-  {
-    key: "order-admin-new",
-    name: "New order (to you)",
-    subject: "New order {{order.number}} — {{order.total}}",
-    body: `{{order.number}} just came in.
-
-{{order.items}}
-
-Total: {{order.total}}
-Payment: {{order.paymentMethod}}
-
-{{customer.name}}
-{{customer.email}} · {{customer.phone}}
-{{order.address}}
-
-Note from the customer: {{order.note}}
-
-Open the order:
-{{order.url}}`,
-  },
-  {
-    key: "order-confirmed",
-    name: "Order confirmed",
-    subject: "Your {{store.name}} order {{order.number}} is confirmed",
-    body: `Hi {{customer.firstName}},
-
-Your order {{order.number}} is confirmed and we've started packing it.
-
-{{order.items}}
-
-Total: {{order.total}}
-Paid by: {{order.paymentMethod}}
-
-You can check on it any time here:
-{{order.url}}
-
-Thanks for shopping with us.
-{{store.name}}`,
-  },
-  {
-    key: "order-shipped",
-    name: "Order shipped",
-    subject: "{{order.number}} is on its way",
-    body: `Hi {{customer.firstName}},
-
-Good news — your order {{order.number}} has left us.
-
-Courier: {{order.courier}}
-Tracking number: {{order.trackingNumber}}
-
-Track it here:
-{{order.trackingUrl}}
-
-Or see everything about the order here:
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "order-delivered",
-    name: "Order delivered",
-    subject: "Your {{store.name}} order has arrived",
-    body: `Hi {{customer.firstName}},
-
-{{order.number}} has been delivered. We hope it's everything you wanted.
-
-If anything isn't right, reply to this email or start a return from your order page:
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "order-cancelled",
-    name: "Order cancelled",
-    subject: "Your {{store.name}} order {{order.number}} has been cancelled",
-    body: `Hi {{customer.firstName}},
-
-Your order {{order.number}} has been cancelled.
-
-If that's a surprise, tell us straight away at {{store.email}} and we'll sort it out.
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "order-reopened",
-    name: "Order back to pending",
-    subject: "We're taking another look at your order {{order.number}}",
-    body: `Hi {{customer.firstName}},
-
-Your order {{order.number}} has gone back to being prepared while we check something. Nothing is wrong on your side and nothing extra is owed.
-
-We'll write again as soon as it moves.
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-
-  /* ---- The money, which moves on its own ---- */
-  //
-  // **Two customer templates, not one, and that is the whole point of them.**
-  // A prepaid order and a part-paid one fail differently: prepaid means the
-  // entire total did not go through, partial means only the *advance* did and
-  // the balance was never going online at all. One template covering both would
-  // have to be vague exactly where a worried customer needs a number, or quote
-  // `{{order.total}}` — a figure a part-paid shopper was never charged. The
-  // rules that carry them are conditioned on `paymentMethod`, so neither can
-  // reach the wrong order.
-  //
-  // Nothing here says "declined". The bank's reason is not visible to us, and
-  // guessing at it in an inbox preview — where a subject line is read before
-  // the mail is opened — is how a customer concludes their card is blocked
-  // when the app simply timed out.
-  {
-    key: "payment-failed-prepaid",
-    name: "Payment didn't go through",
-    subject: "We couldn't take the payment for {{order.number}}",
-    body: `Hi {{customer.firstName}},
-
-The payment for your order {{order.number}} didn't go through, so the order isn't confirmed. We haven't taken any money — if your bank is showing a hold on {{payment.attempted}}, it clears on its own within a few days.
-
-Nothing is held for you while an order is unpaid, so the quickest fix is to place it again. A different card or UPI app usually works first time:
-{{store.url}}
-
-If it keeps failing, reply to this email or write to {{store.email}} and we'll take the order by hand rather than leave you fighting a payment page.
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "payment-failed-partial",
-    name: "Advance payment didn't go through",
-    subject: "We couldn't take the advance for {{order.number}}",
-    body: `Hi {{customer.firstName}},
-
-The advance payment for your order {{order.number}} didn't go through, so the order isn't confirmed. That was the {{payment.attempted}} part — the rest of the order was always going to be cash when it reaches you, and none of it has been taken.
-
-Still to pay on delivery: {{order.balanceDue}}
-
-If your bank is showing a hold on {{payment.attempted}}, it clears on its own within a few days.
-
-Nothing is held for you while an order is unpaid, so the quickest fix is to place it again. A different card or UPI app usually works first time:
-{{store.url}}
-
-If you'd rather not pay an advance online at all, reply to this email and tell us — we'd rather sort it out than lose the order.
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "payment-failed-admin",
-    name: "A payment failed (to you)",
-    // **Not a single token in the subject or the opening line that can come
-    // back blank**, and that is a rule rather than a style. This one rule has
-    // no `paymentMethod` condition — the owner should hear about a failed
-    // payment whatever the method — so it is the one template that can be
-    // reached by an order where nothing was ever charged online. It used to
-    // open with `{{payment.attempted}}`, which on such an order rendered
-    // "Payment failed on L7-1042 — didn't arrive" and a body starting with a
-    // space. The amount now sits on a `Label: {{token}}` line, which
-    // `pruneFactLines` deletes whole when there is nothing to put in it.
-    subject: "Payment failed on {{order.number}}",
-    body: `The payment on {{order.number}} did not go through. Nothing has been collected and the order is sitting unconfirmed.
-
-Attempted online: {{payment.attempted}}
-Attempted as: {{order.paymentMethod}}
-Still to collect on delivery: {{order.balanceDue}}
-
-{{customer.name}}
-{{customer.email}} · {{customer.phone}}
-
-This is the most valuable person in your store right now — they picked the pieces, typed the address and got as far as the payment page. A phone call usually recovers it.
-
-Open the order:
-{{order.url}}`,
-  },
-
-  /* ---- The parcel that turned around ---- */
-  //
-  // **None of these may use the word "cancelled", and that is the bug they
-  // exist to fix.** `mapNimbusStatus` stores a completed RTO as the order
-  // status `cancelled`, so before the `order.rto` trigger existed the customer
-  // was emailed "your order has been cancelled" for a parcel they had not
-  // cancelled, that was physically travelling back, and that they may have
-  // already paid for.
-  //
-  // The voice is the one CLAUDE.md sets for the reverse leg: a parcel going the
-  // other way is not an order making progress, so none of this borrows the
-  // forward wording. What a customer wants to know is that they have not lost
-  // their money and can still have the thing; what the owner wants to know is
-  // that stock is coming back and a refund may be owed.
-  {
-    key: "order-rto-returning",
-    name: "Parcel coming back (RTO)",
-    subject: "Your order {{order.number}} is on its way back to us",
-    body: `Hi {{customer.firstName}},
-
-Your order {{order.number}} couldn't be delivered, so the courier is bringing it back to us. You haven't cancelled anything, nothing has gone wrong at your end, and you haven't lost the order.
-
-This usually means nobody was in, the rider couldn't find the address, or the parcel was refused at the door by mistake.
-
-Reply to this email and we'll send it straight out again — a phone number that reaches you during the day is normally all it takes. If you'd rather not go ahead now, say so and we'll refund anything you've already paid.
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "order-rto-returned",
-    name: "Parcel back with us (RTO)",
-    subject: "Your order {{order.number}} has reached us again",
-    body: `Hi {{customer.firstName}},
-
-The parcel for order {{order.number}} is back with us after the delivery didn't succeed. Nothing was cancelled by you.
-
-Paid online so far: {{order.amountPaid}}
-
-Tell us to send it out again and we will, to the same address or a different one. If you'd rather leave it, reply and we'll refund anything you've paid — you don't have to do anything else.
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "order-rto-admin",
-    name: "A parcel came back to you (to you)",
-    subject: "RTO — {{order.number}} has come back",
-    body: `{{order.number}} failed to deliver and the parcel is back with you. The order status reads cancelled because there is no RTO status to store, but the customer cancelled nothing.
-
-Courier's last word: {{rto.scan}}
-Last seen: {{rto.location}}
-Paid online so far: {{order.amountPaid}}
-
-{{customer.name}}
-{{customer.email}} · {{customer.phone}}
-
-Two things: put the stock back, and check whether a refund is owed — anything already paid online is the customer's money, and this parcel is not going out again unless you send it.
-
-Open the order:
-{{order.url}}`,
-  },
-
-  /* ---- Carts ---- */
-  {
-    key: "lead-admin-new",
-    name: "Something went in a cart (to you)",
-    subject: "{{cart.productName}} just went in a cart",
-    body: `Someone added {{cart.productName}} to their cart.
-
-Quantity: {{cart.quantity}}
-Price: {{cart.price}}
-
-{{customer.name}}
-{{customer.email}} · {{customer.phone}}
-
-Everyone who's shown interest is in your admin, under Interested customers.`,
-  },
-  {
-    key: "abandoned-cart",
-    name: "Abandoned cart nudge",
-    subject: "Still thinking about {{cart.productName}}?",
-    body: `Hi {{customer.firstName}},
-
-You left {{cart.productName}} in your cart yesterday. It's still there — but our drops are small, and sizes go.
-
-Pick up where you left off:
-{{cart.url}}
-
-If you changed your mind, no hard feelings.
-
-{{store.name}}`,
-  },
-
-  /* ---- Returns: the parcel coming back ---- */
-  //
-  // These are new. Until now a return could be raised, approved, collected,
-  // delivered back and refunded without the customer hearing a word — the only
-  // sender that existed spoke about an order moving *forward* ("your order has
-  // shipped"), which is actively wrong for a parcel travelling the other way.
-  {
-    key: "return-requested",
-    name: "Return received",
-    subject: "We've got your return request {{return.number}}",
-    body: `Hi {{customer.firstName}},
-
-We've received your request to return {{return.productName}} from order {{order.number}}.
-
-Reason given: {{return.reason}}
-
-We'll review it and write back within 24 hours. Nothing to do at your end yet — please keep the piece and its packaging as it is.
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "return-admin-new",
-    name: "A return was requested (to you)",
-    subject: "Return requested — {{return.number}} on {{order.number}}",
-    body: `{{customer.name}} wants to send something back.
-
-{{return.productName}} × {{return.quantity}}
-Reason given: {{return.reason}}
-
-Order {{order.number}}
-{{customer.email}} · {{customer.phone}}
-
-Approve or decline it in your admin, under Returns. Nothing moves until you do.`,
-  },
-  {
-    key: "return-approved",
-    name: "Return approved",
-    subject: "Your return {{return.number}} is approved",
-    body: `Hi {{customer.firstName}},
-
-Good news — we've approved your return of {{return.productName}}.
-
-Refund once it's back with us: {{return.refundAmount}}
-{{return.note}}
-
-Please pack the piece as you received it. If we've booked a pickup, the courier will come to your address — you'll see the details below once they're allocated.
-
-Courier: {{return.courier}}
-Pickup tracking: {{return.trackingNumber}}
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-  //
-  // **The two endings a return can have that are not a refund**, and the pair
-  // this store had no words for at all. Both statuses were reachable — from
-  // `decideReturn` and from the admin's status control — and both raised
-  // `return.status_changed` perfectly well; there was simply no rule listening
-  // on either, so the trigger fired into an empty room and the customer heard
-  // nothing about a request they were waiting on. A refusal nobody is told
-  // about is worse than a refusal.
-  //
-  // Neither subject line says "rejected" or "cancelled". An inbox preview is
-  // read before the mail is opened, and a one-word verdict there is a worse
-  // way to learn this than a sentence inside.
-  {
-    key: "return-rejected",
-    name: "Return declined",
-    subject: "About your return request {{return.number}}",
-    body: `Hi {{customer.firstName}},
-
-We've looked at your request to return {{return.productName}} from order {{order.number}}, and we aren't able to accept it this time.
-
-{{return.note}}
-
-If you think we've got that wrong, reply to this email or write to {{store.email}} — a person reads it, and we'd rather sort it out than leave it.
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "return-cancelled",
-    name: "Return closed",
-    subject: "Your return {{return.number}} has been closed",
-    body: `Hi {{customer.firstName}},
-
-Your request to return {{return.productName}} has been closed, and nothing further will happen with it. You keep the piece and nothing is owed either way.
-
-{{return.note}}
-
-If that isn't what you were expecting, write to {{store.email}} and we'll pick it back up.
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "return-picked-up",
-    name: "Return collected",
-    subject: "Your return {{return.number}} is on its way back",
-    body: `Hi {{customer.firstName}},
-
-The courier has collected {{return.productName}}.
-
-Courier: {{return.courier}}
-Tracking: {{return.trackingNumber}}
-
-We'll email you again when it reaches us, and your refund follows from there.
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "return-received",
-    name: "Return arrived with us",
-    subject: "Your return {{return.number}} has reached us",
-    body: `Hi {{customer.firstName}},
-
-{{return.productName}} is back with us. We're checking it over now.
-
-Refund due: {{return.refundAmount}}
-
-You'll get one more email the moment the money is on its way.
-
-{{order.url}}
-
-{{store.name}}`,
-  },
-  {
-    key: "return-refunded",
-    name: "Refund sent",
-    subject: "Your refund for {{return.number}} is on its way",
-    body: `Hi {{customer.firstName}},
-
-Your refund of {{return.refundAmount}} for {{return.productName}} has been sent.
-
-Depending on your bank it can take a few working days to appear. If it hasn't landed in five, reply to this email and we'll chase it.
-
-{{order.url}}
-
-Thanks for your patience.
-{{store.name}}`,
-  },
-
-  /* ---- Chat: the only event here that is not about an order ---- */
-  //
-  // **Both of these open with the message itself, on its own paragraph, and
-  // that is deliberate.** `pushCopyFrom` takes the subject as the banner title
-  // and the *opening paragraph* as the banner body, so writing anything else
-  // first ("You have a new message.") would spend the one line a phone shows
-  // on something the title already said. Quoting it first means the banner
-  // carries what was actually written — which is the whole difference between
-  // a notification worth tapping and a notification worth muting.
-  //
-  // The quote marks are load-bearing too: they stop the greeting filter in
-  // `pushCopyFrom` from eating "Hi there," off the front of a real reply.
-  {
-    key: "chat-admin-new",
-    name: "Somebody wrote in chat (to you)",
-    subject: "New chat message on {{store.name}}",
-    body: `"{{chat.message}}"
-
-{{customer.name}}
-{{customer.email}} · {{customer.phone}}
-
-Messages waiting to be read: {{chat.unread}}
-
-Open the conversation:
-{{chat.url}}`,
-  },
-  {
-    key: "chat-reply",
-    name: "We replied in chat",
-    subject: "{{store.name}} replied to your message",
-    body: `"{{chat.message}}"
-
-That's our reply to the message you left in the chat on our site. Open the store and the chat panel picks up where you left off:
-{{chat.url}}
-
-If you'd rather write back by email, reach us at {{store.email}}.
-
-{{store.name}}`,
-  },
-];
 
 /**
- * The rules those templates hang on.
+ * The rules those templates hang on — **and the complete list of alerts this
+ * store can have.** Settings → Alerts draws one row per distinct
+ * (trigger, conditions, recipient) here and lets any implemented channel be
+ * ticked on it; nothing outside this list can be created.
  *
- * `name` is the stable handle — `AutomationRule` has no `key` column, and
- * adding one is a migration this change was not allowed to make. That is good
- * enough: {@link syncSystemAutomation} only ever *creates* a rule whose name it
- * cannot find, so renaming one in the admin makes it yours and the shipped copy
- * comes back beside it, rather than silently overwriting what you wrote.
+ * **The signature is the handle, not the name.** `AutomationRule` has no key
+ * column, and the name used to stand in for one: {@link syncSystemAutomation}
+ * created any shipped rule whose *name* it could not find. That made a rename
+ * a duplicate generator — rename "Tell the customer their order has shipped"
+ * and the next restore put a second copy beside it, both switched on, both
+ * emailing. The sync now asks {@link setAlert}, which matches on
+ * `alertSignature`, so a row is recognised by what it does. Names are labels.
+ *
+ * **Within one (trigger, recipient) the condition sets here are disjoint** —
+ * one status each, one payment method each, one RTO stage each. That is what
+ * lets any channel be ticked on any row without two rows ever matching one
+ * event; `setAlert` still refuses an overlap, so a future edit that broke this
+ * would be caught at the first tick rather than in a customer's inbox.
  *
  * ### Why every status has its own rule
  *
@@ -3069,10 +3142,12 @@ export const SYSTEM_RULES: SystemRule[] = [
   //    the same sentence is the `defaultReturnsInfo` trap in a new costume.
   // 2. **They ship switched off.** A channel the owner has never seen should
   //    not start notifying their customers because a deploy happened. Switching
-  //    one on is one tap in Admin → Automation, and `syncSystemAutomation`
+  //    one on is one tick on Settings → Alerts, and `syncSystemAutomation`
   //    never un-pauses anything, so that choice sticks.
-  // 3. **Only the moments that are worth a lock screen.** An order confirmed,
-  //    an order shipped, and a chat message in either direction. Cancelled,
+  // 3. **Only the moments that are worth a lock screen.** For the customer:
+  //    confirmed, shipped, delivered, and a reply in chat. For the owner: a
+  //    new order, a customer writing in, a return waiting for a decision and a
+  //    payment that failed — each one something they act on. Cancelled,
   //    refunded and "we've got your return request" are conversations, not
   //    alerts, and they stay with email — a banner cannot hold the
   //    explanation those need, and waking somebody to give them half of one
@@ -3098,6 +3173,39 @@ export const SYSTEM_RULES: SystemRule[] = [
     conditions: { status: "shipped" },
     templateKey: "order-shipped",
     recipient: "customer",
+    action: "push",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    name: "Notify the customer their order was delivered",
+    trigger: "order.status_changed",
+    conditions: { status: "delivered" },
+    templateKey: "order-delivered",
+    recipient: "customer",
+    action: "push",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    // The owner's phone, for the one event a shop exists for. Reaches a device
+    // only through an account holding the alert address — see push-dispatch.
+    name: "Notify me when an order comes in",
+    trigger: "order.created",
+    conditions: {},
+    templateKey: "order-admin-new",
+    recipient: "admin",
+    action: "push",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    // A return is the one customer action that waits on the owner's decision.
+    name: "Notify me when a return is requested",
+    trigger: "return.requested",
+    conditions: {},
+    templateKey: "return-admin-new",
+    recipient: "admin",
     action: "push",
     delayMinutes: 0,
     isActive: false,
@@ -3382,11 +3490,13 @@ export const SYSTEM_RULES: SystemRule[] = [
   //   this engine was built to end.
   // - **The owner is already told too**, by "Tell me an order came in" and the
   //   bell entry beside it, raised from the same `order.created`.
-  // - **So the capability is left open and unused.** An owner who wants a
-  //   separate "money landed" alert — a real want on a part-paid order, where
-  //   an advance arriving and a balance still outstanding are two facts — can
-  //   build it in one tap against `paymentStatus: partial` without a deploy.
-  //   Shipping it switched on would just be the duplicate described above.
+  // - **So the capability is left open and unused.** A separate "money
+  //   landed" alert — a real want on a part-paid order, where an advance
+  //   arriving and a balance still outstanding are two facts — is one entry
+  //   in this list against `paymentStatus: partial`. It is deliberately not
+  //   one: shipping it would be the duplicate described above, and since
+  //   Settings → Alerts creates only what this list ships, leaving it out is
+  //   what keeps it from being built by accident.
   //
   // The customer rules are **split by payment method**, which is the point of
   // there being two of them: a failed prepaid payment and a failed advance are
@@ -3546,7 +3656,405 @@ export const SYSTEM_RULES: SystemRule[] = [
     delayMinutes: 0,
     isActive: true,
   },
+
+  /* ================================================================== */
+  /*  The shelf                                                         */
+  /* ================================================================== */
+  //
+  // Owner-only, and on the store's usual convention: the bell ships on (it
+  // cannot interrupt anybody), email and phone ship off (they leave the app,
+  // and the owner should choose them). One template for all three, as with
+  // every other event — `inventory-low-stock`, written in `email-templates.ts`
+  // from the `inventory.*` tokens above.
+  {
+    name: "Show me sizes running low in the bell",
+    trigger: "inventory.low_stock",
+    conditions: {},
+    templateKey: "inventory-low-stock",
+    recipient: "admin",
+    action: "inapp",
+    delayMinutes: 0,
+    isActive: true,
+  },
+  {
+    name: "Tell me when a size runs low",
+    trigger: "inventory.low_stock",
+    conditions: {},
+    templateKey: "inventory-low-stock",
+    recipient: "admin",
+    delayMinutes: 0,
+    isActive: false,
+  },
+  {
+    name: "Notify me when a size runs low",
+    trigger: "inventory.low_stock",
+    conditions: {},
+    templateKey: "inventory-low-stock",
+    recipient: "admin",
+    action: "push",
+    delayMinutes: 0,
+    isActive: false,
+  },
 ];
+
+/* ------------------------------------------------------------------ */
+/*  The one writer — every alert created or switched goes through here */
+/* ------------------------------------------------------------------ */
+
+/** Why `setAlert` said no, as a code a caller can branch on. */
+export type AlertRefusal =
+  | "unknown-trigger"
+  | "unsupported-channel"
+  | "bad-recipient"
+  | "not-shipped"
+  | "no-template"
+  | "collision";
+
+export type SetAlertOutcome =
+  | {
+      ok: true;
+      /** A row was inserted by this call. */
+      created: boolean;
+      /** Every row with this signature, oldest first. */
+      ruleIds: string[];
+      /** Whether the alert is now on. */
+      on: boolean;
+      /** Created switched off because switching it on would collide with this rule. */
+      heldBy?: string;
+    }
+  | { ok: false; code: AlertRefusal; error: string };
+
+/**
+ * The first key of every advisory lock this module takes. Fixed and
+ * arbitrary; the point is only that a lock taken here cannot collide with one
+ * taken anywhere else for another reason.
+ */
+const ALERT_LOCK_NAMESPACE = 1_278_689_537;
+
+/** 32-bit FNV-1a as a signed int — Postgres advisory locks take `int4` pairs. */
+function lockKey(text: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h | 0;
+}
+
+/**
+ * Run `work` in a transaction that holds a lock on one alert group.
+ *
+ * **Why a lock and not the unique index this file otherwise relies on.** The
+ * index works for jobs because a job's key is a column. A rule's signature is
+ * not — it spans a `Json` column, and adding a signature column with a unique
+ * index is a migration this change was not allowed to make. Without either,
+ * "look for a row, then insert one" is a race: two tabs ticking the same empty
+ * cell, or a tab and the sync, would both see nothing and both insert.
+ *
+ * `pg_advisory_xact_lock` closes it without a schema change. It is taken on the
+ * alert's *group* (trigger, person, channel), not its exact signature, because
+ * invariant 2 in the file header compares a rule with its neighbours — two
+ * different cells that overlap must not both be switched on by two requests
+ * that each checked before the other wrote. The lock is transaction-scoped, so
+ * it is released on commit or rollback and needs no cleanup, and it works
+ * through the Supabase pooler in transaction mode because a transaction keeps
+ * its server connection for its whole length (session-level locks would not).
+ */
+async function withAlertLock<T>(
+  group: string,
+  work: (tx: Prisma.TransactionClient) => Promise<T>
+): Promise<T> {
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ALERT_LOCK_NAMESPACE}::int4, ${lockKey(group)}::int4)`;
+      return work(tx);
+    },
+    // A handful of reads and one write, but from a dev machine each round trip
+    // to Mumbai is ~100 ms — the same reason `INVENTORY_TX_OPTIONS` exists.
+    { timeout: 15_000, maxWait: 10_000 }
+  );
+}
+
+/**
+ * Make sure a shipped template has a row, and return its id.
+ *
+ * Outside any transaction on purpose: two alert groups can need the same
+ * template at once (the bell and the email for one event), and a unique-key
+ * clash inside a Postgres transaction aborts the whole transaction. Here the
+ * clash is simply "somebody else created it", and the row is re-read.
+ *
+ * `null` when the key is neither in the database nor in `SYSTEM_TEMPLATES` —
+ * an alert whose words have not been written yet.
+ */
+async function ensureShippedTemplate(
+  key: string
+): Promise<{ id: string; created: boolean } | null> {
+  const found = await prisma.emailTemplate.findUnique({
+    where: { key },
+    select: { id: true, isSystem: true },
+  });
+  const shipped = SYSTEM_TEMPLATES.find((t) => t.key === key);
+  if (found) {
+    // The words are the owner's; the "ships with the store" flag is not.
+    if (shipped && !found.isSystem) {
+      await prisma.emailTemplate.update({ where: { id: found.id }, data: { isSystem: true } });
+    }
+    return { id: found.id, created: false };
+  }
+  if (!shipped) return null;
+  try {
+    const created = await prisma.emailTemplate.create({
+      data: {
+        key: shipped.key,
+        name: shipped.name,
+        subject: shipped.subject,
+        body: shipped.body,
+        isSystem: true,
+      },
+      select: { id: true },
+    });
+    return { id: created.id, created: true };
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    const again = await prisma.emailTemplate.findUnique({ where: { key }, select: { id: true } });
+    return again ? { id: again.id, created: false } : null;
+  }
+}
+
+/** Same (trigger, conditions, recipient) — one row of the grid. */
+function sameRow(a: AlertIdentity, b: AlertIdentity): boolean {
+  return alertSignature({ ...a, action: "" }) === alertSignature({ ...b, action: "" });
+}
+
+/**
+ * How a missing alert would be created — **or `null`, which means it may not
+ * be.** Invariant 3 lives here: the seed is read from {@link SYSTEM_RULES},
+ * never taken from a caller, so no request can describe an alert into
+ * existence.
+ *
+ * A row of the grid is one shipped (trigger, conditions, recipient); any
+ * implemented channel may be ticked on it. The exact shipped entry is used
+ * whole when there is one (so ticking it creates precisely the row the store
+ * ships, name and all); otherwise the row's own template and timing are
+ * borrowed from its shipped sibling on another channel — one event, one
+ * wording, as everywhere else in this file.
+ */
+function seedForAlert(identity: AlertIdentity): {
+  name: string;
+  trigger: string;
+  conditions: Record<string, string>;
+  recipient: string;
+  templateKey: string;
+  delayMinutes: number;
+} | null {
+  const onRow = SYSTEM_RULES.filter((r) =>
+    sameRow({ ...r, action: r.action ?? "email" }, identity)
+  );
+  if (onRow.length === 0) return null;
+  const exact = onRow.find((r) => (r.action ?? "email") === identity.action);
+  const base = exact ?? onRow[0];
+  const label = eventLabel(
+    base.trigger,
+    base.conditions,
+    composeFallbackLabel(triggerLabel(base.trigger), describeConditions(base.trigger, base.conditions))
+  );
+  return {
+    // Written the way the catalogue writes them, so a row created here reads
+    // back identically however a request happened to case it.
+    trigger: base.trigger,
+    conditions: base.conditions,
+    recipient: base.recipient,
+    name:
+      exact?.name ??
+      `${label} — ${channelLabel(identity.action)} to ${recipientLabel(base.recipient).toLowerCase()}`.slice(0, 80),
+    templateKey: base.templateKey,
+    delayMinutes: base.delayMinutes,
+  };
+}
+
+function collisionSentence(
+  other: { name: string },
+  identity: AlertIdentity
+): string {
+  return `“${other.name}” already sends this ${channelLabel(identity.action).toLowerCase()} to ${recipientLabel(identity.recipient).toLowerCase()} for the same event, so switching this on as well would send it twice. Switch that one off first.`;
+}
+
+/**
+ * **Create or switch one alert. The only function in the codebase that
+ * inserts an `AutomationRule` or changes its `isActive`.**
+ *
+ * Keyed by the alert's signature — see the file header for the three
+ * invariants and `lib/notification-channels.ts` for why the signature is what
+ * it is. Callers name an alert by `(trigger, conditions, recipient, channel)`
+ * and never by a rule id, so a browser tab that has been open since yesterday
+ * cannot switch the wrong row: whatever it believes, the rows are found again
+ * here, under the lock, from what the alert *is*.
+ *
+ * - **Switching off** always succeeds and writes only rows that are on — an
+ *   orphan tick on a channel that stopped being supported can always be
+ *   cleared, and a tick that changes nothing writes nothing.
+ * - **Switching on** turns on the oldest row with this signature and makes sure
+ *   any identical copy (possible only in a database older than this function)
+ *   is off, so one alert can never be on twice. It refuses, and names the
+ *   other rule, if a *different* switched-on rule would match the same event.
+ * - **No row yet** — created, but only for an alert the store ships
+ *   ({@link seedForAlert}), and only with a template that exists.
+ *
+ * `createOnly` is the sync's mode: find or create, never touch the switch of a
+ * row that already exists. With `onCollision: "pause"` a collision creates the
+ * row switched off instead of refusing — additive, and silent in the way a
+ * restore should be; the grid then shows it off and explains why on the tick.
+ */
+export async function setAlert(input: {
+  identity: AlertIdentity;
+  enabled: boolean;
+  onCollision: "refuse" | "pause";
+  createOnly?: boolean;
+}): Promise<SetAlertOutcome> {
+  const identity: AlertIdentity = {
+    trigger: input.identity.trigger.trim(),
+    conditions: readConditions(input.identity.conditions),
+    recipient: input.identity.recipient.trim(),
+    action: input.identity.action.trim(),
+  };
+  const signature = alertSignature(identity);
+  const recipientKey = normaliseRecipient(identity.recipient);
+
+  /** Every row in this alert's group, oldest first, read inside `tx`. */
+  const readGroup = async (db: Prisma.TransactionClient | typeof prisma) =>
+    (
+      await db.automationRule.findMany({
+        where: { trigger: identity.trigger, action: identity.action },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: {
+          id: true,
+          name: true,
+          trigger: true,
+          conditions: true,
+          action: true,
+          recipient: true,
+          isActive: true,
+        },
+      })
+    )
+      .filter((r) => normaliseRecipient(r.recipient) === recipientKey)
+      .map((r) => ({ ...r, conditions: readConditions(r.conditions) }));
+
+  /* ---- Off: no lock needed, because switching off cannot make a duplicate ---- */
+  if (!input.enabled && !input.createOnly) {
+    const mine = (await readGroup(prisma)).filter((r) => alertSignature(r) === signature);
+    const live = mine.filter((r) => r.isActive).map((r) => r.id);
+    if (live.length > 0) {
+      await prisma.automationRule.updateMany({
+        where: { id: { in: live }, isActive: true },
+        data: { isActive: false },
+      });
+    }
+    return { ok: true, created: false, ruleIds: mine.map((r) => r.id), on: false };
+  }
+
+  /* ---- On, or create: the gates that apply before anything is read ---- */
+  if (input.enabled) {
+    if (!isTriggerKey(identity.trigger)) {
+      return { ok: false, code: "unknown-trigger", error: "That event isn't one this store knows about." };
+    }
+    if (!isActionKey(identity.action)) {
+      return {
+        ok: false,
+        code: "unsupported-channel",
+        error: `${channelLabel(identity.action)} can't be sent from this store yet, so it can't be switched on.`,
+      };
+    }
+    if (identity.action === "push" && !isPushRecipient(identity.recipient)) {
+      return {
+        ok: false,
+        code: "bad-recipient",
+        error:
+          "A notification can only go to the customer or to you — an email address has no device behind it.",
+      };
+    }
+  }
+
+  const seed = seedForAlert(identity);
+  // Resolved before the lock (see `ensureShippedTemplate`); only needed if the
+  // row turns out not to exist, and harmless if it does.
+  const template = seed ? await ensureShippedTemplate(seed.templateKey) : null;
+
+  return withAlertLock(alertGroupOf(identity), async (tx): Promise<SetAlertOutcome> => {
+    const group = await readGroup(tx);
+    const mine = group.filter((r) => alertSignature(r) === signature);
+    const others = group.filter((r) => alertSignature(r) !== signature);
+    const clash = others.find(
+      (r) => r.isActive && conditionsOverlap(r.conditions, identity.conditions)
+    );
+
+    if (mine.length > 0) {
+      const on = mine.some((r) => r.isActive);
+      // The sync never touches a switch that already exists.
+      if (input.createOnly) {
+        return { ok: true, created: false, ruleIds: mine.map((r) => r.id), on };
+      }
+      if (clash) {
+        return { ok: false, code: "collision", error: collisionSentence(clash, identity) };
+      }
+      const [keep, ...copies] = mine;
+      if (!keep.isActive) {
+        await tx.automationRule.update({ where: { id: keep.id }, data: { isActive: true } });
+      }
+      const extraOn = copies.filter((r) => r.isActive).map((r) => r.id);
+      if (extraOn.length > 0) {
+        await tx.automationRule.updateMany({
+          where: { id: { in: extraOn } },
+          data: { isActive: false },
+        });
+      }
+      return { ok: true, created: false, ruleIds: mine.map((r) => r.id), on: true };
+    }
+
+    /* ---- No row with this signature: create one, if the store ships it ---- */
+    if (!seed) {
+      return {
+        ok: false,
+        code: "not-shipped",
+        error:
+          "That alert isn't one this store sends, so it can't be created. Every alert it can send is already a row on Settings → Alerts.",
+      };
+    }
+    if (!template) {
+      return {
+        ok: false,
+        code: "no-template",
+        error:
+          "This alert's message hasn't been written yet, so it can't be switched on. It becomes available as soon as its wording ships.",
+      };
+    }
+
+    let isActive = input.enabled;
+    let heldBy: string | undefined;
+    if (isActive && clash) {
+      if (input.onCollision === "refuse") {
+        return { ok: false, code: "collision", error: collisionSentence(clash, identity) };
+      }
+      isActive = false;
+      heldBy = clash.name;
+    }
+
+    const created = await tx.automationRule.create({
+      data: {
+        name: seed.name,
+        trigger: seed.trigger,
+        conditions: seed.conditions as Prisma.InputJsonValue,
+        action: identity.action,
+        templateId: template.id,
+        recipient: seed.recipient,
+        delayMinutes: seed.delayMinutes,
+        isActive,
+      },
+      select: { id: true },
+    });
+    return { ok: true, created: true, ruleIds: [created.id], on: isActive, heldBy };
+  });
+}
 
 export type SeedReport = {
   templatesCreated: string[];
@@ -3554,21 +4062,35 @@ export type SeedReport = {
   /** Already present and left exactly as they were. */
   templatesKept: number;
   rulesKept: number;
+  /**
+   * Created switched **off** although they ship on, because an existing
+   * switched-on rule already sends the same event on the same channel.
+   */
+  rulesHeld: string[];
+  /** Shipped rules whose template has not been written yet, so not created. */
+  rulesWaiting: string[];
+  /** Shipped rules that had lost their template and were pointed back at it. */
+  rulesRepaired: string[];
 };
 
 /**
  * Put back anything the store ships with that is missing. **Additive only.**
  *
- * It never edits a template's words, never re-points a rule and never flips
- * `isActive`. Those are the owner's, and a seeder that "corrects" them on the
- * next deploy is a seeder that silently un-pauses a rule somebody switched off
- * for a reason — the same class of bug as a `@default` on
- * `SiteSettings.dispatchOnConfirm`, which CLAUDE.md records.
+ * It never edits a template's words, never re-points a rule and **never flips
+ * `isActive` on a row that exists** — every rule goes through {@link setAlert}
+ * in `createOnly` mode, which returns an existing row untouched. A seeder that
+ * "corrects" a switch on the next deploy is a seeder that silently un-pauses a
+ * rule somebody switched off for a reason — the same class of bug as a
+ * `@default` on `SiteSettings.dispatchOnConfirm`, which CLAUDE.md records.
  *
- * What it *does* enforce is `isSystem: true` on its own templates, because that
- * flag is the deletion guard: `deleteEmailTemplate` refuses a system template
- * outright, so a template the store depends on cannot be deleted out from under
- * a live rule. Editing every word of it stays allowed.
+ * Existing rows are recognised by **signature, not by name**, which is what
+ * stops a restore from putting a second copy of a renamed rule beside it.
+ *
+ * The one thing it repairs: a shipped rule whose `templateId` is null (its
+ * template was deleted out from under it) is pointed back at the shipped
+ * template. That fills a hole rather than overriding a choice — there is no
+ * screen on which "no template" can be chosen — and it is what makes the
+ * grid's "cannot send" warning fixable by pressing Restore.
  *
  * Safe to run repeatedly. Nothing here is destructive.
  */
@@ -3578,61 +4100,60 @@ export async function syncSystemAutomation(): Promise<SeedReport> {
     rulesCreated: [],
     templatesKept: 0,
     rulesKept: 0,
+    rulesHeld: [],
+    rulesWaiting: [],
+    rulesRepaired: [],
   };
 
-  const byKey = new Map<string, string>();
+  const templateIds = new Map<string, string>();
   for (const t of SYSTEM_TEMPLATES) {
-    const existing = await prisma.emailTemplate.findUnique({
-      where: { key: t.key },
-      select: { id: true, isSystem: true },
-    });
-    if (existing) {
-      byKey.set(t.key, existing.id);
-      report.templatesKept += 1;
-      // The words are the owner's; the deletion guard is not.
-      if (!existing.isSystem) {
-        await prisma.emailTemplate.update({
-          where: { id: existing.id },
-          data: { isSystem: true },
-        });
-      }
-      continue;
-    }
-    const created = await prisma.emailTemplate.create({
-      data: { key: t.key, name: t.name, subject: t.subject, body: t.body, isSystem: true },
-      select: { id: true },
-    });
-    byKey.set(t.key, created.id);
-    report.templatesCreated.push(t.key);
+    const ensured = await ensureShippedTemplate(t.key);
+    if (!ensured) continue;
+    templateIds.set(t.key, ensured.id);
+    if (ensured.created) report.templatesCreated.push(t.key);
+    else report.templatesKept += 1;
   }
 
   for (const r of SYSTEM_RULES) {
-    const existing = await prisma.automationRule.findFirst({
-      where: { name: r.name },
-      select: { id: true },
-    });
-    if (existing) {
-      report.rulesKept += 1;
-      continue;
-    }
-    const templateId = byKey.get(r.templateKey);
-    if (!templateId) {
-      console.warn(`[automation] seed: no template "${r.templateKey}" for rule "${r.name}".`);
-      continue;
-    }
-    await prisma.automationRule.create({
-      data: {
-        name: r.name,
+    const outcome = await setAlert({
+      identity: {
         trigger: r.trigger,
-        conditions: r.conditions as Prisma.InputJsonValue,
-        action: r.action ?? "email",
-        templateId,
+        conditions: r.conditions,
         recipient: r.recipient,
-        delayMinutes: r.delayMinutes,
-        isActive: r.isActive,
+        action: r.action ?? "email",
       },
+      enabled: r.isActive,
+      createOnly: true,
+      onCollision: "pause",
     });
-    report.rulesCreated.push(r.name);
+    if (!outcome.ok) {
+      if (outcome.code === "no-template") report.rulesWaiting.push(r.name);
+      else console.warn(`[automation] sync: "${r.name}" not created — ${outcome.error}`);
+      continue;
+    }
+    if (outcome.created) {
+      report.rulesCreated.push(r.name);
+      if (outcome.heldBy) report.rulesHeld.push(r.name);
+    } else {
+      report.rulesKept += 1;
+    }
+  }
+
+  // The repair. One query that normally returns nothing.
+  const orphaned = await prisma.automationRule.findMany({
+    where: { templateId: null },
+    select: { id: true, name: true, trigger: true, conditions: true, action: true, recipient: true },
+  });
+  for (const rule of orphaned) {
+    const identity = { ...rule, conditions: readConditions(rule.conditions) };
+    const seed = seedForAlert(identity);
+    const templateId = seed ? templateIds.get(seed.templateKey) : undefined;
+    if (!templateId) continue;
+    await prisma.automationRule.updateMany({
+      where: { id: rule.id, templateId: null },
+      data: { templateId },
+    });
+    report.rulesRepaired.push(rule.name);
   }
 
   return report;
@@ -3643,38 +4164,13 @@ export async function syncSystemAutomation(): Promise<SeedReport> {
 /* ------------------------------------------------------------------ */
 
 /**
- * The messages that still compose their own body in `lib/email.ts`, listed so
- * Admin → Automation can show the **whole** mail inventory rather than only the
- * part it owns.
- *
- * All three are replies to something the customer just did, not notifications
- * about the store, and each would be dangerous behind a switch: a password
- * reset that can be paused locks people out of their accounts, a one-time code
- * that can be paused stops an account being created or an order being placed
- * while the customer watches an input they can never fill, and a contact form
- * that can be paused bins enquiries the sender believes were delivered.
- *
- * Nothing reads this at runtime — it is documentation with a render target. If
- * a third direct sender ever appears in `lib/email.ts`, add it here, or the
- * screen quietly stops being the whole picture.
+ * The mail no switch can stop — the one-time code, the password reset and the
+ * contact form. It now lives beside the grid that lists it, as `ALWAYS_SENT`
+ * in `lib/notification-channels.ts`, because Settings → Alerts renders it from
+ * a client component and this module is server-only. Re-exported under its old
+ * name; it is the same array, not a copy.
  */
-export const DIRECT_MAIL: { name: string; to: string; why: string }[] = [
-  {
-    name: "Password reset link",
-    to: "The customer",
-    why: "Carries a one-time token and answers something they did seconds ago. A rule that could switch it off would lock people out of their own accounts.",
-  },
-  {
-    name: "One-time code (signup & verification)",
-    to: "The customer",
-    why: "A six-digit code that expires in ten minutes, waited for on a form. Sent only when Settings asks for email or mobile verification. A rule that could pause it would stop accounts being created and orders being placed, with the customer staring at an input nothing can fill.",
-  },
-  {
-    name: "Contact form enquiry",
-    to: "You (admin)",
-    why: "The contact form's own delivery. Switching it off would bin messages the sender believes were sent.",
-  },
-];
+export const DIRECT_MAIL = ALWAYS_SENT;
 
 /* ------------------------------------------------------------------ */
 /*  The in-app feed                                                    */
@@ -3731,10 +4227,10 @@ const FEED_LIMIT = 30;
  * applying. A separate table would have to re-earn every one of those
  * properties, and the first time the two disagreed — a job sent, no
  * notification row, or the reverse — there would be no way to tell which was
- * right. Reading the feed off the job row means **the thing the owner can
- * pause in Admin → Automation and the thing that appears in the bell are the
- * same row**, which is the property the brief asks for and the reason there is
- * no second store to keep in step.
+ * right. Reading the feed off the job row means **the switch the owner ticks
+ * on Settings → Alerts and the thing that appears in the bell are the same
+ * rule's rows**, which is the property the brief asks for and the reason there
+ * is no second store to keep in step.
  *
  * It also means this needed no migration, which was a hard constraint.
  *

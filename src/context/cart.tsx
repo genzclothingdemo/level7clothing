@@ -184,22 +184,42 @@ export function CartProvider({
     ) => {
       const lineId = makeLineId(item.productId, item.options);
       // Decide new-vs-existing from the live ref (reliable, sync).
-      const isNew = !itemsRef.current.some((i) => i.lineId === lineId);
+      const already = itemsRef.current.find((i) => i.lineId === lineId);
+      const isNew = !already;
+      // How many of this unit the bag may hold: the stock the product page just
+      // read, which for a tracked product is that one size's live count. The
+      // fresh number wins over the one saved when the line was first added —
+      // otherwise a line from yesterday keeps yesterday's cap and happily asks
+      // for units that have sold since. A hint, not a guard: checkout re-checks
+      // every line against the stock ledger.
+      const cap = item.stock || already?.stock || 99;
+      const want = (already?.quantity ?? 0) + qty;
       setItems((prev) => {
         const existing = prev.find((i) => i.lineId === lineId);
         if (existing) {
           return prev.map((i) =>
             i.lineId === lineId
-              ? { ...i, quantity: Math.min(i.quantity + qty, i.stock || 99) }
+              ? {
+                  ...i,
+                  stock: item.stock || i.stock,
+                  quantity: Math.min(i.quantity + qty, item.stock || i.stock || 99),
+                }
               : i
           );
         }
-        return [...prev, { ...item, lineId, quantity: qty }];
+        return [...prev, { ...item, lineId, quantity: Math.min(qty, cap) }];
       });
       // Only record a lead the first time a product/variant is added.
       if (isNew) recordLead(item, qty, contact);
       if (opts.drawer !== false) {
-        toast.success("Added to cart", { description: item.name });
+        if (want > cap) {
+          // Say so, rather than "Added" for units that were quietly dropped.
+          toast.warning(`Only ${cap} available`, {
+            description: `${item.name} — your bag holds all ${cap}.`,
+          });
+        } else {
+          toast.success("Added to cart", { description: item.name });
+        }
         setOpen(true);
       }
     },

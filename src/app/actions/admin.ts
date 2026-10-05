@@ -1,6 +1,7 @@
 "use server";
 
 import { z } from "zod";
+import type { Prisma } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 import { runAutomationTrigger } from "@/lib/automation";
 import { prisma } from "@/lib/prisma";
@@ -11,8 +12,22 @@ import {
 } from "@/lib/auth";
 import { isLeadStatus } from "@/lib/leads";
 import { slugify } from "@/lib/utils";
-import { deriveVariantModel } from "@/lib/variants";
+import { getSettings } from "@/lib/settings";
 import {
+  MAX_COMBINATIONS,
+  PRODUCT_SAVE_TX_OPTIONS,
+  VariantSyncError,
+  buildSellableMirror,
+  isRestrictViolation,
+  planVariants,
+  syncVariantRows,
+  trackedStockTotal,
+  variantUniqueClash,
+  type VariantPlan,
+  type VariantSyncResult,
+} from "@/lib/product-variants";
+import {
+  applyStockForStatus,
   cancelDraftForOrder,
   chooseCourierForOrder,
   createDraftForOrder,
@@ -34,6 +49,9 @@ import {
   BULK_ORDER_ACTIONS,
   type BulkRowResult,
 } from "@/components/admin/order-types";
+// Orders: who a person's stock movement is recorded against.
+import { actorFromAdminSession } from "@/lib/inventory";
+import type { StockActor } from "@/lib/inventory-types";
 
 /**
  * Identity **and** permission for every write in this module.
@@ -94,6 +112,25 @@ const variantSchema = z.any();
 const variantPriceSchema = z.any();
 
 const PAYMENT_MODES = ["prepaid", "cod", "partial", "direct"] as const;
+
+/**
+ * One combination's identity and cost, from the editor's variant grid.
+ *
+ * **Price is deliberately not here.** `variants[].price` has always carried
+ * it, and one channel is what keeps the draft, the `ProductVariant` row and
+ * the mirror checkout reads in agreement — see `planVariants`. Stock is not
+ * here either: an untracked product's per-size stock rides the draft as it
+ * always has, and a tracked product's is written only by lib/inventory.ts.
+ */
+const variantRowSchema = z.object({
+  /** `comboKey(combo)`; `""` for a product with no options. */
+  key: z.string().max(400),
+  sku: z.string().max(80).nullable().optional(),
+  barcode: z.string().max(80).nullable().optional(),
+  compareAtPrice: z.number().int().nonnegative().nullable().optional(),
+  costPrice: z.number().int().nonnegative().nullable().optional(),
+  lowStockAt: z.number().int().nonnegative().max(1_000_000).nullable().optional(),
+});
 
 const productSchema = z.object({
   name: z.string().min(2),
@@ -164,9 +201,66 @@ const productSchema = z.object({
     .optional(),
   shippingInfo: z.string().nullable().optional(),
   returnsInfo: z.string().nullable().optional(),
+  // What one unit cost the store, when every size cost the same (a variant's
+  // own cost overrides it). Drives margin and stock valuation; never shown to
+  // a customer. `null` = not recorded — written explicitly by both writers so
+  // clearing the field actually clears the column.
+  costPrice: z.coerce.number().int().nonnegative().nullable().optional(),
+  // Per-combination SKU, barcode, compare-at, cost and low-stock alert. **Not
+  // a Product column**: it drives syncVariantRows and is stripped before
+  // prisma, exactly like `media`. `trackInventory` is intentionally absent —
+  // tracking starts from a real count in Admin → Inventory, never from here.
+  variantRows: z.array(variantRowSchema).max(MAX_COMBINATIONS).optional(),
 });
 
 export type ProductInput = z.input<typeof productSchema>;
+
+/**
+ * What a refused variant save returns. `variantKey` / `variantField` let the
+ * editor jump to the row and the column that needs fixing.
+ */
+function variantRefusal(e: unknown) {
+  if (e instanceof VariantSyncError) {
+    return {
+      ok: false as const,
+      error: e.message,
+      variantKey: e.key,
+      variantField: e.field,
+    };
+  }
+  // The checks inside the transaction name the clash; this is the rare race
+  // where another save claimed the same value between that check and the write.
+  const clash = variantUniqueClash(e);
+  if (clash === "sku" || clash === "barcode") {
+    return {
+      ok: false as const,
+      error: `Another save just took that ${clash === "sku" ? "SKU" : "barcode"}. Reload the page and try again.`,
+    };
+  }
+  return null;
+}
+
+/** One short line per thing the save did that the admin did not type. */
+function describeVariantSync(sync: VariantSyncResult, tracked: boolean): string[] {
+  const list = (skus: string[]) =>
+    skus.length > 3 ? `${skus.slice(0, 3).join(", ")} +${skus.length - 3}` : skus.join(", ");
+  const out: string[] = [];
+  if (sync.created.length) {
+    out.push(
+      `New SKU${sync.created.length > 1 ? "s" : ""}: ${list(sync.created)}` +
+        (tracked ? " — starting at 0 in stock. Receive them in Inventory." : ".")
+    );
+  }
+  if (sync.retired.length) {
+    out.push(
+      `Kept ${list(sync.retired)} as retired, not deleted — ${sync.retired.length > 1 ? "they have" : "it has"} stock history.`
+    );
+  }
+  if (sync.restored.length) {
+    out.push(`Brought back ${list(sync.restored)} with ${sync.restored.length > 1 ? "their" : "its"} stock history.`);
+  }
+  return out;
+}
 
 export async function createProduct(input: ProductInput) {
   await requireAdmin("createProduct");
@@ -176,58 +270,102 @@ export async function createProduct(input: ProductInput) {
   }
   const data = parsed.data;
   const slug = await ensureUniqueSlug(data.name);
-  const { attributes, sellableVariants } = deriveVariantModel({
-    options: data.options,
-    variants: (data as { variants?: unknown }).variants,
-    price: data.price,
-    stock: data.stock,
-  });
 
-  // `media` only drives syncProductImages below — it is NOT a Product column,
-  // so it must never reach prisma (spreading it makes the whole create/update
-  // throw PrismaClientValidationError and the save silently fails).
-  const { media: _media, ...productData } = data;
+  // `media` and `variantRows` drive syncProductImages / syncVariantRows below —
+  // neither is a Product column, so neither may reach prisma (spreading one
+  // makes the whole create/update throw PrismaClientValidationError and the
+  // save silently fails).
+  const { media: _media, variantRows: rowEdits, ...productData } = data;
 
-  const product = await prisma.product.create({
-    data: {
-      ...productData,
-      secondaryCategory: data.secondaryCategory || null,
-      subcategoryId: data.subcategoryId || null,
-      compareAtPrice: data.compareAtPrice || null,
-      options: data.options ?? [],
-      attributes,
-      propertyModules: data.propertyModules ?? {},
-      rules: data.rules ?? {},
-      sellableVariants,
-      variantPrices: data.variantPrices ?? [],
-      variants: data.variants ?? [],
-      paymentModes: data.paymentModes,
-      advancePercent: data.advancePercent ?? null,
-      weightGrams: data.weightGrams ?? null,
-      lengthCm: data.lengthCm ?? null,
-      breadthCm: data.breadthCm ?? null,
-      heightCm: data.heightCm ?? null,
-      shippingType: data.shippingType,
-      shippingFee: data.shippingFee,
-      shippingMarkup: data.shippingMarkup,
-      isCustomisable: data.isCustomisable,
-      customisationNote: data.customisationNote ?? null,
-      // `undefined` would leave the column at its previous value on update, so
-      // collapse it to null — the "inherit the store default" state.
-      // null = inherit SiteSettings.defaultReturnable.
-      returnable: data.returnable ?? null,
-      materialsCare: data.materialsCare ?? null,
-      shippingInfo: data.shippingInfo ?? null,
-      returnsInfo: data.returnsInfo ?? null,
-      videos: data.videos ?? [],
-      slug,
-    },
-  });
+  // Prices settled once, here, for the draft, the rows and the mirror alike.
+  // `data.price` is the base the admin typed; `plan.productPrice` is what the
+  // product is stored at — the cheapest available combination.
+  let plan: VariantPlan;
+  try {
+    plan = planVariants({
+      options: data.options,
+      variants: data.variants,
+      basePrice: data.price,
+      edits: rowEdits,
+    });
+  } catch (e) {
+    const refused = variantRefusal(e);
+    if (refused) return refused;
+    throw e;
+  }
+  const { brandName } = await getSettings();
+
+  let product: { id: string };
+  let sync: VariantSyncResult;
+  try {
+    // The product and its variant rows land together or not at all: a SKU
+    // clash must not leave a product behind with no rows.
+    ({ product, sync } = await prisma.$transaction(async (tx) => {
+      const created = await tx.product.create({
+        data: {
+          ...productData,
+          secondaryCategory: data.secondaryCategory || null,
+          subcategoryId: data.subcategoryId || null,
+          price: plan.productPrice,
+          compareAtPrice: data.compareAtPrice || null,
+          costPrice: data.costPrice ?? null,
+          options: data.options ?? [],
+          attributes: plan.attributes,
+          propertyModules: data.propertyModules ?? {},
+          rules: data.rules ?? {},
+          // A new product is never tracked — tracking starts from a real count
+          // in Admin → Inventory — so its mirror takes the editor's stock.
+          sellableVariants: buildSellableMirror({
+            plan,
+            options: data.options,
+            stock: data.stock,
+            tracked: false,
+          }),
+          variantPrices: data.variantPrices ?? [],
+          variants: plan.draft as Prisma.InputJsonValue,
+          paymentModes: data.paymentModes,
+          advancePercent: data.advancePercent ?? null,
+          weightGrams: data.weightGrams ?? null,
+          lengthCm: data.lengthCm ?? null,
+          breadthCm: data.breadthCm ?? null,
+          heightCm: data.heightCm ?? null,
+          shippingType: data.shippingType,
+          shippingFee: data.shippingFee,
+          shippingMarkup: data.shippingMarkup,
+          isCustomisable: data.isCustomisable,
+          customisationNote: data.customisationNote ?? null,
+          // `undefined` would leave the column at its previous value on update, so
+          // collapse it to null — the "inherit the store default" state.
+          // null = inherit SiteSettings.defaultReturnable.
+          returnable: data.returnable ?? null,
+          materialsCare: data.materialsCare ?? null,
+          shippingInfo: data.shippingInfo ?? null,
+          returnsInfo: data.returnsInfo ?? null,
+          videos: data.videos ?? [],
+          slug,
+        },
+        select: { id: true },
+      });
+      const synced = await syncVariantRows(tx, {
+        productId: created.id,
+        productName: data.name,
+        category: data.category,
+        brandName,
+        plan,
+      });
+      return { product: created, sync: synced };
+    }, PRODUCT_SAVE_TX_OPTIONS));
+  } catch (e) {
+    const refused = variantRefusal(e);
+    if (refused) return refused;
+    throw e;
+  }
 
   await syncProductImages(product.id, data);
 
   revalidateStore();
-  return { ok: true as const, id: product.id };
+  revalidatePath("/admin/inventory");
+  return { ok: true as const, id: product.id, notices: describeVariantSync(sync, false) };
 }
 
 /**
@@ -379,64 +517,174 @@ export async function updateProduct(id: string, input: ProductInput) {
   }
   const data = parsed.data;
   const slug = await ensureUniqueSlug(data.name, id);
-  const { attributes, sellableVariants } = deriveVariantModel({
-    options: data.options,
-    variants: (data as { variants?: unknown }).variants,
-    price: data.price,
-    stock: data.stock,
-  });
 
-  // See createProduct: `media` is for syncProductImages only, never prisma.
-  const { media: _media, ...productData } = data;
+  // See createProduct: `media` and `variantRows` never reach prisma. `stock`
+  // is split off too, because for a tracked product it is not the editor's to
+  // write — see below.
+  const { media: _media, variantRows: rowEdits, stock: formStock, ...productData } = data;
 
-  await prisma.product.update({
-    where: { id },
-    data: {
-      ...productData,
-      secondaryCategory: data.secondaryCategory || null,
-      subcategoryId: data.subcategoryId || null,
-      compareAtPrice: data.compareAtPrice || null,
-      options: data.options ?? [],
-      attributes,
-      propertyModules: data.propertyModules ?? {},
-      rules: data.rules ?? {},
-      sellableVariants,
-      variantPrices: data.variantPrices ?? [],
-      variants: data.variants ?? [],
-      paymentModes: data.paymentModes,
-      advancePercent: data.advancePercent ?? null,
-      weightGrams: data.weightGrams ?? null,
-      lengthCm: data.lengthCm ?? null,
-      breadthCm: data.breadthCm ?? null,
-      heightCm: data.heightCm ?? null,
-      shippingType: data.shippingType,
-      shippingFee: data.shippingFee,
-      isCustomisable: data.isCustomisable,
-      // Explicit, not left to the `...productData` spread: an `undefined` here
-      // would leave the previous note on the row after the product stopped
-      // being made-to-order.
-      customisationNote: data.customisationNote ?? null,
-      // null = inherit SiteSettings.defaultReturnable.
-      returnable: data.returnable ?? null,
-      materialsCare: data.materialsCare ?? null,
-      shippingInfo: data.shippingInfo ?? null,
-      returnsInfo: data.returnsInfo ?? null,
-      videos: data.videos ?? [],
-      slug,
-    },
-  });
+  let plan: VariantPlan;
+  try {
+    plan = planVariants({
+      options: data.options,
+      variants: data.variants,
+      basePrice: data.price,
+      edits: rowEdits,
+    });
+  } catch (e) {
+    const refused = variantRefusal(e);
+    if (refused) return refused;
+    throw e;
+  }
+  const { brandName } = await getSettings();
+
+  let outcome: { sync: VariantSyncResult; tracked: boolean };
+  try {
+    outcome = await prisma.$transaction(async (tx) => {
+      const current = await tx.product.findUnique({
+        where: { id },
+        select: { trackInventory: true },
+      });
+      if (!current) {
+        throw new VariantSyncError("This product no longer exists — it may have been deleted in another tab.");
+      }
+      const tracked = current.trackInventory;
+
+      const sync = await syncVariantRows(tx, {
+        productId: id,
+        productName: data.name,
+        category: data.category,
+        brandName,
+        plan,
+      });
+
+      // **Stock.** Untracked: the editor's number, exactly as before. Tracked:
+      // `Product.stock` is the inventory engine's mirror of the ledger, and a
+      // second writer would put a number on the storefront that no movement
+      // explains — so the form's value is ignored. It is only recomputed, by
+      // the engine's own rule, when this save changed which sizes exist.
+      const stock = tracked
+        ? sync.activeSetChanged
+          ? { stock: trackedStockTotal(sync.rows) }
+          : {}
+        : { stock: formStock };
+
+      await tx.product.update({
+        where: { id },
+        data: {
+          ...productData,
+          ...stock,
+          secondaryCategory: data.secondaryCategory || null,
+          subcategoryId: data.subcategoryId || null,
+          price: plan.productPrice,
+          compareAtPrice: data.compareAtPrice || null,
+          costPrice: data.costPrice ?? null,
+          options: data.options ?? [],
+          attributes: plan.attributes,
+          propertyModules: data.propertyModules ?? {},
+          rules: data.rules ?? {},
+          sellableVariants: buildSellableMirror({
+            plan,
+            options: data.options,
+            stock: formStock,
+            tracked,
+            rows: sync.rows,
+          }),
+          variantPrices: data.variantPrices ?? [],
+          variants: plan.draft as Prisma.InputJsonValue,
+          paymentModes: data.paymentModes,
+          advancePercent: data.advancePercent ?? null,
+          weightGrams: data.weightGrams ?? null,
+          lengthCm: data.lengthCm ?? null,
+          breadthCm: data.breadthCm ?? null,
+          heightCm: data.heightCm ?? null,
+          shippingType: data.shippingType,
+          shippingFee: data.shippingFee,
+          isCustomisable: data.isCustomisable,
+          // Explicit, not left to the `...productData` spread: an `undefined` here
+          // would leave the previous note on the row after the product stopped
+          // being made-to-order.
+          customisationNote: data.customisationNote ?? null,
+          // null = inherit SiteSettings.defaultReturnable.
+          returnable: data.returnable ?? null,
+          materialsCare: data.materialsCare ?? null,
+          shippingInfo: data.shippingInfo ?? null,
+          returnsInfo: data.returnsInfo ?? null,
+          videos: data.videos ?? [],
+          slug,
+        },
+      });
+      return { sync, tracked };
+    }, PRODUCT_SAVE_TX_OPTIONS);
+  } catch (e) {
+    const refused = variantRefusal(e);
+    if (refused) return refused;
+    throw e;
+  }
 
   await syncProductImages(id, data);
 
   revalidateStore();
   revalidatePath(`/product/${slug}`);
-  return { ok: true as const };
+  revalidatePath("/admin/inventory");
+  return { ok: true as const, notices: describeVariantSync(outcome.sync, outcome.tracked) };
 }
 
+/**
+ * Delete a product — unless it has stock history.
+ *
+ * `StockMovement` is `onDelete: Restrict`, so the database refuses to delete a
+ * variant with ledger rows, and the product delete cascades into exactly those
+ * variants. That refusal used to surface as a thrown Prisma error — an
+ * unhandled crash in the row action. It is now a stated outcome with the way
+ * out attached: **hide it instead** (`setProductActive(id, false)`), which
+ * takes it off the storefront and keeps the history the ledger exists to keep.
+ *
+ * The check is made up front so the answer names the reason; the catch is for
+ * a movement that lands between the check and the delete.
+ */
 export async function deleteProduct(id: string) {
   await requireAdmin("deleteProduct");
-  await prisma.product.delete({ where: { id } });
+
+  const product = await prisma.product.findUnique({
+    where: { id },
+    select: {
+      name: true,
+      isActive: true,
+      variantRows: { select: { _count: { select: { movements: true } } } },
+    },
+  });
+  // Already gone (another tab, a double click): the outcome asked for holds.
+  if (!product) {
+    revalidateStore();
+    return { ok: true as const };
+  }
+
+  const refuse = (entries: number | null) => ({
+    ok: false as const,
+    reason: "stock-history" as const,
+    // Only worth offering while it is still on sale.
+    canDeactivate: product.isActive,
+    error:
+      `“${product.name}” can't be deleted — it has stock history` +
+      (entries ? ` (${entries} ledger entr${entries === 1 ? "y" : "ies"})` : "") +
+      `, and the stock ledger has to outlive it. ` +
+      (product.isActive
+        ? "Hide it from the shop instead: it leaves the storefront and its history is kept."
+        : "It is already hidden from the shop, which is as far as it can go."),
+  });
+
+  const entries = product.variantRows.reduce((n, v) => n + v._count.movements, 0);
+  if (entries > 0) return refuse(entries);
+
+  try {
+    await prisma.product.delete({ where: { id } });
+  } catch (e) {
+    if (isRestrictViolation(e)) return refuse(null);
+    throw e;
+  }
   revalidateStore();
+  revalidatePath("/admin/inventory");
   return { ok: true as const };
 }
 
@@ -912,7 +1160,7 @@ export async function updateOrderStatus(
   status: string,
   note?: string
 ) {
-  await requireAdmin("updateOrderStatus");
+  const session = await requireAdmin("updateOrderStatus");
   if (!ORDER_STATUSES.includes(status as (typeof ORDER_STATUSES)[number])) {
     return { ok: false as const, error: "Invalid status" };
   }
@@ -960,6 +1208,13 @@ export async function updateOrderStatus(
       // separately in Admin → Orders → Notes.
     },
   });
+
+  // The stock follows the status, by the one rule every status path shares:
+  // shipped or delivered sells the reserved units, cancelled or payment
+  // failed releases them. Idempotent, so re-saving a status moves nothing
+  // twice. Tracked products only — an untracked one keeps exactly the
+  // behaviour it had, which is that this control never touched its counter.
+  await applyStockForStatus(id, { status }, actorFromAdminSession(session));
 
   // Automation rules bound to `order.status_changed` — the only thing that
   // emails a status change now.
@@ -1017,18 +1272,28 @@ export async function updateOrderTracking(
 }
 
 export async function updatePaymentStatus(id: string, paymentStatus: string) {
-  await requireAdmin("updatePaymentStatus");
+  const session = await requireAdmin("updatePaymentStatus");
 
   // Read the old value first: `order.payment_changed` carries
   // `previousPaymentStatus`, and after the write it is unrecoverable.
   const before = await prisma.order.findUnique({
     where: { id },
-    select: { paymentStatus: true },
+    select: { paymentStatus: true, status: true },
   });
   if (!before) return { ok: false as const, error: "Order not found" };
 
   await prisma.order.update({ where: { id }, data: { paymentStatus } });
   revalidatePath("/admin/orders");
+
+  // A payment marked failed by hand is the same event as Razorpay failing it:
+  // the order is not going to ship on that money, so its stock hold goes now.
+  if (paymentStatus === "failed" && before.paymentStatus !== "failed") {
+    await applyStockForStatus(
+      id,
+      { status: before.status, paymentStatus },
+      actorFromAdminSession(session)
+    );
+  }
 
   // Setting the column by hand is the same event as Razorpay setting it, so it
   // raises the same trigger — otherwise marking a payment failed from the
@@ -1112,10 +1377,12 @@ export async function setCustomerNote(id: string, note: string) {
  * booked AWB when the admin has switched auto-ship on.
  *
  * Internal (no `requireAdmin`, no revalidate) so the bulk action can reuse it
- * without re-authorising and re-revalidating once per row.
+ * without re-authorising and re-revalidating once per row. `actor` is who the
+ * stock ledger records if auto-ship books the parcel on the way.
  */
 async function confirmOneOrder(
-  id: string
+  id: string,
+  actor: StockActor
 ): Promise<
   | { ok: false; error: string }
   | { ok: true; orderNumber: string; shipment: ConfirmationPipelineResult }
@@ -1153,7 +1420,7 @@ async function confirmOneOrder(
   // courier problem must not undo that, so it is reported, never thrown.
   let shipment: ConfirmationPipelineResult;
   try {
-    shipment = await runConfirmationPipeline(id);
+    shipment = await runConfirmationPipeline(id, actor);
   } catch (err) {
     console.error("[admin] confirmation pipeline failed:", err);
     shipment = {
@@ -1167,8 +1434,8 @@ async function confirmOneOrder(
 }
 
 export async function confirmOrder(id: string) {
-  await requireAdmin("confirmOrder");
-  const result = await confirmOneOrder(id);
+  const session = await requireAdmin("confirmOrder");
+  const result = await confirmOneOrder(id, actorFromAdminSession(session));
   if (!result.ok) return { ok: false as const, error: result.error };
 
   revalidatePath("/admin/orders");
@@ -1206,11 +1473,13 @@ export async function shipOrderNowAction(
   courierId: string | null,
   courierName: string | null
 ) {
-  await requireAdmin("shipOrderNowAction");
+  const session = await requireAdmin("shipOrderNowAction");
 
   const courier =
     courierId && courierName ? { id: courierId, name: courierName } : null;
-  const result = await shipOrderNow(id, courier);
+  // Booking sells the order's reserved stock (inside `dispatchOrder`); the
+  // ledger records it against whoever pressed Book.
+  const result = await shipOrderNow(id, courier, actorFromAdminSession(session));
 
   if (!result.ok) {
     console.error("[admin] shipOrderNow failed:", result.error);
@@ -1339,8 +1608,8 @@ export async function chooseCourierAction(
 
 /** Run the automatic sync now, for every order still in flight. */
 export async function syncAllOrdersAction() {
-  await requireAdmin("syncAllOrdersAction");
-  const result = await syncAllOpenOrders();
+  const session = await requireAdmin("syncAllOrdersAction");
+  const result = await syncAllOpenOrders(undefined, actorFromAdminSession(session));
   revalidatePath("/admin/orders");
   revalidatePath("/admin");
   return result;
@@ -1452,9 +1721,9 @@ export async function autoSyncOrderAction(id: string) {
  * courier and tracking link land in our database and the customer gets notified.
  */
 export async function syncOrderFromNimbusAction(id: string) {
-  await requireAdmin("syncOrderFromNimbusAction");
+  const session = await requireAdmin("syncOrderFromNimbusAction");
 
-  const result = await syncOrderFromNimbus(id);
+  const result = await syncOrderFromNimbus(id, actorFromAdminSession(session));
   if (!result.ok) return { ok: false as const, error: result.error };
 
   if (result.outcome === "not-booked") {
@@ -1500,9 +1769,26 @@ export async function syncOrderFromNimbusAction(id: string) {
 
 // -------- Cancel abandoned order & restore stock --------
 
-/** Internal half of {@link cancelAndRestoreStock}, reused by the bulk action. */
+/**
+ * Internal half of {@link cancelAndRestoreStock}, reused by the bulk action.
+ *
+ * "Restore stock" means two different things now, and each product gets
+ * exactly one of them:
+ *
+ * - **untracked** — the legacy `Product.stock` counter is incremented, as it
+ *   always was;
+ * - **tracked** — its counter is the engine's mirror and is never bumped by
+ *   hand; the order's reservation is released instead, which rewrites the
+ *   mirror itself.
+ *
+ * Which is which is read **now**, inside the transaction, rather than taken
+ * from what the release reports: a product whose tracking was switched off
+ * since checkout is back on the legacy counter and must get its units there,
+ * and one switched on since was counted afresh and must not be bumped.
+ */
 async function cancelOneOrder(
-  id: string
+  id: string,
+  actor: StockActor
 ): Promise<{ ok: false; error: string } | { ok: true; orderNumber: string }> {
   const order = await prisma.order.findUnique({ where: { id } });
   if (!order) return { ok: false, error: "Order not found" };
@@ -1530,9 +1816,20 @@ async function cancelOneOrder(
   });
 
   await prisma.$transaction(async (tx) => {
-    // Restore each product's stock.
+    const productIds = [...new Set(items.map((i) => i.productId).filter(Boolean))];
+    const tracked = new Set(
+      productIds.length
+        ? (
+            await tx.product.findMany({
+              where: { id: { in: productIds }, trackInventory: true },
+              select: { id: true },
+            })
+          ).map((p) => p.id)
+        : []
+    );
+    // Restore each untracked product's stock.
     for (const item of items) {
-      if (item.productId && item.quantity > 0) {
+      if (item.productId && item.quantity > 0 && !tracked.has(item.productId)) {
         await tx.product
           .update({
             where: { id: item.productId },
@@ -1550,12 +1847,19 @@ async function cancelOneOrder(
     });
   });
 
+  // Tracked products: give back whatever the order still holds. After the
+  // cancel commits, not before — if this step fails, the order is cancelled
+  // with a hold still on it, and `reconcileStockHolds` releases that on the
+  // next automation pass. The other order (release first) could fail into an
+  // order that is still open and holding nothing, which nothing would notice.
+  await applyStockForStatus(id, { status: "cancelled" }, actor);
+
   return { ok: true, orderNumber: order.orderNumber };
 }
 
 export async function cancelAndRestoreStock(id: string) {
-  await requireAdmin("cancelAndRestoreStock");
-  const result = await cancelOneOrder(id);
+  const session = await requireAdmin("cancelAndRestoreStock");
+  const result = await cancelOneOrder(id, actorFromAdminSession(session));
   if (!result.ok) return { ok: false as const, error: result.error };
 
   revalidatePath("/admin/orders");
@@ -1600,7 +1904,10 @@ const bulkSchema = z.object({
  * be rate-limited halfway through a charge.
  */
 export async function bulkOrderAction(ids: string[], action: string) {
-  await requireAdmin("bulkOrderAction");
+  const session = await requireAdmin("bulkOrderAction");
+  // One person pressed one button, so every stock movement the pass makes —
+  // a cancel's release, a booking's sale — is recorded against them.
+  const actor = actorFromAdminSession(session);
 
   const parsed = bulkSchema.safeParse({ ids: [...new Set(ids)], action });
   if (!parsed.success) {
@@ -1651,14 +1958,14 @@ export async function bulkOrderAction(ids: string[], action: string) {
     try {
       switch (verb) {
         case "confirm": {
-          const res = await confirmOneOrder(id);
+          const res = await confirmOneOrder(id, actor);
           if (!res.ok) row(false, res.error);
           else row(true, describeShipment(res.shipment));
           break;
         }
 
         case "cancel": {
-          const res = await cancelOneOrder(id);
+          const res = await cancelOneOrder(id, actor);
           row(res.ok, res.ok ? "Cancelled — stock restored." : res.error);
           break;
         }
@@ -1681,7 +1988,7 @@ export async function bulkOrderAction(ids: string[], action: string) {
         }
 
         case "book": {
-          const res = await dispatchOrder(id);
+          const res = await dispatchOrder(id, actor);
           if (!res.ok) row(false, res.error);
           else if (res.outcome === "drafted") {
             // Unreachable now that eligibility requires a staged draft, but
@@ -1700,7 +2007,7 @@ export async function bulkOrderAction(ids: string[], action: string) {
         }
 
         case "sync": {
-          const res = await syncOrderFromNimbus(id);
+          const res = await syncOrderFromNimbus(id, actor);
           if (!res.ok) row(false, res.error);
           else if (res.outcome === "not-booked") {
             row(true, `Not booked in NimbusPost yet (${res.orderStatus}).`);

@@ -113,13 +113,13 @@ export default async function ProductsSection({
         <StatTile
           label="Units in stock"
           value={formatCount(catalogue.unitsInStock)}
-          tip="Σ Product.stock across the whole catalogue, as it stands right now. Not a windowed figure — stock is a present-tense fact and does not have a period."
+          tip="Σ Product.stock across the whole catalogue, as it stands right now. Not a windowed figure — stock is a present-tense fact and does not have a period. For a product counted per size, Product.stock is what its sizes can still sell, so units reserved for open orders are not in it."
           good="none"
         />
         <StatTile
           label="Out of stock"
           value={formatCount(catalogue.outOfStock)}
-          tip="Active products whose stock is zero or less. Still listed on the storefront, so every one of these is a live product page that cannot be bought."
+          tip="Active products whose stock is zero or less — for a product counted per size, every size is sold out. Still listed on the storefront, so every one of these is a live product page that cannot be bought."
           good="down"
           sub={catalogue.outOfStock > 0 ? "live pages, unbuyable" : undefined}
         />

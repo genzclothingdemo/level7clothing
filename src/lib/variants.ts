@@ -43,9 +43,10 @@ export function deriveVariantModel(input: {
     .filter((v) => v && typeof v.combo === "object" && v.combo)
     .map((v) => {
       const combo = v.combo as Record<string, string>;
-      const priceRaw = v.price;
-      const price =
-        priceRaw === "" || priceRaw == null ? basePrice : Number(priceRaw) || basePrice;
+      // The one rule — see resolveVariantPrice. Not re-derived here, so the
+      // mirror checkout charges from can never drift from what the editor and
+      // the ProductVariant rows say.
+      const price = resolveVariantPrice(v.price, basePrice);
       const images = Array.isArray(v.images) ? (v.images as any[]).filter(Boolean) : [];
       const stockRaw = v.stock;
       const stock =
@@ -64,6 +65,130 @@ export function deriveVariantModel(input: {
     });
 
   return { attributes, sellableVariants };
+}
+
+/* ------------------------------------------------------------------ */
+/*  The price resolver                                                 */
+/* ------------------------------------------------------------------ */
+//
+// **What a combination sells for is decided here and nowhere else.**
+//
+// There used to be four overlapping price mechanisms and no agreement between
+// them:
+//
+//   options[].choices[].priceDelta   authored in the editor, read by nothing
+//   variantPrices                    legacy matrix, used by no product
+//   variants[].price                 the editor's draft ("" = inherit)
+//   sellableVariants[].price         the derived copy — what checkout charges
+//
+// and the editor inherited blank rows from the price the admin *typed*, while
+// the server inherited them from the price it *saved* (the cheapest available
+// combination). Typing base ₹150 with one size at ₹100 showed the blank sizes
+// at ₹150 and charged them ₹100.
+//
+// Now: `ProductVariant.price` is the override (null = inherit), the product
+// save writes it and the `sellableVariants` mirror **in one transaction from
+// this function**, and every reader of the mirror — checkout
+// (`actions/orders.ts`), the coupon quote (`lib/coupons.ts`) and the product
+// page (`priceForSelection`) — already reads `sellable.price ?? product.price`.
+// The editor previews with the same function, so all four agree by
+// construction. Pure — no directive, no server imports (CLAUDE.md, RSC traps).
+
+/**
+ * What a typed per-combination price means: whole rupees above zero, or
+ * `null` — "inherit the product's price".
+ *
+ * Blank, zero, negative and non-numeric all read as inherit. Zero in
+ * particular: `deriveVariantModel` has always sold a `0` override at the base
+ * price, so treating it as ₹0 here would make the row and the mirror disagree
+ * about the one combination nobody meant to give away.
+ */
+export function normalisePriceOverride(raw: unknown): number | null {
+  if (typeof raw !== "number" && typeof raw !== "string") return null;
+  if (typeof raw === "string" && raw.trim() === "") return null;
+  const n = Math.round(Number(raw));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** What one combination sells for: its override, else the product's price. */
+export function resolveVariantPrice(override: unknown, productPrice: number): number {
+  return normalisePriceOverride(override) ?? (Number(productPrice) || 0);
+}
+
+export type SettledPrices = {
+  /**
+   * `Product.price`: the cheapest *available* combination, or the base when
+   * there are none. It is what listing cards, sorting and JSON-LD show, which
+   * is why it stays the "from" price rather than becoming the typed base.
+   */
+  productPrice: number;
+  /** Per combination key, what to store as its override (null = inherit). */
+  overrides: Record<string, number | null>;
+  /** Per combination key, what it sells for — the number checkout charges. */
+  effective: Record<string, number>;
+};
+
+/**
+ * Turn what the admin typed — a base price and, per combination, an optional
+ * override — into what is stored, such that **no combination's price moves
+ * when `Product.price` does**.
+ *
+ * Blank rows inherit `Product.price`, and `Product.price` is the cheapest
+ * available combination. Those two rules only agree while the base *is* the
+ * cheapest. When a row is overridden below the base, the product price drops
+ * to that row, and a blank row would silently follow it down — the bug this
+ * replaced. So in exactly that case the blank rows are **pinned at the base**
+ * they were showing. Explicit overrides are kept as typed, never folded back
+ * to blank, so a price the admin chose never starts following another one.
+ *
+ * With no combinations (or none available) the product sells at the base.
+ */
+export function settleVariantPrices(input: {
+  basePrice: unknown;
+  combos: { key: string; override: unknown; available?: boolean }[];
+}): SettledPrices {
+  const base = Math.max(0, Math.round(Number(input.basePrice) || 0));
+  const effective: Record<string, number> = {};
+  const typed: Record<string, number | null> = {};
+  for (const c of input.combos) {
+    typed[c.key] = normalisePriceOverride(c.override);
+    effective[c.key] = typed[c.key] ?? base;
+  }
+  const offered = input.combos.filter((c) => c.available !== false);
+  const productPrice = offered.length
+    ? Math.min(...offered.map((c) => effective[c.key]))
+    : base;
+
+  const overrides: Record<string, number | null> = {};
+  for (const c of input.combos) {
+    overrides[c.key] = typed[c.key] ?? (base === productPrice ? null : base);
+  }
+  return { productPrice, overrides, effective };
+}
+
+/**
+ * A sellable variant as the product save writes it. `compareAtPrice` is only
+ * present when that combination has its own — the key is omitted otherwise, so
+ * a product with none keeps a byte-identical mirror.
+ */
+export type SellableVariantMirror = SellableVariant & { compareAtPrice?: number };
+
+/**
+ * The struck-through "was" price for a selection: the combination's own
+ * compare-at price where it has one, else the product's.
+ *
+ * Exists so the product page can show a per-size compare-at with a one-line
+ * change (`product.compareAtPrice` → `compareAtForSelection(product, selection)`
+ * in `product-price.tsx`). Until a reader uses it, the product's Discount % is
+ * what shoppers see.
+ */
+export function compareAtForSelection(
+  product: { compareAtPrice: number | null; sellableVariants?: any },
+  selected: Selection
+): number | null {
+  const variants = (product.sellableVariants || []) as SellableVariantMirror[];
+  const match = variants.find((v) => v.id === comboKey(selected));
+  return match?.compareAtPrice ?? product.compareAtPrice;
 }
 
 /**

@@ -30,8 +30,18 @@ export function UpdateWatcher({ current }: { current: string }) {
   const [pending, setPending] = useState(false);
   const pathname = usePathname();
   // Held in a ref so the poll effect doesn't re-subscribe on every navigation.
+  // Synced in an effect, not during render: `check` only ever runs from a
+  // timer or an event, both after the commit, so it always reads the current
+  // path — and writing a ref mid-render is what React's rules forbid.
   const pathRef = useRef(pathname);
-  pathRef.current = pathname;
+  useEffect(() => {
+    pathRef.current = pathname;
+  }, [pathname]);
+  // The newer build's id, once one is seen — separate from `pending`, which
+  // only says whether the prompt is on screen. Dismissing the prompt must not
+  // forget the build has moved on, or the navigation reload below would never
+  // fire.
+  const newerBuild = useRef<string | null>(null);
 
   const hardReload = useCallback(async () => {
     // Clear the worker's caches first, or the "hard" refresh can still be
@@ -67,6 +77,7 @@ export function UpdateWatcher({ current }: { current: string }) {
     }
 
     if (!latest || latest === current) return;
+    newerBuild.current = latest;
 
     // Guard against a reload loop if two deployments are serving at once
     // behind the load balancer: only auto-reload once per target build.
@@ -86,14 +97,55 @@ export function UpdateWatcher({ current }: { current: string }) {
       !hasTypedInput() &&
       !hasOpenDialog();
 
-    // A hidden tab is the ideal moment: nobody is looking at it.
-    if (safe && (document.visibilityState === "hidden" || !hasTypedInput())) {
+    // `safe` already requires that nothing is typed, so a hidden tab with a
+    // half-filled form is *not* reloaded — the old condition here read as if
+    // it would be (`hidden || !typed`), but `safe` had ruled that out first.
+    // Losing typed work in a background tab is the worse failure, so the code's
+    // behaviour was right and only the wording was wrong.
+    if (safe) {
       void hardReload();
       return;
     }
 
     setPending(true);
   }, [current, hardReload]);
+
+  /**
+   * **Protected routes pick up the new build on the next navigation.**
+   *
+   * Every `/admin` route is protected — an unannounced reload in the product
+   * editor or Settings would throw away unsaved work — so an owner who lives
+   * in the admin only ever got a dismissible prompt, and dismissing it left
+   * them on the old bundle indefinitely. That was why a fresh deploy could
+   * look as if it had not landed.
+   *
+   * Leaving a page is the one moment a reload provably loses nothing: whatever
+   * was on the page is being left behind anyway. So once a newer build is
+   * known, the next route change becomes a full reload onto it — a one-render
+   * cost, and it cannot destroy work, which an in-place reload could.
+   *
+   * **Once per build, with its own guard.** The `reloaded-for` key in `check`
+   * is written on first sight of a build even when no reload happens (that is
+   * how it stops the in-place path looping), so it cannot gate this path too —
+   * it would already be set by the time anyone navigates. Without a guard of
+   * its own, two deployments serving at once behind the load balancer would
+   * turn every navigation into a reload that lands back on the old one.
+   */
+  const lastPath = useRef(pathname);
+  useEffect(() => {
+    if (pathname === lastPath.current) return;
+    lastPath.current = pathname;
+    const target = newerBuild.current;
+    if (!target) return;
+    try {
+      const key = `l7:nav-reloaded-for:${target}`;
+      if (sessionStorage.getItem(key) === "1") return;
+      sessionStorage.setItem(key, "1");
+    } catch {
+      /* private mode: reload anyway — at worst once per navigation, never a tight loop */
+    }
+    void hardReload();
+  }, [pathname, hardReload]);
 
   useEffect(() => {
     if (current === "dev") return;

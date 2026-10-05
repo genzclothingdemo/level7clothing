@@ -47,10 +47,12 @@
  *
  * The admin alert address sat here because it only makes sense read next to
  * the public contact email. It is now edited on **Alerts**, where the rest of
- * the sending identity lives, and Store shows it read-only with a link — so
- * the pair is still readable side by side on both tabs and there is still
- * exactly one input for it. That is the rule that matters: a second editable
- * copy of a column is how `defaultReturnsInfo` lost an update silently.
+ * the sending identity lives, and there is exactly one input for it — a second
+ * editable copy of a column is how `defaultReturnsInfo` lost an update
+ * silently. Store used to keep a read-only copy of it (and of the sender and
+ * the alert count) "so the pair could be read side by side"; that copy is gone
+ * too. The owner reads a restated value as duplication, so Store *links* to
+ * Alerts instead, and the same-inbox warning lives on Alerts beside the input.
  *
  * ## Shipping is gone, and Integrations replaced it
  *
@@ -98,17 +100,17 @@ export const TABS = [
     key: "store",
     label: "Store",
     heading: "Brand, copy & contact",
-    blurb: "What the shop is called, what it says, and where it writes",
+    blurb: "The shop's name, what it says, and how people reach you",
     guide:
-      "Identity, the words on the storefront, and the public contact details. Everything here is read from the database at render time — the brand name in the header, the browser tab, order emails, the sitemap and the home-screen icon all come from this tab, and none of it is hardcoded anywhere. The announcement bar and the hero are on top because they are what changes for a sale; the rest is set once and folded away. The contact email is the public one, printed in the footer and used as the reply address on everything the store sends; the private address your own alerts go to is on the Alerts tab, shown here read-only so the two can still be read against each other.",
+      "Everything here is read from the database when a page renders — the brand name in the header, the browser tab, order emails, the sitemap and the home-screen icon all come from this tab, and none of it is hardcoded. The announcement bar and the hero are open because they change for a sale; the rest is set once and folded, with a summary on each closed row. The contact email is the public one: printed in the footer, and the address customers' replies come back to. Your own alert inbox is not on this tab — it is on Alerts.",
   },
   {
     key: "orders",
     label: "Orders",
     heading: "Order automation",
-    blurb: "What happens to an order without you",
+    blurb: "What happens to a new order without you",
     guide:
-      "Two decisions, in order: when a new order stops being a request and becomes work (confirmation), and how far a confirmed order then travels towards the courier on its own. Both default to the cautious answer — a human confirms, and nothing charges your courier wallet unattended. This is the tab people go hunting for, which is why it is second.",
+      "Two decisions, in order: when a new order stops being a request and becomes work (confirmation), and how far a confirmed order then travels towards the courier on its own. Both default to the cautious answer — a human confirms, and nothing charges your courier wallet unattended. Every order can still be confirmed and dispatched by hand from the orders screen, whatever is set here.",
   },
   {
     // Third, between the two tabs it is about. Everything here used to be in
@@ -128,15 +130,15 @@ export const TABS = [
     heading: "Payments & charges",
     blurb: "How customers pay, and what checkout adds",
     guide:
-      "Three ways to pay — cash on delivery, part now and the rest on delivery, or the whole thing online — and the charges that sit on top of the basket. A method appears at checkout only when its switch here, the gateway (for the two that need it) and the product's own allowed methods all agree. Turning the last one off is refused: checkout would have nothing to offer, and there is no fallback mode for it to drop into.",
+      "Three ways to pay — cash on delivery, part now and the rest on delivery, or the whole thing online — and the charges that sit on top of the basket. A method appears at checkout only when its switch here, Razorpay (for the two online methods) and the products in the basket all agree. Turning the last one off is refused: checkout would have nothing to offer, and there is no fallback mode for it to drop into.",
   },
   {
     key: "integrations",
     label: "Integrations",
     heading: "Connected services",
-    blurb: "The two outside services, and whether they are live",
+    blurb: "Razorpay and NimbusPost, and whether each is live",
     guide:
-      "Razorpay takes the money and NimbusPost carries the parcel. Each has a master switch here and a key pair set in the deployment's environment; the switch decides whether the store uses the service, the keys decide whether it can. Keys are never shown on this screen — only whether they are present — because a secret rendered into a page is a secret that can be read from the page.",
+      "Razorpay takes the money and NimbusPost carries the parcel. Each has a master switch here and a key pair in the deployment's environment: the switch decides whether the store uses the service, the keys decide whether it can. Keys are never shown on this screen — only whether they are present — because a secret rendered into a page is a secret that can be read from it.",
   },
   {
     key: "returns",
@@ -144,7 +146,7 @@ export const TABS = [
     heading: "Returns & refunds",
     blurb: "Whether pieces can come back, and on what terms",
     guide:
-      "The return window, the reasons a customer may pick, and how a refund is worked out. This is the one owner of those columns: Admin → Returns shows the same policy read-only and links here. Everything on this tab has its own Save, separate from the bar at the foot of the screen.",
+      "The return window, the reasons a customer may pick, and how a refund is worked out. This tab is the one owner of those settings — Admin → Returns shows the same policy read-only and links here — and it saves on its own, with the Save policy button at the end, not with the bar the other tabs share.",
   },
   {
     // The key IS the `?tab=` value and is deliberately `add_admin` rather than
@@ -153,10 +155,12 @@ export const TABS = [
     // someone is hired, once when they leave.
     key: "add_admin",
     label: "Access",
-    heading: "Temporary admins",
-    blurb: "Extra people who can sign in, and what they did",
+    // Names the log as well as the people: the owner asked where the log of a
+    // temporary admin shows, on a tab whose heading only mentioned admins.
+    heading: "Access & activity",
+    blurb: "Who else can sign in, and everything they did",
     guide:
-      "Give someone their own sign-in to this admin, for as long as you want them to have it. View-only access lets them open every screen and change nothing — that is enforced by the server on every write, not by hiding buttons, so it holds even for someone who knows how the site is built. Full access is the same as your own. Switch an account off or delete it and the person stops working on their very next click, without waiting for anything to expire. Their activity is listed underneath them, and deleting the account deletes that list with it.",
+      "Give someone their own sign-in to this admin, for as long as you want them to have it. View only lets them open every screen and change nothing — the server enforces that on every save, not by hiding buttons, so it holds even for someone who knows how the site is built. Full access is the same as your own. Switch someone off or delete them and they stop on their very next click. Every sign-in, saved change and refused attempt they make is written to the Activity log on this tab; deleting a person deletes their lines with them.",
   },
 ] as const;
 

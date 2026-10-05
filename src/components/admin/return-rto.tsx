@@ -44,9 +44,10 @@ export function ReturnRto({ orders }: { orders: RtoOrder[] }) {
       >
         <p className="mt-2 text-xs text-muted-foreground">
           Delivery failed and the courier is returning these to you. They are not
-          return requests — nobody raised one — so nothing here is automatic. A
-          completed RTO shows as a <b>cancelled</b> order, because there is no RTO
-          order status; check each prepaid one for a refund.
+          return requests — nobody raised one. A completed RTO shows as a{" "}
+          <b>cancelled</b> order, because there is no RTO order status. Tracked
+          stock goes back on the shelf by itself once the courier confirms the
+          parcel is home; refunds do not — check each prepaid one.
         </p>
 
         <div className="mt-2 space-y-1.5">

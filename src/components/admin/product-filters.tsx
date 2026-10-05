@@ -49,9 +49,15 @@ function fromParams(params: URLSearchParams): FilterState {
 export function ProductFilters({
   categories,
   subcategories = [],
+  lowStockLine = 5,
 }: {
   categories: string[];
   subcategories?: SubcategoryOption[];
+  /**
+   * `SiteSettings.lowStockThreshold`, for the label only. A size with its own
+   * `lowStockAt` is judged against that instead — the page applies the rule.
+   */
+  lowStockLine?: number;
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -204,8 +210,9 @@ export function ProductFilters({
           >
             <option value="">Any stock level</option>
             <option value="instock">In stock ({">"}0)</option>
-            <option value="lowstock">Low stock (≤ 5)</option>
+            <option value="lowstock">Low stock (≤ {lowStockLine})</option>
             <option value="outofstock">Out of stock (0)</option>
+            <option value="oversold">Oversold</option>
           </select>
 
           <select

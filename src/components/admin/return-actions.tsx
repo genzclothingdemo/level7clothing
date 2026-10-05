@@ -24,9 +24,11 @@ import {
   markRefundPaid,
   quoteReturnPickupAction,
   retryReturnPickup,
+  setReturnRestock,
   setReturnStatus,
   syncReturnPickupAction,
 } from "@/app/actions/returns";
+import type { ReturnStockDecision } from "@/components/admin/return-stock";
 import {
   PARCEL_HOLDER_LABEL,
   REFUND_METHODS,
@@ -93,6 +95,7 @@ export function ReturnActions({
   nimbusAwb,
   nimbusCourier,
   nimbusEnabled,
+  stock,
 }: {
   id: string;
   status: ReturnStatus;
@@ -110,14 +113,22 @@ export function ReturnActions({
   nimbusAwb: string | null;
   nimbusCourier: string | null;
   nimbusEnabled: boolean;
+  /**
+   * Present only when the product's stock is tracked. Absent means there is no
+   * stock question to ask, and receiving works exactly as it always has.
+   */
+  stock?: { received: boolean; decision: ReturnStockDecision };
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [mode, setMode] = useState<
-    "idle" | "approve" | "reject" | "payout" | "book"
+    "idle" | "approve" | "reject" | "payout" | "book" | "receive"
   >("idle");
   const [note, setNote] = useState("");
   const [bookPickup, setBookPickup] = useState(true);
+  // "Put back in stock" — ticked by default, because most returns are a wrong
+  // size, not a ruined garment.
+  const [restock, setRestock] = useState(true);
 
   // Booking panel
   const [quote, setQuote] = useState<PickupQuote | null>(null);
@@ -250,6 +261,13 @@ export function ReturnActions({
   }
 
   function move(next: ReturnStatus) {
+    // A tracked piece is asked one question on arrival — can it be sold
+    // again? — so "Mark received" opens that choice instead of saving blind.
+    if (next === "received" && stock) {
+      setRestock(true);
+      setMode("receive");
+      return;
+    }
     start(async () => {
       const res = await setReturnStatus(id, next);
       if (res.ok) {
@@ -258,6 +276,53 @@ export function ReturnActions({
       } else {
         toast.error(res.error || "Could not update");
       }
+    });
+  }
+
+  /** One toast per stock outcome, so the owner always hears what happened to the unit. */
+  function announceStock(
+    lead: string,
+    outcome:
+      | { kind: string; units?: number; reason?: string }
+      | null
+      | undefined
+  ) {
+    if (outcome?.kind === "restocked") {
+      toast.success(`${lead} — ${outcome.units} back in stock`);
+    } else if (outcome?.kind === "kept_out") {
+      toast.success(`${lead} — left out of stock`);
+    } else if (outcome?.kind === "not_restocked") {
+      toast.warning(
+        `${lead}, but it could not go back in stock: ${outcome.reason} Add it by hand in Inventory if it should be sold.`,
+        { duration: 10000 }
+      );
+    } else {
+      toast.success(lead);
+    }
+  }
+
+  function receive() {
+    start(async () => {
+      const res = await setReturnStatus(id, "received", undefined, { restock });
+      if (!res.ok) {
+        toast.error(res.error || "Could not update");
+        return;
+      }
+      setMode("idle");
+      announceStock("Marked received", res.stock);
+      router.refresh();
+    });
+  }
+
+  function saveRestock() {
+    start(async () => {
+      const res = await setReturnRestock(id, restock);
+      if (!res.ok) {
+        toast.error(res.error || "Could not update the stock");
+        return;
+      }
+      announceStock(restock ? "Stock updated" : "Noted", res.stock);
+      router.refresh();
     });
   }
 
@@ -597,6 +662,23 @@ export function ReturnActions({
     );
   }
 
+  /* ------------------------------------------- received: back in stock? */
+  if (mode === "receive") {
+    return (
+      <Panel title="Mark received">
+        <RestockChoice checked={restock} onChange={setRestock} />
+        <Actions
+          confirmLabel={restock ? "Received · back in stock" : "Received · leave it out"}
+          variant="primary"
+          disabled={pending}
+          pending={pending}
+          onConfirm={receive}
+          onCancel={() => setMode("idle")}
+        />
+      </Panel>
+    );
+  }
+
   /* ------------------------------------------------- book the reverse pickup */
   if (mode === "book") {
     const chosen = quote?.options.find((o) => o.courierId === courierId);
@@ -881,8 +963,36 @@ export function ReturnActions({
 
   /* ------------------------------------------- decided: move it along / retry */
   const next = NEXT_STATUS[status] ?? [];
+  // The courier's "delivered" on the reverse leg proves the box arrived, not
+  // what is in it — so a tracked piece that came back that way waits here for
+  // a person to say whether it can be sold again.
+  const askStock = Boolean(stock?.received && stock.decision === null);
   return (
     <div className="min-w-0 space-y-2">
+      {askStock && (
+        <div className="space-y-1.5 rounded-lg border border-accent/40 bg-accent/5 p-2.5">
+          <p className="flex items-start gap-1.5 text-[11px] font-medium">
+            <PackageCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" />
+            <span>Back with you — not in stock yet</span>
+          </p>
+          <RestockChoice checked={restock} onChange={setRestock} />
+          <button
+            type="button"
+            disabled={pending}
+            onClick={saveRestock}
+            className={`${btn} border-accent/40 bg-accent/10 text-accent hover:bg-accent/20`}
+          >
+            {pending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            {restock ? "Put back in stock" : "Leave it out of stock"}
+          </button>
+        </div>
+      )}
+      {stock?.decision === "restocked" && (
+        <p className="text-[11px] text-muted-foreground">Back in stock</p>
+      )}
+      {stock?.decision === "kept_out" && (
+        <p className="text-[11px] text-muted-foreground">Left out of stock</p>
+      )}
       <div className="flex flex-wrap items-center gap-1.5">
         {pending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
         {next.map((s) => (
@@ -1063,6 +1173,50 @@ export function ReturnActions({
 }
 
 /* ------------------------------------------------------------------ pieces */
+
+/**
+ * "Put back in stock", ticked by default. Unticking it records that the piece
+ * stays off the count. The Damaged entry is suggested only the way it adds
+ * up — put it back, then write it off. Recording Damaged on a piece that was
+ * never put back would take a second, healthy unit off (see
+ * `settleReturnStock` in actions/returns.ts).
+ */
+function RestockChoice({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <div className="space-y-1">
+      <label className="flex min-h-11 cursor-pointer items-center gap-2 text-xs">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          className="h-3.5 w-3.5 accent-[var(--accent)]"
+        />
+        <span>Put back in stock</span>
+        <InfoTip term="Put back in stock">
+          Adds the piece back to what the store can sell. Untick it for one that
+          came back worn, stained or damaged — it then stays off the count.
+        </InfoTip>
+      </label>
+      {!checked && (
+        <p className="text-[11px] text-muted-foreground">
+          Nothing goes back on the shelf. Rather have the write-off on record?
+          Tick this, then record it as Damaged in Inventory.
+          <InfoTip term="Why not both">
+            A Damaged entry takes a unit off the count. This one was never put
+            back, so recording it as Damaged as well would take away a second,
+            healthy unit.
+          </InfoTip>
+        </p>
+      )}
+    </div>
+  );
+}
 
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (

@@ -25,6 +25,7 @@ import {
   Megaphone,
   BellRing,
   Zap,
+  Warehouse,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { NavAttention, useAdminChatUnread } from "@/components/admin/attention";
@@ -74,6 +75,9 @@ const nav: {
     match: (p) => p === "/admin" || p.startsWith("/admin/finance"),
   },
   { href: "/admin/products", label: "Products", icon: Package },
+  // Under Products: the catalogue says what is sold, this says how many are
+  // on the shelf — per size, with every entry that moved them.
+  { href: "/admin/inventory", label: "Inventory", icon: Warehouse },
   { href: "/admin/categories", label: "Categories", icon: Tag },
   { href: "/admin/orders", label: "Orders", icon: ShoppingCart },
   // Customers sits next to Orders, not next to "Interested customers": it is

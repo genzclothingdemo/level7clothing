@@ -9,7 +9,7 @@ import { getUserSession, setUserCookie } from "@/lib/user-auth";
 import { getVerificationSettings, orderVerificationGate } from "@/lib/otp";
 
 import { priceForSelection, repairSelection, imagesForSelection } from "@/lib/variants";
-import { comboKey } from "@/lib/options";
+import { comboKey, optionSignature } from "@/lib/options";
 import { orderNumber } from "@/lib/utils";
 import type { Attribute, SellableVariant } from "@/lib/types";
 import {
@@ -19,10 +19,18 @@ import {
   verifyRazorpaySignature,
 } from "@/lib/razorpay";
 import {
+  applyStockForStatus,
   autoConfirmOrder,
   getPipelineSettings,
   runConfirmationPipeline,
 } from "@/lib/fulfilment";
+import {
+  INVENTORY_TX_OPTIONS,
+  OutOfStockError,
+  releaseForOrder,
+  reserveForOrder,
+} from "@/lib/inventory";
+import { SYSTEM_ACTOR } from "@/lib/inventory-types";
 import { shouldAutoConfirm } from "@/lib/orders-pipeline";
 import { calculateShippingRate } from "@/lib/nimbuspost";
 import { isCouponClaimError, redeemCoupon, validateCoupon } from "@/lib/coupons";
@@ -454,8 +462,27 @@ export async function placeOrder(input: PlaceOrderInput) {
     (i) => productById.get(i.productId)?.isCustomisable === true
   );
 
-  // `redeemCoupon` throws when it loses the race for the last use, which rolls
-  // the whole transaction back — no order row, no decremented stock.
+  // The lines the stock step sees, in one fixed order — by product, then by
+  // option. Two checkouts locking the same rows lock them in the same order,
+  // which is what keeps two shoppers racing for the same sizes from
+  // deadlocking each other instead of one of them simply losing.
+  const stockLines = validItems
+    .map((i) => ({ productId: i.productId, quantity: i.quantity, options: i.options }))
+    .sort((a, b) =>
+      `${a.productId}|${optionSignature(a.options)}`.localeCompare(
+        `${b.productId}|${optionSignature(b.options)}`
+      )
+    );
+
+  // Which products the inventory engine took charge of. Every other line went
+  // through the legacy `Product.stock` counter, and the rollback below has to
+  // give back exactly what each path took — never both for one product.
+  let engineProducts = new Set<string>();
+
+  // `redeemCoupon` throws when it loses the race for the last use, and
+  // `reserveForOrder` throws `OutOfStockError` when a size is gone; either
+  // rolls the whole transaction back — no order row, no reservation, no
+  // decremented stock.
   let order: Order;
   try {
     order = await prisma.$transaction(async (tx) => {
@@ -488,8 +515,25 @@ export async function placeOrder(input: PlaceOrderInput) {
         },
       });
 
-      // Reduce stock (reserves it while an online payment is completed).
-      for (const i of validItems) {
+      // ---- Stock ----
+      //
+      // A **tracked** product reserves its units per size, and the oversell
+      // guard is here: `reserveForOrder` is a compare-and-set on the size's
+      // `available`, inside this transaction, so two shoppers cannot both buy
+      // the last one and one shopper cannot buy 3 of 2. It refuses by throwing
+      // `OutOfStockError`, which rolls back the order row with it.
+      //
+      // Every **untracked** product — all of them, until the owner starts
+      // tracking one — takes the legacy decrement exactly as before. Never
+      // both: a tracked product's `stock` is a mirror the engine has already
+      // rewritten, and decrementing it too would count the sale twice.
+      const { trackedProductIds } = await reserveForOrder(tx, {
+        orderId: created.id,
+        lines: stockLines,
+      });
+      engineProducts = trackedProductIds;
+      for (const i of stockLines) {
+        if (trackedProductIds.has(i.productId)) continue;
         await tx.product.update({
           where: { id: i.productId },
           data: { stock: { decrement: i.quantity } },
@@ -512,8 +556,18 @@ export async function placeOrder(input: PlaceOrderInput) {
       }
 
       return created;
-    });
+      // The engine's own limits, not Prisma's 5 s default: reserving is a few
+      // round trips per size on top of writing the order, and the default
+      // expired at 11.4 s from India to Mumbai in testing (see
+      // INVENTORY_TX_OPTIONS in lib/inventory.ts).
+    }, INVENTORY_TX_OPTIONS);
   } catch (err) {
+    // Already worded for the shopper — "Only 2 left of “Samurai” (Size: M) —
+    // you asked for 3." — so it is passed through, not replaced with a generic
+    // failure that leaves them guessing which line to change.
+    if (err instanceof OutOfStockError) {
+      return { ok: false as const, error: err.message };
+    }
     if (isCouponClaimError(err)) {
       return { ok: false as const, error: err.message };
     }
@@ -584,9 +638,34 @@ export async function placeOrder(input: PlaceOrderInput) {
       // leave the redemption row and the incremented `usedCount` behind — a
       // shopper whose payment window failed to open would have burned their
       // one allowed use on nothing.
+      //
+      // **The reservation goes first, and the order is deleted only if it
+      // went.** `releaseForOrder` runs in its own transaction and cannot join
+      // the one below. Deleting the order after a failed release would leave
+      // units promised to an order that no longer exists, with nothing on any
+      // screen pointing at them — so on failure the order is kept, still
+      // pending and unpaid, and `reconcileStockHolds` releases its hold once
+      // PAYMENT_HOLD_MINUTES have passed, exactly as for an abandoned
+      // checkout. The ledger keeps the RESERVE and RELEASE rows of a deleted
+      // order; they net to zero, and the ledger is meant to outlive an order.
+      const released = await releaseForOrder(order.id, SYSTEM_ACTOR)
+        .then(() => true)
+        .catch((e) => {
+          console.error("[orders] could not release the hold of an unplaced order:", e);
+          return false;
+        });
+      if (!released) {
+        return {
+          ok: false as const,
+          error: "Could not start the payment. Please try again or use another option.",
+        };
+      }
       await prisma
         .$transaction(async (tx) => {
-          for (const i of validItems) {
+          // Exactly the lines the legacy counter took at placement. A tracked
+          // product's units came back with the release above.
+          for (const i of stockLines) {
+            if (engineProducts.has(i.productId)) continue;
             await tx.product.update({
               where: { id: i.productId },
               data: { stock: { increment: i.quantity } },
@@ -751,6 +830,14 @@ export async function verifyRazorpayPayment(input: VerifyPaymentInput) {
     // response, never replace it. Dedupe is `<orderId>:failed`, so a shopper
     // who retries and fails again is told once, not twice.
     if (wrote) {
+      // The failure is known now, so its stock hold goes now rather than an
+      // hour later at the expiry sweep. A failed payment never confirms, and
+      // the shopper's natural next move is to try again — as a new order,
+      // which must not find its own abandoned attempt holding the last unit.
+      await applyStockForStatus(order.id, {
+        status: order.status,
+        paymentStatus: "failed",
+      });
       await runAutomationTrigger("order.payment_changed", {
         id: order.id,
         context: { previousPaymentStatus: order.paymentStatus },
@@ -773,14 +860,43 @@ export async function verifyRazorpayPayment(input: VerifyPaymentInput) {
   // order. The same pure rule the checkout path uses decides it here, now
   // that the real post-payment status is known.
   const pipeline = await getPipelineSettings();
-  const decision = shouldAutoConfirm(
+  const verdict = shouldAutoConfirm(
     { paymentMethod: order.paymentMethod, paymentStatus },
     pipeline
   );
+  // A cancelled order stays cancelled when its money turns up late. Its stock
+  // was released at the cancellation, so confirming it here — and, with
+  // auto-ship on, booking a courier — would ship units that may already
+  // belong to someone else. The money is still recorded below; what happens to
+  // the order is a person's call.
+  const decision =
+    order.status === "cancelled"
+      ? {
+          ...verdict,
+          confirm: false,
+          reason:
+            "The order had been cancelled before this payment arrived — refund it, or reinstate the order by hand.",
+        }
+      : verdict;
 
-  const paidNote = isPartial
-    ? `Advance received (Razorpay) — balance ₹${order.balanceDue} on delivery.`
-    : "Payment received (Razorpay).";
+  // An hour-old unpaid checkout has had its stock hold released (see
+  // PAYMENT_HOLD_MINUTES). Paying now does not bring the hold back — the units
+  // may since have sold — so the history says so before anyone books a courier.
+  const holdLapsed =
+    (await prisma.stockMovement
+      .count({ where: { orderId: order.id, type: "RELEASE" } })
+      .catch(() => 0)) > 0;
+
+  const paidNote = [
+    isPartial
+      ? `Advance received (Razorpay) — balance ₹${order.balanceDue} on delivery.`
+      : "Payment received (Razorpay).",
+    holdLapsed
+      ? "Its stock hold had already been released, so nothing is held for it — check the stock before you ship."
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   const history = Array.isArray(order.statusHistory)
     ? (order.statusHistory as unknown as { status: string; note?: string; at: string }[])

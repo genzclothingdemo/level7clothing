@@ -13,6 +13,11 @@ import { listReturnableProducts } from "@/app/actions/returns";
 import { ReturnFilters } from "@/components/admin/return-filters";
 import { ReturnActions } from "@/components/admin/return-actions";
 import { ReturnRto } from "@/components/admin/return-rto";
+import {
+  receivedAtOf,
+  returnStockDecision,
+  type ReturnStockDecision,
+} from "@/components/admin/return-stock";
 import { listRtoOrders } from "@/lib/nimbus-returns";
 import {
   OPEN_RETURN_STATUSES,
@@ -100,6 +105,89 @@ async function readPolicy() {
     // the goods — `computeRefund` cannot be handed a fee — so a stale or
     // unreadable settings row can no longer change what a refund comes to.
   };
+}
+
+/** What the card needs to know about a returned piece's stock. */
+type ReturnStock = {
+  /** Has the parcel reached the store, according to the return's history? */
+  received: boolean;
+  decision: ReturnStockDecision;
+};
+
+/**
+ * The stock state of every return on the page whose product is tracked — the
+ * input to the "put it back in stock?" question on the card.
+ *
+ * A handful of reads for the whole page, not per card, and just the first one
+ * when nothing on it is tracked (the live store until the owner starts
+ * tracking a product). A read that fails degrades to "ask nothing": the
+ * question can wait for a reload; a wrong answer cannot be taken back.
+ */
+async function readReturnStock(
+  requests: { id: string; orderId: string; productId: string | null; statusHistory: unknown }[]
+): Promise<Map<string, ReturnStock>> {
+  const out = new Map<string, ReturnStock>();
+  const productIds = [
+    ...new Set(requests.flatMap((r) => (r.productId ? [r.productId] : []))),
+  ];
+  if (productIds.length === 0) return out;
+
+  const tracked = await prisma.product
+    .findMany({
+      where: { id: { in: productIds }, trackInventory: true },
+      select: { id: true },
+    })
+    .catch(() => []);
+  const trackedIds = new Set(tracked.map((p) => p.id));
+  const mine = requests.filter((r) => r.productId && trackedIds.has(r.productId));
+  if (mine.length === 0) return out;
+
+  const [moves, variants] = await Promise.all([
+    // By order, which is indexed; a RETURN row carries both ids.
+    prisma.stockMovement
+      .findMany({
+        where: { orderId: { in: [...new Set(mine.map((r) => r.orderId))] }, type: "RETURN" },
+        select: { returnId: true },
+      })
+      .catch(() => null),
+    // Each tracked product's latest opening count: a return received before it
+    // is already on the shelf in that count.
+    prisma.productVariant
+      .findMany({
+        where: { productId: { in: [...trackedIds] } },
+        select: {
+          productId: true,
+          movements: {
+            where: { type: "OPENING" },
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { createdAt: true },
+          },
+        },
+      })
+      .catch(() => null),
+  ]);
+  if (!moves || !variants) return out;
+
+  const restocked = new Set(moves.map((m) => m.returnId));
+  const countedAt = new Map<string, Date>();
+  for (const v of variants) {
+    const at = v.movements[0]?.createdAt;
+    const seen = countedAt.get(v.productId);
+    if (at && (!seen || at > seen)) countedAt.set(v.productId, at);
+  }
+
+  for (const r of mine) {
+    out.set(r.id, {
+      received: receivedAtOf(r.statusHistory) !== null,
+      decision: returnStockDecision({
+        restocked: restocked.has(r.id),
+        history: r.statusHistory,
+        countedAt: (r.productId && countedAt.get(r.productId)) || null,
+      }),
+    });
+  }
+  return out;
 }
 
 export default async function AdminReturns({
@@ -248,6 +336,8 @@ export default async function AdminReturns({
     counts[g.status] = g._count._all;
     counts.all += g._count._all;
   }
+
+  const stockById = await readReturnStock(requests);
 
   const narrowed = !!(sp.q || sp.reason || sp.issue || sp.age);
 
@@ -605,6 +695,7 @@ export default async function AdminReturns({
                         nimbusAwb={r.nimbusAwb}
                         nimbusCourier={r.nimbusCourier}
                         nimbusEnabled={policy.nimbusEnabled}
+                        stock={stockById.get(r.id)}
                       />
                     </div>
                   </div>

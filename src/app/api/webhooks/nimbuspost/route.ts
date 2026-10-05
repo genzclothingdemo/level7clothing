@@ -52,9 +52,10 @@ import { mapNimbusStatus } from "@/lib/nimbus-status";
 // The engine is no longer addressed directly from here. Which trigger a
 // courier scan raises is one decision shared with the polling sync — see the
 // long note on the helper for what happened when each side decided for itself.
-import { notifyCourierScan } from "@/lib/fulfilment";
+// What the scan does to the shelf is the same kind of shared decision.
+import { applyStockForStatus, notifyCourierScan } from "@/lib/fulfilment";
 import { applyReverseScan } from "@/lib/nimbus-returns";
-import { isRtoStatus } from "@/lib/returns";
+import { isRtoComplete, isRtoStatus } from "@/lib/returns";
 
 // ---------------------------------------------------------------------------
 // The status table lives in lib/nimbus-status.ts. It used to be declared here
@@ -238,7 +239,11 @@ export async function POST(req: NextRequest) {
   });
 
   // ---- 5. Persist to DB ---------------------------------------------------
-  await prisma.order
+  //
+  // `wrote` gates the stock step below: selling or releasing against a status
+  // the row does not actually carry would leave the ledger and the order
+  // telling two different stories.
+  const wrote = await prisma.order
     .update({
       where: { id: order.id },
       data: {
@@ -254,7 +259,25 @@ export async function POST(req: NextRequest) {
         statusHistory: history as unknown as object[],
       },
     })
-    .catch((err) => console.error("[nimbus-webhook] DB update failed:", err));
+    .then(() => true)
+    .catch((err) => {
+      console.error("[nimbus-webhook] DB update failed:", err);
+      return false;
+    });
+
+  // ---- 5a. Move the stock -------------------------------------------------
+  //
+  // Shipped sells, a courier cancellation releases, a completed RTO restocks —
+  // the same `applyStockForStatus` the poller calls, so push and poll agree
+  // about the shelf. Idempotent on the ledger, so this and the poller both
+  // reporting one scan move stock once. An unrecognised scan that is not an
+  // RTO changed no status and moves nothing, so it costs no transaction.
+  if (wrote && (newStatus || isRtoComplete(nimbusStatusRaw))) {
+    await applyStockForStatus(order.id, {
+      status: newStatus ?? order.status,
+      courierScan: nimbusStatusRaw,
+    });
+  }
 
   // ---- 6. Tell the automation engine the order moved -----------------------
   //

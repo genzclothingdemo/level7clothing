@@ -28,13 +28,12 @@
  */
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { CircleAlert, Lock } from "lucide-react";
 import { Card, Field } from "@/components/admin/form-kit";
-import {
-  createEmailTemplate,
-  updateEmailTemplate,
-} from "@/app/actions/automation";
+import { Disclosure } from "@/components/store/disclosure";
+import { updateEmailTemplate } from "@/app/actions/automation";
 
 export type TokenGroupDTO = {
   label: string;
@@ -42,7 +41,7 @@ export type TokenGroupDTO = {
 };
 
 export type TemplateInitial = {
-  id?: string;
+  id: string;
   name: string;
   subject: string;
   body: string;
@@ -74,17 +73,21 @@ export function AutomationTemplateForm({
   groups,
   sample,
   initial,
+  usedFor,
 }: {
   groups: TokenGroupDTO[];
   sample: Record<string, string>;
-  initial?: TemplateInitial;
+  /** Templates are edited, never created here — see the templates page. */
+  initial: TemplateInitial;
+  /** "Order shipped · to your customer (Email, Bell)" — read off the rules. */
+  usedFor: string[];
 }) {
   const router = useRouter();
-  const templateId = initial?.id;
+  const templateId = initial.id;
 
-  const [name, setName] = useState(initial?.name ?? "");
-  const [subject, setSubject] = useState(initial?.subject ?? "");
-  const [body, setBody] = useState(initial?.body ?? "");
+  const [name, setName] = useState(initial.name);
+  const [subject, setSubject] = useState(initial.subject);
+  const [body, setBody] = useState(initial.body);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -112,9 +115,7 @@ export function AutomationTemplateForm({
     fd.append("subject", subject);
     fd.append("body", body);
 
-    const res = templateId
-      ? await updateEmailTemplate(templateId, fd)
-      : await createEmailTemplate(fd);
+    const res = await updateEmailTemplate(templateId, fd);
     setSaving(false);
 
     if (res.success) {
@@ -127,19 +128,26 @@ export function AutomationTemplateForm({
 
   return (
     <form onSubmit={onSubmit} className="min-w-0 max-w-3xl space-y-4">
-      {initial?.isSystem && (
-        <div className="flex items-start gap-2 rounded-2xl border border-border bg-muted/30 p-4 text-sm text-muted-foreground">
-          <Lock className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>
-            This is one of the templates the store ships with. Every word of it
-            is yours to change — it just can&apos;t be deleted, because a rule
-            expects it to exist.
-          </span>
-        </div>
-      )}
+      {/* What these words are sent for — read off the alerts, never chosen here.
+          Whether each goes is Settings → Alerts; this line only says where the
+          sentence will appear, which is what somebody editing it needs to know. */}
+      <div className="flex min-w-0 items-start gap-2 rounded-2xl border border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
+        {initial.isSystem && <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-label="Ships with the store" />}
+        <span className="min-w-0 break-words">
+          {usedFor.length > 0 ? (
+            <>Sent for {usedFor.join(" · ")}.</>
+          ) : (
+            <>No alert uses this message yet.</>
+          )}{" "}
+          <Link href="/admin/settings?tab=alerts" className="text-accent underline-offset-2 hover:underline">
+            Switch alerts on or off
+          </Link>
+          .
+        </span>
+      </div>
 
       <Card title="The email">
-        <Field label="Template name" required hint="What you'll pick from a rule.">
+        <Field label="Name" required hint="How this message is listed.">
           {(id) => (
             <input
               id={id}
@@ -240,33 +248,31 @@ export function AutomationTemplateForm({
         )}
       </Card>
 
-      {/* ---- The token reference ---- */}
-      <div className="min-w-0 rounded-2xl border border-border bg-card p-4 sm:p-5">
-        <p className="eyebrow text-muted-foreground">Tokens you can use</p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          A template can be used by any rule, so which of these actually have a
-          value depends on the trigger the rule uses. Anything the trigger
-          doesn&apos;t provide sends as nothing.
-        </p>
-        <div className="mt-4 space-y-4">
-          {groups.map((group) => (
-            <div key={group.label} className="min-w-0">
-              <p className="text-xs font-medium uppercase tracking-wider text-foreground">
-                {group.label}
-              </p>
-              <ul className="mt-2 grid gap-x-4 gap-y-1.5 sm:grid-cols-2">
-                {group.tokens.map((t) => (
-                  <li key={t.token} className="min-w-0 text-xs">
-                    <code className="break-all font-mono text-accent">{`{{${t.token}}}`}</code>
-                    <span className="ml-1.5 text-muted-foreground">
-                      {t.describes}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
-        </div>
+      {/* ---- The token reference, folded: looked up while writing, not read ---- */}
+      <div className="min-w-0 rounded-2xl border border-border bg-card px-4 py-1 sm:px-5">
+        <Disclosure label="Tokens you can use" summary={`${groups.reduce((n, g) => n + g.tokens.length, 0)} available`}>
+          <p className="mb-3 text-xs text-muted-foreground">
+            Which of these have a value depends on the event the message is sent for.
+            One the event doesn&apos;t provide is sent as nothing.
+          </p>
+          <div className="space-y-4">
+            {groups.map((group) => (
+              <div key={group.label} className="min-w-0">
+                <p className="text-xs font-medium uppercase tracking-wider text-foreground">
+                  {group.label}
+                </p>
+                <ul className="mt-2 grid gap-x-4 gap-y-1.5 sm:grid-cols-2">
+                  {group.tokens.map((t) => (
+                    <li key={t.token} className="min-w-0 text-xs">
+                      <code className="break-all font-mono text-accent">{`{{${t.token}}}`}</code>
+                      <span className="ml-1.5 text-muted-foreground">{t.describes}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </Disclosure>
       </div>
 
       {error && (
@@ -289,7 +295,7 @@ export function AutomationTemplateForm({
           disabled={saving || !name.trim() || !subject.trim() || !body.trim()}
           className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-lg bg-foreground px-6 text-[11px] font-medium uppercase tracking-widest text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {saving ? "Saving…" : templateId ? "Save changes" : "Create template"}
+          {saving ? "Saving…" : "Save changes"}
         </button>
       </div>
     </form>

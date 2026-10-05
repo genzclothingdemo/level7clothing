@@ -44,6 +44,20 @@ model Product {
   compareAtPrice    Int? // optional "was" price for showing a discount
   images            String[] @default([])
   stock             Int      @default(0)
+  // ---- Inventory (added 2026-09-28) ----
+  // Shopify's "Track quantity". **False = this product sells exactly as it did
+  // before inventory existed**: the `stock` counter above, no per-size limit.
+  // True = its ProductVariant rows and their StockMovement ledger are the
+  // authority, checkout refuses to oversell, and `stock` becomes a derived
+  // mirror of their total available — kept so the ~40 readers of `stock` keep
+  // working. Off by default so that adding the ledger could not change what the
+  // live store sells: the per-size split of existing stock is unknown and has
+  // to come from a real count, not a guess.
+  trackInventory    Boolean  @default(false)
+  // What one unit cost the store, when every size cost the same. A variant's
+  // own `costPrice` overrides it. Drives margin and stock valuation. Never
+  // shown to a customer.
+  costPrice         Int?
   // Which checkout modes this product allows — subset of:
   // "prepaid" (full online), "cod" (cash on delivery),
   // "partial" (online advance + rest COD), "direct" (no payment, just placed).
@@ -88,6 +102,10 @@ model Product {
 
   productImages     ProductImage[]
   reviews           Review[]
+  // Named `variantRows`, not `variants`, because `variants` is already the
+  // editor's JSON draft above. These rows are the sellable units; the JSON
+  // fields are the editor's working copy and the storefront's mirror.
+  variantRows       ProductVariant[]
 }
 
 // -------- Orders --------
@@ -361,6 +379,11 @@ model SiteSettings {
   requireSignupPhoneOtp       Boolean @default(false)
   requireVerifiedEmailToOrder Boolean @default(false)
   requireVerifiedPhoneToOrder Boolean @default(false)
+  // ---- Inventory ----
+  // Below this many units available, a variant counts as low stock. A variant's
+  // own `lowStockAt` overrides it. 5 matches the "low stock" filter the admin
+  // products screen already used before inventory existed.
+  lowStockThreshold Int @default(5)
   codFeeAmount          Int      @default(0)
   partialFeeAmount      Int      @default(0)
   announcement          String?  @default("Join the club — exclusive deals and early access to new drops")
@@ -928,4 +951,108 @@ model AdminActivityLog {
   at     DateTime @default(now())
 
   @@index([tempAdminId, at])
+}
+
+/// One sellable unit — the thing a SKU names. "Samurai tee, size M" is one row.
+///
+/// **Stock columns are never written directly.** Every change goes through
+/// `recordMovement()` in `lib/inventory.ts`, which inserts a StockMovement and
+/// updates these three numbers in the same transaction, so they are always the
+/// sum of the ledger and every unit on the shelf can be explained.
+model ProductVariant {
+  id             String   @id @default(cuid())
+  productId      String
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  /// Same string as `comboKey(combo)` / `SellableVariant.id` / an order line's
+  /// `optionSignature(options)` — "Size=M", "color=red|Size=S", or "" for a
+  /// product with no options. This is how an order line finds the unit it sold.
+  comboKey       String
+  combo          Json     @default("{}")
+  sku            String   @unique
+  barcode        String?  @unique
+  /// Null = inherit the product's. Set only where this unit genuinely differs.
+  price          Int?
+  compareAtPrice Int?
+  costPrice      Int?
+  weightGrams    Int?
+  /// Null = SiteSettings.lowStockThreshold.
+  lowStockAt     Int?
+  /// A variant with ledger history is deactivated, never deleted — see
+  /// StockMovement's `onDelete: Restrict`.
+  isActive       Boolean  @default(true)
+  sortOrder      Int      @default(0)
+
+  /// Physically in the store.
+  onHand         Int      @default(0)
+  /// Promised to open orders that have not shipped yet.
+  reserved       Int      @default(0)
+  /// `onHand - reserved`. Stored rather than computed so the oversell guard is
+  /// one atomic compare-and-set — `updateMany({ where: { available: { gte: q } } })`
+  /// — the same shape as the coupon `usedCount` guard. **May go negative**, and
+  /// that is information, not corruption: damage recorded against units already
+  /// promised to customers means those orders cannot be filled from the shelf.
+  available      Int      @default(0)
+
+  movements      StockMovement[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([productId, comboKey])
+  @@index([productId])
+  @@index([available])
+}
+
+/// The stock ledger. Append-only: nothing edits or deletes a row, a mistake is
+/// corrected by a further entry, exactly like a bank statement.
+///
+/// Types (see INVENTORY_MOVEMENT_TYPES in lib/inventory-types.ts):
+///   OPENING       first count when tracking starts            onHand +
+///   RECEIPT       fresh stock arrived                         onHand +
+///   RESERVE       an order was placed                         reserved +
+///   RELEASE       that order was cancelled before shipping    reserved -
+///   SALE          that order shipped                          onHand -, reserved -
+///   RETURN        a customer return came back, restockable    onHand +
+///   RTO           a failed delivery came back to origin        onHand +
+///   DAMAGE        dead stock — written off                    onHand -
+///   PERSONAL_USE  taken for the store's own use               onHand -
+///   ADJUSTMENT    a recount found a different number          onHand ±
+model StockMovement {
+  id            String   @id @default(cuid())
+  variantId     String
+  /// **Restrict, not Cascade.** A ledger that can be silently destroyed is not a
+  /// ledger. Deleting a variant (or its product) that has history is refused at
+  /// the database; the admin deactivates it instead.
+  variant       ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  type          String
+  onHandDelta   Int      @default(0)
+  reservedDelta Int      @default(0)
+  /// Balances after this entry, so the ledger reads top to bottom like a
+  /// statement and any row can be checked without re-summing everything above it.
+  onHandAfter   Int
+  reservedAfter Int
+  /// What each unit cost, recorded on a RECEIPT. Lets stock be valued at what
+  /// was actually paid rather than today's cost price.
+  unitCost      Int?
+  note          String?
+  /// Plain strings, not foreign keys, like the rest of this schema's loose
+  /// references: an order is never deleted, and the ledger must outlive one if
+  /// it ever is.
+  orderId       String?
+  returnId      String?
+  /// Makes the automatic entries idempotent: `sale:<orderId>:<variantId>` can be
+  /// inserted once, so a courier webhook and the poller both marking an order
+  /// shipped cannot sell the same unit twice. Same pattern as the automation
+  /// engine's dedupe — insert, and treat P2002 as "already done". Null for
+  /// manual entries, which are deliberately repeatable.
+  idemKey       String?  @unique
+  /// "admin" | "temp_admin" | "system". Name is copied, not joined, so the entry
+  /// still says who did it after that temporary admin is deleted.
+  actorType     String   @default("system")
+  actorId       String?
+  actorName     String?
+  createdAt     DateTime @default(now())
+
+  @@index([variantId, createdAt])
+  @@index([orderId])
+  @@index([type, createdAt])
 }

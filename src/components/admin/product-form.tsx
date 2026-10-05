@@ -20,7 +20,17 @@ import {
 import { Button } from "@/components/ui/button";
 import { createProduct, updateProduct } from "@/app/actions/admin";
 import { VariantMediaTab, type VisualGalleryState } from "@/components/admin/variant-media-tab";
-import { VariantTable, type VariantEntry } from "@/components/admin/variant-table";
+import {
+  EMPTY_VARIANT_ENTRY,
+  SkuInput,
+  VariantTable,
+  entryNumber,
+  type VariantEntry,
+  type VariantFieldError,
+  type VariantRowDTO,
+  type VariantRowFacts,
+  type VariantView,
+} from "@/components/admin/variant-table";
 import {
   Card,
   Check,
@@ -37,7 +47,8 @@ import { RETURN_POLICY_HREF } from "@/components/admin/return-policy-summary";
 import { InfoTip } from "@/components/store/info-tip";
 import { allCombinations, comboKey } from "@/lib/options";
 import { explainReturnPolicy } from "@/lib/returns";
-import { IMAGE_CONTROLLER_NONE } from "@/lib/variants";
+import { SKU_PATTERN, generateSku, normaliseSku, skuPrefixFor } from "@/lib/sku";
+import { IMAGE_CONTROLLER_NONE, settleVariantPrices } from "@/lib/variants";
 import { formatINR, cn } from "@/lib/utils";
 import type { ProductDTO, ProductOption, ProductVideo } from "@/lib/types";
 
@@ -125,6 +136,20 @@ type Props = {
     defaultReturnable: boolean;
     returnWindowDays: number;
   };
+  /**
+   * The product's `ProductVariant` rows — SKU, barcode, cost, low-stock alert
+   * and, for a tracked product, the live stock read-out. A duplicate passes the
+   * source's rows with every identifier and counter stripped: the copy gets new
+   * SKUs and starts with no stock.
+   */
+  variantRows?: VariantRowDTO[];
+  /**
+   * Whether this product's stock is kept by the inventory ledger, and the
+   * store-wide low-stock default. `href` is the Inventory screen for it.
+   */
+  inventory?: { tracked: boolean; lowStockThreshold: number; href: string };
+  /** Store name, for previewing the SKUs new combinations will be given. */
+  brandName?: string;
 };
 
 /** Which top-level tab of the editor is showing. */
@@ -160,7 +185,9 @@ const MODE_COPY: { mode: Mode; label: string; tip: string }[] = [
   },
 ];
 
-const EMPTY_ENTRY: VariantEntry = { available: true, price: "", stock: "" };
+const EMPTY_ENTRY: VariantEntry = EMPTY_VARIANT_ENTRY;
+
+const numString = (n: number | null | undefined) => (n == null ? "" : String(n));
 
 /**
  * ProductForm — the admin product editor.
@@ -199,11 +226,19 @@ export function ProductForm({
   initialSubcategoryId,
   infoDefaults,
   returnDefaults,
+  variantRows = [],
+  inventory,
+  brandName = "",
 }: Props) {
   const router = useRouter();
   // A duplicate arrives as a fully populated product with a blank id — that is
   // still a create, not an edit.
   const editing = !!product?.id;
+  // A copy is a new product, and a new product is never tracked: tracking
+  // starts from a real count in Admin → Inventory.
+  const tracked = editing && !!inventory?.tracked;
+  const lowStockDefault = inventory?.lowStockThreshold ?? 5;
+  const inventoryHref = inventory?.href ?? "/admin/inventory";
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   // Set once the "some values have no photos" warning has been shown, so a
@@ -219,8 +254,15 @@ export function ProductForm({
   // writer of these two, and it should not stop compiling over the shape of a
   // read model it does not own.
   const extras = product as
-    | (ProductDTO & { isCustomisable?: boolean | null; customisationNote?: string | null })
+    | (ProductDTO & {
+        isCustomisable?: boolean | null;
+        customisationNote?: string | null;
+        costPrice?: number | null;
+      })
     | undefined;
+
+  // What one unit cost, when every size cost the same. Blank = not recorded.
+  const [costPrice, setCostPrice] = useState<string>(numString(extras?.costPrice));
 
   // Derive the "Discount %" field from an existing compare-at price:
   // discount = compareAtPrice > price ? round((cap - price) / cap * 100) : 0.
@@ -327,10 +369,20 @@ export function ProductForm({
     return declared[0] ?? IMAGE_CONTROLLER_NONE;
   });
 
-  // ---- Variants (price / stock / availability per combo) ----
+  // ---- Variants (price / stock / availability / identity per combo) ----
+  //
+  // Two sources, one entry per combination. The `variants` JSON draft carries
+  // availability and the legacy per-combination stock; the `ProductVariant`
+  // rows carry identity and cost, **and are the authority for price** — the
+  // server writes the draft, the rows and the mirror checkout charges from out
+  // of one settled answer, so after any save they agree and the row is simply
+  // the most direct reading of it.
   const [useVariants, setUseVariants] = useState<boolean>(
     (product?.variants?.length ?? 0) > 0 ||
-      (product?.variantPrices?.length ?? 0) > 0
+      (product?.variantPrices?.length ?? 0) > 0 ||
+      // A row with its own price must never be hidden behind the switch —
+      // turning it off is what clears one, so it has to be visible to do that.
+      variantRows.some((r) => r.price != null || r.compareAtPrice != null)
   );
   // Variant data keyed by combo signature.
   const [variantMap, setVariantMap] = useState<Record<string, VariantEntry>>(
@@ -342,9 +394,10 @@ export function ProductForm({
           const rawPrice = (v as { price?: unknown }).price;
           const rawStock = (v as { stock?: unknown }).stock;
           map[comboKey(v.combo)] = {
+            ...EMPTY_ENTRY,
             available: v.available,
-            // Preserve an "inherit base" (blank) price so the per-row
-            // "Base price" toggle round-trips.
+            // Preserve an "inherit base" (blank) price so a blank row stays
+            // blank rather than freezing today's base into it.
             price: rawPrice === "" || rawPrice == null ? "" : String(rawPrice),
             stock: rawStock === "" || rawStock == null ? "" : String(rawStock),
           };
@@ -353,15 +406,41 @@ export function ProductForm({
         // Migrate the older price-only matrix.
         for (const v of product.variantPrices) {
           map[comboKey(v.combo)] = {
-            available: true,
+            ...EMPTY_ENTRY,
             price: String(v.price),
-            stock: "",
           };
         }
+      }
+      for (const r of variantRows) {
+        const prev = map[r.key] ?? EMPTY_ENTRY;
+        map[r.key] = {
+          ...prev,
+          // The row is the authority for price where it exists (null = inherit).
+          // A duplicate's rows have no id and defer to the copied draft.
+          price: r.price != null ? String(r.price) : r.id ? "" : prev.price,
+          sku: r.sku,
+          barcode: r.barcode ?? "",
+          compareAtPrice: numString(r.compareAtPrice),
+          costPrice: numString(r.costPrice),
+          lowStockAt: numString(r.lowStockAt),
+        };
       }
       return map;
     }
   );
+
+  // Rows that exist in the database for this product, by combination. A
+  // duplicate's rows carry no id — nothing of the source's is "existing" here.
+  const facts = useMemo(
+    () =>
+      new Map<string, VariantRowFacts>(
+        variantRows.filter((r) => r.id).map((r) => [r.key, r])
+      ),
+    [variantRows]
+  );
+  // Shown and edited as a grid; a failed save pins its message to one cell.
+  const [gridView, setGridView] = useState<VariantView>("price");
+  const [gridError, setGridError] = useState<VariantFieldError | null>(null);
 
   // ---- Visual Gallery state (Media tab) ----
   // Initialise from existing variants so editing an existing product keeps its images.
@@ -463,21 +542,102 @@ export function ProductForm({
   // All combinations of the current options (recomputed as options change).
   const combos = useMemo(() => allCombinations(optionMatrix), [optionMatrix]);
 
-  const base = Number(form.price || 0);
-
-  // Product price = MIN of the available variant prices when variants exist,
-  // else the entered base price. Blank variant price inherits the base.
-  const variantMinPrice = useMemo(() => {
-    if (!useVariants || combos.length === 0) return base;
-    const prices = combos
-      .map((c) => variantMap[comboKey(c)] ?? EMPTY_ENTRY)
-      .filter((v) => v.available)
-      .map((v) => (v.price === "" ? base : Number(v.price) || 0));
-    return prices.length ? Math.min(...prices) : base;
-  }, [useVariants, combos, variantMap, base]);
-
+  const base = Math.max(0, Math.round(Number(form.price || 0)));
   const hasVariants = useVariants && combos.length > 0;
-  const effectivePrice = hasVariants ? variantMinPrice : base;
+
+  /**
+   * What every combination sells for, and what the product is stored at —
+   * from `settleVariantPrices`, the function the server writes the rows and
+   * the checkout mirror with. The editor used to compute its own minimum,
+   * reading a blank row as the typed base while the server charged it the
+   * saved minimum; one function means one answer.
+   */
+  const settled = useMemo(
+    () =>
+      settleVariantPrices({
+        basePrice: base,
+        combos: hasVariants
+          ? combos.map((c) => {
+              const key = comboKey(c);
+              const v = variantMap[key] ?? EMPTY_ENTRY;
+              return { key, override: v.price, available: v.available };
+            })
+          : [],
+      }),
+    [base, hasVariants, combos, variantMap]
+  );
+  const effectivePrice = settled.productPrice;
+  const sellsAt = (key: string) => (hasVariants ? settled.effective[key] ?? base : base);
+  // Blank rows that will be pinned at the base because a cheaper size moved
+  // the product's price below it — worth saying before the save, not after.
+  const pinnedBlank =
+    hasVariants &&
+    effectivePrice !== base &&
+    combos.some((c) => (variantMap[comboKey(c)]?.price ?? "") === "");
+
+  // The compare-at ("was") price this save will store. Discount % round-trips
+  // through it — but **untouched means untouched**: the percentage is rounded
+  // for display, so recomputing from it moved a ₹2,277 "was" price to ₹2,272
+  // on a save where nobody touched pricing. When neither the discount nor the
+  // price changed, the stored compare-at goes back exactly.
+  const discountNum = Math.min(99, Math.max(0, Number(form.discount) || 0));
+  const discountUntouched =
+    !!product &&
+    form.discount === (initialDiscount ? String(initialDiscount) : "") &&
+    effectivePrice === product.price;
+  const compareAtToSave: number | null = discountUntouched
+    ? (product!.compareAtPrice ?? null)
+    : discountNum > 0
+      ? Math.round(effectivePrice / (1 - discountNum / 100))
+      : null;
+
+  const productCost = entryNumber(costPrice);
+  // Rows kept for their stock history after their combination was removed.
+  const liveKeys = useMemo(
+    () => new Set(combos.length ? combos.map(comboKey) : [""]),
+    [combos]
+  );
+  const retired = useMemo(
+    () => [...facts.values()].filter((f) => !liveKeys.has(f.key) && f.movements > 0),
+    [facts, liveKeys]
+  );
+  // A tracked product's live position, summed the way the inventory mirror is.
+  const stockTotals = useMemo(() => {
+    let available = 0, onHand = 0, reserved = 0;
+    for (const f of facts.values()) {
+      if (!liveKeys.has(f.key) || !f.isActive) continue;
+      available += Math.max(0, f.available);
+      onHand += f.onHand;
+      reserved += f.reserved;
+    }
+    return { available, onHand, reserved };
+  }, [facts, liveKeys]);
+
+  /**
+   * The SKU a new combination will get if nothing is typed — the server's own
+   * generator, run against this product's SKUs. The server checks the whole
+   * store, so a clash elsewhere can still add a `-2`; that is why it is shown
+   * as a placeholder marked "auto", never as a value.
+   */
+  const skuPreview = useMemo(() => {
+    const prefix = skuPrefixFor(brandName);
+    const own = new Set<string>([
+      ...[...facts.values()].map((f) => f.sku),
+      ...Object.values(variantMap)
+        .map((v) => normaliseSku(v.sku))
+        .filter(Boolean),
+    ]);
+    const axisOrder = optionMatrix.map((o) => o.name);
+    return (combo: Record<string, string>) =>
+      generateSku({
+        prefix,
+        category: form.category,
+        productName: form.name,
+        combo,
+        axisOrder,
+        taken: new Set(own),
+      });
+  }, [brandName, facts, variantMap, optionMatrix, form.category, form.name]);
 
   // Values of the image-driving option — the keys every gallery is filed under.
   const visualValues = useMemo(
@@ -649,12 +809,47 @@ export function ProductForm({
       setSaving(false);
       return;
     }
-    if (form.stock === "") {
+    // A tracked product's stock is a read-out, not an input — nothing to check.
+    if (!tracked && form.stock === "") {
       setTab("pricing");
       toast.error("Stock is required");
       setSaving(false);
       return;
     }
+
+    // ── Variant identity ──
+    // The server checks all of this again (and store-wide uniqueness, which
+    // only it can); catching the typing mistakes here saves a round trip and
+    // lands the admin on the cell.
+    const rowKeys = combos.length ? combos.map(comboKey) : [""];
+    const retiredSkus = new Set(retired.map((r) => r.sku));
+    const seenSku = new Map<string, string>();
+    for (const key of rowKeys) {
+      const v = variantOf(key);
+      const typed = normaliseSku(v.sku);
+      const current = facts.get(key)?.sku ?? null;
+      const label = key ? key.replace(/=/g, " ").replace(/\|/g, " · ") : "this product";
+      const fail = (message: string, field: string) => {
+        setTab("pricing");
+        setGridView(field === "sku" || field === "barcode" ? "sku" : "price");
+        setGridError({ key, field, message });
+        toast.error(message);
+        setSaving(false);
+      };
+      if (typed && typed !== current && !SKU_PATTERN.test(typed)) {
+        fail(`SKU “${v.sku.trim()}” for ${label} isn't valid — use 3–40 capital letters, digits and hyphens.`, "sku");
+        return;
+      }
+      const final = typed || current;
+      if (final) {
+        if (seenSku.has(final) || retiredSkus.has(final)) {
+          fail(`Two combinations can't share the SKU “${final}”.`, "sku");
+          return;
+        }
+        seenSku.set(final, key);
+      }
+    }
+    setGridError(null);
 
     // ── Media validation ──
     // The Media tab is now the only source of photos, so nothing can reach the
@@ -800,12 +995,22 @@ export function ProductForm({
       images: imageDrivingOption ? [imageDrivingOption] : [],
     };
 
-    // Product price is the min available variant price when variants exist,
-    // otherwise the entered base. Discount % round-trips through compareAtPrice.
-    const price = Math.max(0, Math.round(effectivePrice));
-    const discountNum = Math.min(99, Math.max(0, Number(form.discount) || 0));
-    const compareAtPrice =
-      discountNum > 0 ? Math.round(price / (1 - discountNum / 100)) : null;
+    const compareAtPrice = compareAtToSave;
+
+    // One entry per combination (or the single `""` row of a product with no
+    // options): identity and cost only. Price travels in `variants` above, and
+    // stock is not the editor's to send for a tracked product.
+    const variantRowsPayload = rowKeys.map((key) => {
+      const v = variantOf(key);
+      return {
+        key,
+        sku: normaliseSku(v.sku) || null,
+        barcode: v.barcode.trim() || null,
+        compareAtPrice: entryNumber(v.compareAtPrice),
+        costPrice: entryNumber(v.costPrice),
+        lowStockAt: entryNumber(v.lowStockAt),
+      };
+    });
 
     const payload = {
       name: form.name,
@@ -817,9 +1022,15 @@ export function ProductForm({
       propertyModules,
       variantPrices: [], // superseded by `variants`
       variants,
-      price,
+      // The base as typed. The server settles it against the combinations —
+      // the product is stored at the cheapest available one, and blank rows
+      // are pinned where that would otherwise move them.
+      price: base,
       compareAtPrice,
-      stock: Number(form.stock || 0),
+      costPrice: productCost,
+      variantRows: variantRowsPayload,
+      // Ignored by the server for a tracked product; sent so the schema holds.
+      stock: tracked ? (product?.stock ?? 0) : Number(form.stock || 0),
       description: form.description,
       tags: form.tags
         .split(",")
@@ -866,7 +1077,10 @@ export function ProductForm({
 
     setSaving(false);
     if (res.ok) {
-      toast.success(editing ? "Product updated" : "Product created");
+      const notices = res.notices ?? [];
+      toast.success(editing ? "Product updated" : "Product created", {
+        description: notices.length ? notices.join(" ") : undefined,
+      });
       // Land back on the group that was just added to, so the next piece in
       // the set is one click away.
       router.push(
@@ -876,6 +1090,15 @@ export function ProductForm({
       );
       router.refresh();
     } else {
+      // A refusal about one combination points at its cell.
+      if ("variantKey" in res && (res.variantKey !== undefined || res.variantField)) {
+        const field = res.variantField ?? "";
+        setTab("pricing");
+        setGridView(
+          field === "sku" || field === "barcode" ? "sku" : field === "lowStockAt" ? "stock" : "price"
+        );
+        setGridError({ key: res.variantKey, field, message: res.error });
+      }
       toast.error(res.error || "Could not save");
     }
   }
@@ -1472,9 +1695,11 @@ export function ProductForm({
           tip={
             <>
               An option is a choice the customer makes — Size, Colour, Fit. Every
-              combination of every option becomes a variant you can price,
-              stock and photograph. Prices and stock live on the{" "}
-              <b>Price &amp; Stock</b> tab, photos on <b>Media</b>.
+              combination of every option becomes a variant with its own SKU,
+              which you can price, stock and photograph. Prices, SKUs and stock
+              live on the <b>Price &amp; Stock</b> tab, photos on <b>Media</b>.
+              Removing a choice deletes its variant — or retires it, SKU and
+              history kept, if it has ever held stock.
             </>
           }
           aside={
@@ -1522,26 +1747,13 @@ export function ProductForm({
                       aria-label={`Choice ${ci + 1}`}
                       placeholder="Choice (S, M, L…)"
                     />
-                    {!useVariants && (
-                      <div className="relative w-24 shrink-0 sm:w-28">
-                        <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
-                          +₹
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={choice.priceDelta || ""}
-                          onChange={(e) =>
-                            setChoice(gi, ci, {
-                              priceDelta: Number(e.target.value) || 0,
-                            })
-                          }
-                          className="input h-11 pl-8 sm:h-10"
-                          placeholder="0"
-                          aria-label={`Extra price for choice ${ci + 1}`}
-                        />
-                      </div>
-                    )}
+                    {/* No "+₹ per choice" box. `priceDelta` was authored here
+                        and read by nothing — not the storefront, not checkout —
+                        so a choice marked +₹200 sold at the base price. A
+                        control that changes nothing is worse than none; a
+                        choice that costs more gets its own price in the
+                        Variants grid, which checkout does charge. The stored
+                        value (0 on every product) still round-trips. */}
                     <button
                       type="button"
                       onClick={() => removeChoice(gi, ci)}
@@ -1569,15 +1781,23 @@ export function ProductForm({
       {/* ── Price & Stock ── */}
       {tab === "pricing" && (
         <div className="space-y-4 sm:space-y-6">
-          <Card title="Base price & stock">
-            <div className="grid gap-4 sm:grid-cols-3">
+          <Card title="Price, cost & stock">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <Field
-                label="Price (₹)"
+                label={hasVariants ? "Base price (₹)" : "Price (₹)"}
                 required
                 tip={
                   hasVariants
-                    ? "The fallback price. Any combination set to \"Base price\" below is sold at this number, and the price shoppers see is the cheapest available combination."
+                    ? "What every combination with a blank price sells at. The price shoppers see first — on cards and in search — is the cheapest available combination."
                     : "What the customer pays, before any discount badge."
+                }
+                hint={
+                  pinnedBlank ? (
+                    <>
+                      Saved as {formatINR(effectivePrice)}, the cheapest available
+                      combination. Blank rows stay at {formatINR(base)}.
+                    </>
+                  ) : undefined
                 }
               >
                 {(id) => (
@@ -1603,11 +1823,12 @@ export function ProductForm({
                   </>
                 }
                 hint={
-                  Number(form.discount) > 0 ? (
+                  // The number that will be stored, not a fresh recompute — they
+                  // differ by a few rupees when the discount is untouched.
+                  compareAtToSave != null && compareAtToSave > effectivePrice ? (
                     <>
-                      Shown as {formatINR(strikeThrough(effectivePrice, form.discount))}{" "}
-                      struck through, {formatINR(Math.max(0, Math.round(effectivePrice)))}{" "}
-                      paid.
+                      Shown as {formatINR(compareAtToSave)} struck through,{" "}
+                      {formatINR(effectivePrice)} paid.
                     </>
                   ) : undefined
                 }
@@ -1632,12 +1853,12 @@ export function ProductForm({
               </Field>
 
               <Field
-                label="Stock"
-                required
-                tip={
-                  hasVariants
-                    ? "The fallback count. A combination with a blank stock box uses this number."
-                    : "Units on hand. At 0 the product shows as sold out but stays listed."
+                label="Cost price (₹)"
+                tip="What one unit cost you — blank, print, making. Never shown to customers; margin is worked out from it. A size that cost more gets its own cost in the Variants grid."
+                hint={
+                  productCost != null && base > 0 ? (
+                    <MarginLine price={base} cost={productCost} />
+                  ) : undefined
                 }
               >
                 {(id) => (
@@ -1645,13 +1866,123 @@ export function ProductForm({
                     id={id}
                     type="number"
                     min={0}
-                    value={form.stock}
-                    onChange={(e) => set("stock", e.target.value)}
+                    inputMode="numeric"
+                    value={costPrice}
+                    onChange={(e) => setCostPrice(e.target.value)}
                     className="input"
+                    placeholder="Not recorded"
                   />
                 )}
               </Field>
+
+              {tracked ? (
+                // A read-out, not an input: `Product.stock` is the inventory
+                // engine's mirror of the ledger, and a second writer here would
+                // put a number on the storefront that no movement explains.
+                <Field
+                  label="Stock"
+                  tip="Tracked in Inventory, where every unit in or out is a ledger entry — so it is not typed here. Receive stock, write off damage or recount there."
+                >
+                  <div className="flex min-h-11 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                    <span className="text-lg font-semibold tabular-nums">
+                      {stockTotals.available}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      available · {stockTotals.onHand} on hand
+                      {stockTotals.reserved ? ` · ${stockTotals.reserved} reserved` : ""}
+                    </span>
+                    <Link
+                      href={inventoryHref}
+                      className="ml-auto inline-flex items-center gap-0.5 text-xs font-medium underline underline-offset-2 hover:text-accent"
+                    >
+                      Inventory <ArrowUpRight className="h-3 w-3" />
+                    </Link>
+                  </div>
+                </Field>
+              ) : (
+                <Field
+                  label="Stock"
+                  required
+                  tip={
+                    hasVariants
+                      ? "The fallback count. A combination with a blank stock box uses this number."
+                      : "Units on hand. At 0 the product shows as sold out but stays listed."
+                  }
+                >
+                  {(id) => (
+                    <input
+                      id={id}
+                      type="number"
+                      min={0}
+                      value={form.stock}
+                      onChange={(e) => set("stock", e.target.value)}
+                      className="input"
+                    />
+                  )}
+                </Field>
+              )}
             </div>
+
+            {/* A product with no options is one variant: its SKU lives here,
+                not in a one-row grid. */}
+            {combos.length === 0 && (
+              <div className="grid gap-4 border-t border-border pt-4 sm:grid-cols-3">
+                <Field
+                  label="SKU"
+                  tip="Printed on labels and typed into courier forms, so it never changes by itself — renaming the product leaves it as it is. Leave it blank on a new product to have one generated. Unique across the store."
+                >
+                  {(id) => (
+                    <SkuInput
+                      id={id}
+                      name={form.name || "this product"}
+                      value={variantOf("").sku}
+                      existing={facts.get("")?.sku ?? null}
+                      preview={facts.get("") ? null : skuPreview({})}
+                      duplicate={retired.some((r) => r.sku === normaliseSku(variantOf("").sku))}
+                      serverError={gridError?.key === "" && gridError.field === "sku" ? gridError.message : null}
+                      onChange={(val) => patchVariants([""], { sku: val })}
+                    />
+                  )}
+                </Field>
+                <Field label="Barcode" tip="EAN, UPC or your own barcode label. Optional, and unique across the store.">
+                  {(id) => (
+                    <input
+                      id={id}
+                      value={variantOf("").barcode}
+                      onChange={(e) => patchVariants([""], { barcode: e.target.value })}
+                      className={cn(
+                        "input font-mono",
+                        gridError?.key === "" && gridError.field === "barcode" && "border-danger"
+                      )}
+                      placeholder="EAN / UPC"
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  )}
+                </Field>
+                <Field
+                  label="Low-stock at"
+                  tip={`Flagged as low stock at or below this many${tracked ? "" : " — once this product is tracked in Inventory"}. Blank uses the store default (${lowStockDefault}).`}
+                >
+                  {(id) => (
+                    <input
+                      id={id}
+                      type="number"
+                      min={0}
+                      value={variantOf("").lowStockAt}
+                      onChange={(e) => patchVariants([""], { lowStockAt: e.target.value })}
+                      className="input"
+                      placeholder={`Store · ${lowStockDefault}`}
+                    />
+                  )}
+                </Field>
+                {gridError?.key === "" && gridError.message && (
+                  <p role="alert" className="rounded-lg border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger sm:col-span-3">
+                    {gridError.message}
+                  </p>
+                )}
+              </div>
+            )}
 
             {hasVariants && (
               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-lg border border-border bg-muted/40 px-3 py-2.5">
@@ -1668,11 +1999,20 @@ export function ProductForm({
             )}
           </Card>
 
-          <Card
-            title="Per-combination pricing"
-            tip="Give each combination its own price, stock and availability. Anything switched off here is greyed out on the storefront instead of disappearing, so a shopper can see it exists and is simply not made."
-            aside={
-              optionMatrix.length > 0 ? (
+          {combos.length > 0 && (
+            <Card
+              title="Variants"
+              tip={
+                <>
+                  One row per combination, each with its own SKU and cost.
+                  Switch on <b>Separate prices</b> to give combinations their own
+                  price, compare-at price, availability and stock; with it off,
+                  every combination sells at the base price. A combination
+                  switched off is greyed out on the storefront instead of
+                  disappearing, so a shopper can see it exists.
+                </>
+              }
+              aside={
                 <SwitchRow
                   tone="bare"
                   label="Separate prices"
@@ -1680,30 +2020,34 @@ export function ProductForm({
                   onChange={setUseVariants}
                   className="w-auto"
                 />
-              ) : undefined
-            }
-          >
-            {optionMatrix.length === 0 ? (
-              <p className="rounded-lg bg-muted/50 px-3 py-2.5 text-xs text-muted-foreground">
-                Add an option with at least one choice on the{" "}
-                <b>Options &amp; Variants</b> tab to create combinations.
-              </p>
-            ) : !useVariants ? (
-              <p className="rounded-lg bg-muted/50 px-3 py-2.5 text-xs text-muted-foreground">
-                Every combination is sold at the base price above. Switch this on
-                to price them separately.
-              </p>
-            ) : (
+              }
+            >
               <VariantTable
                 optionMatrix={optionMatrix}
                 combos={combos}
                 entryOf={variantOf}
-                onPatch={patchVariants}
-                basePrice={form.price}
+                onPatch={(keys, patch) => {
+                  if (gridError) setGridError(null);
+                  patchVariants(keys, patch);
+                }}
+                view={gridView}
+                onViewChange={setGridView}
+                perCombination={hasVariants}
+                basePrice={base}
+                sellsAt={sellsAt}
+                productCost={productCost}
+                productCompareAt={compareAtToSave}
                 baseStock={form.stock}
+                tracked={tracked}
+                facts={facts}
+                retired={retired}
+                lowStockDefault={lowStockDefault}
+                skuPreview={skuPreview}
+                error={gridError}
+                inventoryHref={inventoryHref}
               />
-            )}
-          </Card>
+            </Card>
+          )}
         </div>
       )}
 
@@ -1773,11 +2117,15 @@ export function ProductForm({
   );
 }
 
-/** The implied original price a discount percentage is taken off. */
-function strikeThrough(price: number, discount: string) {
-  const p = Math.max(0, Math.round(price));
-  const d = Math.min(99, Math.max(0, Number(discount) || 0));
-  return d > 0 ? Math.round(p / (1 - d / 100)) : p;
+/** "Margin ₹530 · 36% at ₹1,477" — the reason to record a cost at all. */
+function MarginLine({ price, cost }: { price: number; cost: number }) {
+  const profit = price - cost;
+  const pct = price > 0 ? Math.round((profit / price) * 100) : 0;
+  return (
+    <span className={cn("tabular-nums", profit < 0 && "text-danger")}>
+      Margin {formatINR(profit)} · {pct}% at {formatINR(price)}
+    </span>
+  );
 }
 
 /**

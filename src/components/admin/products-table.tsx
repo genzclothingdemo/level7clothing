@@ -39,6 +39,10 @@ import {
   SelectHandle,
   useMultiSelect,
 } from "@/components/admin/selection";
+// The inventory screen's own badge and ink, so a state looks the same here as
+// it does there — one place decides how "Oversold" or "Low stock" looks.
+import { STATE_INK, StateBadge, formatBalance } from "@/components/admin/inventory-ui";
+import type { StockState } from "@/lib/inventory-types";
 import { formatINR } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
@@ -52,7 +56,20 @@ export type ProductRow = {
   category: string;
   subcategoryName: string | null;
   price: number;
+  /**
+   * `Product.stock`. For a tracked product this is the inventory engine's
+   * mirror — what its sizes can still sell, summed — not a number anyone types.
+   */
   stock: number;
+  /** Stock is counted per size (Admin → Inventory), not as one number. */
+  tracked: boolean;
+  /** `productStockState()` from lib/products — the storefront's own rule. */
+  stockState: StockState;
+  /**
+   * Tracked products only: the sizes that are not fine, with what each can
+   * still sell — "M 2", "S 0", "L −3". Empty when every size is healthy.
+   */
+  attention: { label: string; available: number; state: StockState }[];
   isActive: boolean;
   isFeatured: boolean;
 };
@@ -228,7 +245,35 @@ export function ProductsTable({ rows }: { rows: ProductRow[] }) {
                     </td>
                     <td className="px-4 py-3">{formatINR(p.price)}</td>
                     <td className="px-4 py-3">
-                      <span className={p.stock <= 0 ? "text-danger" : ""}>{p.stock}</span>
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <span
+                          className={cn("tabular-nums", p.stock <= 0 && "text-danger")}
+                          title={
+                            p.tracked
+                              ? "Counted per size — the total its sizes can still sell"
+                              : undefined
+                          }
+                        >
+                          {p.stock}
+                        </span>
+                        {/* Oversold first and solid: open orders cannot all be
+                            filled from the shelf, which is the one stock state
+                            that needs a person today. */}
+                        {p.stockState !== "ok" && <StateBadge state={p.stockState} />}
+                      </span>
+                      {p.attention.length > 0 && (
+                        <span className="mt-1 block max-w-[14rem] text-[11px] leading-snug text-muted-foreground">
+                          {p.attention.map((s, i) => (
+                            <span key={s.label} className="whitespace-nowrap">
+                              {i > 0 && " · "}
+                              {s.label}{" "}
+                              <span className={cn("tabular-nums", STATE_INK[s.state])}>
+                                {formatBalance(s.available)}
+                              </span>
+                            </span>
+                          ))}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <span

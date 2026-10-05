@@ -100,12 +100,23 @@ export default async function AdminOverview({
    * `short` is a noun phrase, not a sentence — these sit side by side in a
    * strip, so "orders waiting to be confirmed" and "cart leads nobody has
    * followed up" would wrap to two lines each and turn six chips into a
-   * paragraph. `alert` is reserved for the three queues that cost money while
-   * they sit there: an unconfirmed order, an open return and a live product
-   * nobody can buy. Colouring all eight red would make none of them read as
-   * urgent.
+   * paragraph. `alert` is reserved for the queues that cost money while they
+   * sit there: an oversold size, an unconfirmed order, an open return and a
+   * live product nobody can buy. Colouring all nine red would make none of
+   * them read as urgent.
+   *
+   * Oversold leads. It is the one stock state with customers attached — orders
+   * already placed for units the shelf does not hold — and it only appears
+   * once a product is tracked per size, so on most days it is not there at all.
    */
   const queueRows = [
+    {
+      count: queue.oversold,
+      short: "sizes oversold",
+      one: "size oversold",
+      href: "/admin/products?stock=oversold",
+      tone: "alert" as const,
+    },
     {
       count: queue.pendingOrders,
       short: "to confirm",
@@ -126,9 +137,11 @@ export default async function AdminOverview({
       tone: "alert" as const,
     },
     {
+      // Every size sold out — the same set the products list shows under
+      // "Out of stock" with "Active", so the chip and the list agree.
       count: queue.outOfStock,
       short: "out of stock",
-      href: "/admin/products",
+      href: "/admin/products?status=active&stock=outofstock",
       tone: "alert" as const,
     },
     {

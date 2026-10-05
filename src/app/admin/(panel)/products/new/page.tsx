@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
 import { ProductForm } from "@/components/admin/product-form";
+import type { VariantRowDTO } from "@/components/admin/variant-table";
 import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/settings";
 import type { ProductDTO } from "@/lib/types";
@@ -20,7 +21,7 @@ export default async function NewProductPage({
 }) {
   const sp = await searchParams;
 
-  const [categoriesList, subcategories, source, settings] = await Promise.all([
+  const [categoriesList, subcategories, source, settings, stockDefaults] = await Promise.all([
     prisma.category.findMany({ orderBy: { name: "asc" } }),
     prisma.subcategory.findMany({
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
@@ -31,10 +32,31 @@ export default async function NewProductPage({
       },
     }),
     // Duplicating: load the product being copied so the form opens pre-filled.
+    // Its active variant rows come too, for the per-size costs, compare-at
+    // prices and low-stock alerts — see `copiedRows` for what is left behind.
     sp.copyOf
-      ? prisma.product.findUnique({ where: { id: sp.copyOf } })
+      ? prisma.product.findUnique({
+          where: { id: sp.copyOf },
+          include: {
+            variantRows: {
+              where: { isActive: true },
+              orderBy: [{ sortOrder: "asc" }, { comboKey: "asc" }],
+              select: {
+                comboKey: true,
+                combo: true,
+                price: true,
+                compareAtPrice: true,
+                costPrice: true,
+                lowStockAt: true,
+              },
+            },
+          },
+        })
       : Promise.resolve(null),
     getSettings(),
+    prisma.siteSettings
+      .findFirst({ select: { lowStockThreshold: true } })
+      .catch(() => null),
   ]);
 
   const categories = categoriesList.map((c) => c.name);
@@ -46,16 +68,41 @@ export default async function NewProductPage({
 
   // A copy is a brand-new product: no id, and a name the owner must edit.
   // Everything expensive to re-enter — options, the whole variant matrix,
-  // photos, shipping, parcel size — carries over.
-  const preset = source
-    ? ({
-        ...source,
-        id: "",
-        slug: "",
-        name: `${source.name} (copy)`,
-        isFeatured: false,
-      } as unknown as ProductDTO)
-    : undefined;
+  // photos, shipping, parcel size, costs — carries over.
+  //
+  // What does **not**: tracking and stock identity. The copy starts untracked
+  // (tracking begins from a real count in Inventory), and its rows carry no
+  // id, SKU, barcode or stock — SKUs and barcodes are unique across the store,
+  // so the copy is given its own on save, and it owns none of the source's units.
+  let preset: ProductDTO | undefined;
+  if (source) {
+    // The rows are handed over as `copiedRows` below; keep them off the DTO.
+    const { variantRows: _rows, ...sourceProduct } = source;
+    preset = {
+      ...sourceProduct,
+      id: "",
+      slug: "",
+      name: `${source.name} (copy)`,
+      isFeatured: false,
+      trackInventory: false,
+    } as unknown as ProductDTO;
+  }
+  const copiedRows: VariantRowDTO[] = (source?.variantRows ?? []).map((r) => ({
+    id: "",
+    key: r.comboKey,
+    combo: (r.combo as Record<string, string>) ?? {},
+    sku: "",
+    barcode: null,
+    price: r.price,
+    compareAtPrice: r.compareAtPrice,
+    costPrice: r.costPrice,
+    lowStockAt: r.lowStockAt,
+    isActive: true,
+    onHand: 0,
+    reserved: 0,
+    available: 0,
+    movements: 0,
+  }));
 
   const groupName = sp.subcategoryId
     ? subs.find((s) => s.id === sp.subcategoryId)?.name
@@ -104,6 +151,13 @@ export default async function NewProductPage({
           defaultReturnable: settings.defaultReturnable,
           returnWindowDays: settings.returnWindowDays,
         }}
+        variantRows={copiedRows}
+        inventory={{
+          tracked: false,
+          lowStockThreshold: stockDefaults?.lowStockThreshold ?? 5,
+          href: "/admin/inventory",
+        }}
+        brandName={settings.brandName}
       />
     </div>
   );

@@ -1,6 +1,6 @@
 import { prisma } from "./prisma";
 import type { ProductDTO, MediaDTO } from "./types";
-import { toDTO } from "./products";
+import { toDTO, toStorefrontDTOs } from "./products";
 import { variantPreviewImages } from "./variants";
 
 /**
@@ -165,7 +165,7 @@ export async function getCategoryTiles(
     });
 
     // A category page shows pieces whose primary OR secondary category matches.
-    const products = (
+    const products = await toStorefrontDTOs(
       await prisma.product.findMany({
         where: {
           isActive: true,
@@ -177,7 +177,7 @@ export async function getCategoryTiles(
         orderBy: { createdAt: "desc" },
         include: { productImages: { include: { media: true } } },
       })
-    ).map(toDTO);
+    );
 
     const subs: SubcategoryRow[] = category
       ? await prisma.subcategory.findMany({
@@ -216,7 +216,9 @@ export async function getShopTiles(
           // to a single photo.
           include: { productImages: { include: { media: true } } },
         })
-        .then((rows) => rows.map(toDTO)),
+        // Live per-size stock for any tracked product among them — one
+        // batched read, and none at all while nothing is tracked.
+        .then(toStorefrontDTOs),
       prisma.subcategory.findMany({
         where: { isActive: true },
         orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
@@ -269,13 +271,13 @@ export async function getSubcategoryView(
     });
     if (!sub) return null;
 
-    const products = (
+    const products = await toStorefrontDTOs(
       await prisma.product.findMany({
         where: { isActive: true, subcategoryId: sub.id },
         orderBy: { createdAt: "desc" },
         include: { productImages: { include: { media: true } } },
       })
-    ).map(toDTO);
+    );
     sortProducts(products, sort);
 
     const tile = toTile(sub, products);
@@ -328,7 +330,10 @@ export async function getProductCrumb(subcategoryId: string | null) {
   }
 }
 
-/** Admin: every group in a category, with a live count and price range. */
+/**
+ * Admin: every group in a category, with a live count and price range.
+ * Plain `toDTO`, no live stock — nothing on that screen reads stock.
+ */
 export async function getSubcategoriesForAdmin(categoryId: string) {
   const subs = await prisma.subcategory.findMany({
     where: { categoryId },

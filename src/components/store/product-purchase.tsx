@@ -35,8 +35,12 @@ import {
   repairSelection,
   visualAttributeName,
   previewImageForValue,
+  type Selection,
 } from "@/lib/variants";
-import type { ProductDTO, Attribute, SellableVariant } from "@/lib/types";
+import type { Attribute, SellableVariant } from "@/lib/types";
+// Type-only: erased at build time, so this client module never pulls in the
+// server loader it describes (CLAUDE.md, "RSC boundary traps").
+import type { StorefrontProduct } from "@/lib/products";
 import { comboKey } from "@/lib/options";
 
 function TrustRow() {
@@ -110,7 +114,7 @@ function QtyStepper({
   );
 }
 
-export function ProductPurchase({ product }: { product: ProductDTO }) {
+export function ProductPurchase({ product }: { product: StorefrontProduct }) {
   const { addItem, buyNow, leadInfo } = useCart();
   const { selection, setSelection }   = useProductView();
 
@@ -133,6 +137,16 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
   const selKey    = comboKey(selection);
   const matched   = sellable.find((v) => v.id === selKey);
   const unitPrice = priceForSelection(product as any, selection);
+
+  // Live per-size stock — present only when the owner tracks this product (see
+  // `overlayLiveStock` in lib/products). The server has already folded it into
+  // `sellable` (a sold-out size is `available: false`, its `stock` is the real
+  // count), so everything below keeps working unchanged; `unit` adds the one
+  // thing the flags cannot say — that a size is running low. An untracked
+  // product has no `liveStock` and takes none of the tracked branches.
+  const live    = product.liveStock;
+  const tracked = live !== undefined;
+  const unit    = live?.[selKey];
 
   const missing = attributes.filter((g) => !selection[g.name]).map((g) => g.name);
   const needsChoice = missing.length > 0;
@@ -201,10 +215,55 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
     setQty(1);
   }, [selKey]);
 
+  /**
+   * Tracked products only: can `value` in group `index` still be bought, given
+   * what `sel` has chosen in the groups before it?
+   *
+   * `isChoiceEnabled` asks whether *any* combination with the value is in
+   * stock, which is right for one group and wrong for two: with Red picked, a
+   * size that is gone in red but left in blue would stay clickable and land on
+   * "unavailable". So each group is asked of the choices already made above it
+   * — the first group of anything in stock, the next of what fits the first.
+   */
+  function buyable(sel: Selection, index: number, value: string): boolean {
+    const name = orderedGroups[index].name;
+    const earlier = orderedGroups.slice(0, index);
+    return sellable.some(
+      (v) =>
+        v.available &&
+        v.combo[name] === value &&
+        earlier.every((g) => !sel[g.name] || v.combo[g.name] === sel[g.name])
+    );
+  }
+
+  /**
+   * After a tracked group changes, move each later group off a value that is
+   * no longer buyable onto the first one that is — picking Red while on a size
+   * Red has run out of lands on a Red size that can be bought, not on "sold out".
+   */
+  function settleAfter(index: number, sel: Selection): Selection {
+    const next = { ...sel };
+    for (let k = index + 1; k < orderedGroups.length; k++) {
+      const g = orderedGroups[k];
+      if (buyable(next, k, next[g.name])) continue;
+      const first = g.values.find((val) => buyable(next, k, val));
+      if (first) next[g.name] = first;
+    }
+    return next;
+  }
+
   function toggle(groupName: string, value: string) {
     // Keep a complete selection at all times — clicking the already-active choice
     // is a no-op so the product never drops back into a non-orderable state.
     if (selection[groupName] === value) return;
+    if (tracked) {
+      const index = orderedGroups.findIndex((g) => g.name === groupName);
+      if (index < 0 || !buyable(selection, index, value)) return;
+      setSelection(
+        settleAfter(index, repairSelection(attributes, { ...selection, [groupName]: value }))
+      );
+      return;
+    }
     if (!isChoiceEnabled(groupName, value, product)) return;
     setSelection(repairSelection(attributes, { ...selection, [groupName]: value }));
   }
@@ -229,9 +288,11 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
    * one — `modeFor()` needs the thumbnails to decide whether the cards would
    * actually say anything different from each other.
    */
-  function choicesFor(group: Attribute): OptionChoice[] {
+  function choicesFor(group: Attribute, index: number): OptionChoice[] {
     return group.values.map((value) => {
-      const enabled = isChoiceEnabled(group.name, value, product);
+      const enabled = tracked
+        ? buyable(selection, index, value)
+        : isChoiceEnabled(group.name, value, product);
       const swapped = enabled ? priceIfSwapped(group.name, value) : null;
       const delta = swapped == null ? 0 : swapped - unitPrice;
       return {
@@ -302,7 +363,7 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
           key={group.name}
           product={product}
           attributeName={group.name}
-          choices={choicesFor(group)}
+          choices={choicesFor(group, i)}
           selected={selection[group.name]}
           onSelect={(val) => toggle(group.name, val)}
           index={orderedGroups.length > 1 ? i + 1 : undefined}
@@ -368,11 +429,23 @@ export function ProductPurchase({ product }: { product: ProductDTO }) {
 
         <div className="pt-1">
           {soldOut ? (
-            <p className="text-center text-sm font-medium text-danger">Sold out</p>
+            tracked && product.stock > 0 ? (
+              // One size gone, others left: say which, so it does not read as
+              // the whole product being sold out.
+              <p className="text-center text-sm font-medium text-danger">
+                {orderedGroups.map((g) => selection[g.name]).filter(Boolean).join(" · ")} is sold out
+              </p>
+            ) : (
+              <p className="text-center text-sm font-medium text-danger">Sold out</p>
+            )
           ) : needsChoice ? (
             <p className="text-center text-sm font-medium text-accent">Please select {listNames(missing)}</p>
           ) : comboUnavailable ? (
             <p className="text-center text-sm font-medium text-danger">This combination is unavailable</p>
+          ) : unit?.state === "low" ? (
+            // At or under this size's low-stock line (its own, else the
+            // store's) — the rule is `unitStockState`, decided on the server.
+            <p className="text-center text-sm font-medium text-accent">Only {unit.available} left</p>
           ) : (
             <p className="text-center text-sm font-medium text-green-600">In stock, ready to ship</p>
           )}

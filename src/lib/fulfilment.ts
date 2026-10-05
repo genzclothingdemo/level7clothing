@@ -7,6 +7,7 @@ import {
   dispatchModeOf,
   isCourierStrategy,
   normalisePipelineSettings,
+  paymentKindOf,
   pickCourier,
   resolveCollection,
   shipmentGateFor,
@@ -27,6 +28,9 @@ import {
   type CourierOption,
   type ShipmentInput,
 } from "./nimbuspost";
+import { releaseForOrder, restockRto, sellForOrder } from "./inventory";
+import { SYSTEM_ACTOR, type StockActor } from "./inventory-types";
+import { isRtoComplete } from "./returns";
 
 /**
  * Order fulfilment glue between the order/admin actions and the NimbusPost
@@ -476,8 +480,17 @@ export type DispatchResult =
  * here) before any money moves. If no draft is staged yet this stages one and
  * stops, returning `outcome: "drafted"` — booking then needs a second,
  * separate action.
+ *
+ * **Booking is where the stock leaves.** This is the one place a booked AWB
+ * writes `status: "shipped"`, so it is also where a tracked order's reserved
+ * units are sold (`applyStockForStatus`). `actor` is who is recorded on that
+ * ledger row: the admin who pressed Book, or the store for an unattended
+ * booking.
  */
-export async function dispatchOrder(orderId: string): Promise<DispatchResult> {
+export async function dispatchOrder(
+  orderId: string,
+  actor: StockActor = SYSTEM_ACTOR
+): Promise<DispatchResult> {
   const settings = await getSettings();
   if (!settings.nimbusEnabled) {
     return { ok: false, error: "NimbusPost shipping is turned off. Enable it in Admin → Settings." };
@@ -548,6 +561,11 @@ export async function dispatchOrder(orderId: string): Promise<DispatchResult> {
       },
     });
 
+    // After the row says shipped, never before: a sale recorded against an
+    // order that failed to save would take units off a shelf they never left.
+    // Reported, never thrown — the AWB exists and the booking stands.
+    await applyStockForStatus(orderId, { status: "shipped" }, actor);
+
     return {
       ok: true,
       outcome: "booked",
@@ -581,7 +599,8 @@ export async function dispatchOrder(orderId: string): Promise<DispatchResult> {
  */
 export async function shipOrderNow(
   orderId: string,
-  courier: { id: string; name: string } | null
+  courier: { id: string; name: string } | null,
+  actor: StockActor = SYSTEM_ACTOR
 ): Promise<DispatchResult> {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
@@ -602,11 +621,11 @@ export async function shipOrderNow(
     await chooseCourierForOrder(orderId, courier.id, courier.name).catch(() => {});
   }
 
-  const first = await dispatchOrder(orderId);
+  const first = await dispatchOrder(orderId, actor);
   if (!first.ok || first.outcome === "booked") return first;
 
   // `drafted` — the draft was staged by that call, so the second one books it.
-  return dispatchOrder(orderId);
+  return dispatchOrder(orderId, actor);
 }
 
 /* ------------------------------------------------------------------ */
@@ -689,9 +708,14 @@ export type ConfirmationPipelineResult =
  * error. It never writes `status: "shipped"`, and it records the failure in
  * the order's history, because an order that claims to have shipped and has
  * not is the one state an operator cannot recover from — they stop looking.
+ *
+ * `actor` only matters for `book`: it is who the stock ledger records as
+ * having shipped the units — the admin who pressed Confirm, or the store when
+ * the order confirmed itself.
  */
 export async function runConfirmationPipeline(
-  orderId: string
+  orderId: string,
+  actor: StockActor = SYSTEM_ACTOR
 ): Promise<ConfirmationPipelineResult> {
   const pipeline = await getPipelineSettings();
   const mode = dispatchModeOf(pipeline);
@@ -820,7 +844,7 @@ export async function runConfirmationPipeline(
   }
 
   // Step 4 — book. This is the call that spends the wallet.
-  const booked = await dispatchOrder(orderId).catch((err) => ({
+  const booked = await dispatchOrder(orderId, actor).catch((err) => ({
     ok: false as const,
     error: err instanceof Error ? err.message : String(err),
   }));
@@ -970,8 +994,15 @@ export type SyncResult =
  * the NimbusPost dashboard and booked it there. Without this the AWB never
  * reaches our database, so the customer gets no tracking and the status webhook
  * (which matches on AWB) can never find the order.
+ *
+ * A booking found here is a shipment like any other, so it sells the order's
+ * stock exactly as `dispatchOrder` does. `actor` is whoever pressed Sync; the
+ * poller leaves it as the store.
  */
-export async function syncOrderFromNimbus(orderId: string): Promise<SyncResult> {
+export async function syncOrderFromNimbus(
+  orderId: string,
+  actor: StockActor = SYSTEM_ACTOR
+): Promise<SyncResult> {
   if (!isNimbusPostConfigured()) {
     return { ok: false, error: "NimbusPost isn't configured." };
   }
@@ -985,7 +1016,7 @@ export async function syncOrderFromNimbus(orderId: string): Promise<SyncResult> 
   // Already has an AWB → there is nothing left to discover about the booking,
   // so refresh where the parcel actually is instead.
   if (order.trackingNumber) {
-    return refreshTracking(orderId, order.trackingNumber);
+    return refreshTracking(orderId, order.trackingNumber, actor);
   }
 
   try {
@@ -1026,6 +1057,9 @@ export async function syncOrderFromNimbus(orderId: string): Promise<SyncResult> 
       },
     });
 
+    // Booked outside this admin is still booked: the units have left.
+    await applyStockForStatus(orderId, { status: nextStatus }, actor);
+
     return { ok: true, outcome: "synced", awb: state.awb, courier: state.courierName };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -1064,10 +1098,16 @@ type TrackingPayload = {
  * fast path, but it only fires if NimbusPost is configured to call us and the
  * call actually lands. Polling closes that gap, and is what makes the status
  * shown in the admin trustworthy rather than "last thing we happened to hear".
+ *
+ * A scan that moves the order moves its stock too — shipped sells, a courier
+ * cancellation releases, a completed RTO restocks — through the same
+ * `applyStockForStatus` the webhook calls, so push and poll cannot disagree
+ * about the shelf any more than about the status.
  */
 export async function refreshTracking(
   orderId: string,
-  awb: string
+  awb: string,
+  actor: StockActor = SYSTEM_ACTOR
 ): Promise<SyncResult> {
   const order = await prisma.order.findUnique({ where: { id: orderId } });
   if (!order) return { ok: false, error: "Order not found" };
@@ -1145,6 +1185,13 @@ export async function refreshTracking(
     // `changed` stays: an identical repeat scan is genuinely nothing new, and
     // skipping it saves a rules query on every poll of every open parcel.
     if (changed) {
+      // The shelf first, the message second — neither depends on the other,
+      // and both are reported rather than thrown.
+      await applyStockForStatus(
+        orderId,
+        { status: nextStatus, courierScan: rawStatus },
+        actor
+      );
       await notifyCourierScan(orderId, {
         raw: rawStatus,
         status: nextStatus,
@@ -1267,14 +1314,160 @@ export async function notifyCourierScan(
   await notifyStatus(orderId, scan.status, scan.previousStatus);
 }
 
+/* ------------------------------------------------------------------ */
+/*  Stock follows the order                                            */
+/* ------------------------------------------------------------------ */
+
+/** Statuses at which the parcel has left the shelf. */
+const SHIPPED_STATUSES: ReadonlySet<string> = new Set(["shipped", "delivered"]);
+/** Statuses at which nothing is going to ship. */
+const CANCELLED_STATUSES: ReadonlySet<string> = new Set(["cancelled", "payment_failed"]);
+
+/** What one status move did to the stock ledger. Reported, never thrown. */
+export type StockEffect =
+  | { kind: "none" }
+  | { kind: "sold"; units: number }
+  | {
+      kind: "released";
+      units: number;
+      /**
+       * Units this order had already shipped when it was cancelled. A
+       * cancellation cannot put those back — see {@link applyStockForStatus}.
+       */
+      stillOut: number;
+    }
+  | { kind: "restocked"; units: number; released: number }
+  | { kind: "failed"; error: string };
+
+/**
+ * **What an order's move does to its stock — the one decision, for every path
+ * that writes `Order.status`.**
+ *
+ * The admin's status control, the bulk bar, booking an AWB, the NimbusPost
+ * webhook, the poller and a failed payment all land here, for the same reason
+ * `notifyCourierScan` exists: when each path decided for itself, the webhook
+ * and the poller drifted apart on what `pickup done` meant. A second copy of
+ * "which statuses move stock" would drift the same way.
+ *
+ * | the order now reads             | stock                                   |
+ * |---------------------------------|-----------------------------------------|
+ * | an RTO scan saying it is home   | shipped units back on the shelf (RTO)   |
+ * | shipped / delivered             | the reserved units are sold             |
+ * | cancelled / payment failed      | whatever it still holds is released     |
+ * | anything else                   | nothing                                 |
+ *
+ * **Call it after the order row is written.** Every engine call is
+ * idempotent on the ledger — `sale:<orderId>:<variantId>` can be written once
+ * — so a webhook and the poller reporting the same scan sell once, and a
+ * repeat call is always safe. An untracked product is never touched: the
+ * engine returns early for it, and its legacy `Product.stock` counter is the
+ * caller's business, exactly as before.
+ *
+ * **RTO is tested first, and never on a delivered order.** `rto delivered`
+ * maps to the status `cancelled`, but the parcel travelled and came back, so
+ * the units that were sold go back on the shelf. A cancellation that is not an
+ * RTO releases what is still reserved and cannot do more: units already
+ * recorded as shipped left on a courier, and whether they ever physically left
+ * is not something this code can see. Rather than guess, that case writes one
+ * line into the order's history so the owner knows the count needs a look.
+ *
+ * Never throws. A stock step that fails is logged and returned, and
+ * `reconcileStockHolds` (run by the automation cron) settles any hold a failed
+ * step left behind.
+ */
+export async function applyStockForStatus(
+  orderId: string,
+  move: {
+    /** The order's status **after** the caller's write. */
+    status: string | null | undefined;
+    /** Its payment status, when that is what moved. */
+    paymentStatus?: string | null;
+    /** The courier's own words, when a scan caused this. */
+    courierScan?: string | null;
+  },
+  actor: StockActor = SYSTEM_ACTOR
+): Promise<StockEffect> {
+  const status = String(move.status ?? "").trim().toLowerCase();
+  const paymentFailed =
+    String(move.paymentStatus ?? "").trim().toLowerCase() === "failed";
+
+  try {
+    // Home again. `isRtoComplete` reads the courier table first and only then
+    // falls back to wording, so `returned` counts and `rto in transit` does not.
+    if (status !== "delivered" && move.courierScan && isRtoComplete(move.courierScan)) {
+      const { restocked } = await restockRto(orderId, actor);
+      // An order that shipped without its sale being recorded still holds its
+      // reservation. The parcel is back, so there is nothing left to protect.
+      const { released } = await releaseForOrder(orderId, actor);
+      return { kind: "restocked", units: restocked, released };
+    }
+
+    if (SHIPPED_STATUSES.has(status)) {
+      const { sold } = await sellForOrder(orderId, actor);
+      return { kind: "sold", units: sold };
+    }
+
+    if (CANCELLED_STATUSES.has(status) || paymentFailed) {
+      const { released } = await releaseForOrder(orderId, actor);
+      const stillOut = released > 0 ? 0 : await unitsStillOut(orderId);
+      if (stillOut > 0 && CANCELLED_STATUSES.has(status)) {
+        const it = stillOut === 1 ? "it" : "them";
+        await appendHistoryOnce(
+          orderId,
+          status,
+          `Stock: ${stillOut} unit${stillOut === 1 ? " was" : "s were"} already recorded as shipped, and cancelling does not put shipped stock back. If the parcel never left, recount ${it} in Inventory; if it is on its way back, the RTO scan will restock ${it}.`
+        );
+      }
+      return { kind: "released", units: released, stillOut };
+    }
+
+    return { kind: "none" };
+  } catch (err) {
+    console.error(`[fulfilment] stock step failed for order ${orderId}:`, err);
+    return { kind: "failed", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Units this order took off the shelf and has not had back, from the ledger:
+ * what it sold, less what came back by RTO or by return.
+ */
+async function unitsStillOut(orderId: string): Promise<number> {
+  const sum = await prisma.stockMovement.aggregate({
+    where: { orderId, type: { in: ["SALE", "RTO", "RETURN"] } },
+    _sum: { onHandDelta: true },
+  });
+  return Math.max(0, -(sum._sum.onHandDelta ?? 0));
+}
+
+/**
+ * {@link appendHistory}, unless the order already carries this exact note — a
+ * courier that repeats its "cancelled" scan must not stack the same warning
+ * five times.
+ */
+async function appendHistoryOnce(orderId: string, status: string, note: string) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { statusHistory: true },
+  });
+  const history = Array.isArray(order?.statusHistory)
+    ? (order.statusHistory as unknown as { note?: string }[])
+    : [];
+  if (history.some((h) => h?.note === note)) return;
+  await appendHistory(orderId, status, note);
+}
+
 /**
  * One pass of the auto-sync: every order that could still change.
  *
  * Two populations, and they need different calls — a staged draft has no AWB
  * yet so we ask the ORDER endpoint whether someone booked it in the dashboard;
  * a booked shipment has an AWB so we ask the TRACKING endpoint where it is.
+ *
+ * `actor` is recorded on any stock the pass moves: the store for the cron, the
+ * admin when someone pressed "Sync all".
  */
-export async function syncAllOpenOrders(limit = 40) {
+export async function syncAllOpenOrders(limit = 40, actor: StockActor = SYSTEM_ACTOR) {
   if (!isNimbusPostConfigured()) {
     return { ok: false as const, error: "NimbusPost isn't configured." };
   }
@@ -1303,8 +1496,8 @@ export async function syncAllOpenOrders(limit = 40) {
 
   for (const o of orders) {
     const res = o.trackingNumber
-      ? await refreshTracking(o.id, o.trackingNumber)
-      : await syncOrderFromNimbus(o.id);
+      ? await refreshTracking(o.id, o.trackingNumber, actor)
+      : await syncOrderFromNimbus(o.id, actor);
     if (!res.ok) {
       failed += 1;
       console.error(`[nimbus-sync] ${o.orderNumber}: ${res.error}`);
@@ -1316,4 +1509,188 @@ export async function syncAllOpenOrders(limit = 40) {
   }
 
   return { ok: true as const, checked: orders.length, booked, tracked, waiting, failed };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Holds that never resolve                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * **How long an unpaid online checkout may hold stock: 60 minutes.**
+ *
+ * A prepaid or part-paid order is written — and its units reserved — the
+ * moment the Razorpay window opens, before anyone has paid. A shopper who
+ * closes that window leaves an order at `pending` / payment `pending` that
+ * nothing ever moves again: there is no pay-later flow and no Razorpay
+ * webhook, so without an expiry the last unit of a size reads as sold out,
+ * forever, to everyone else.
+ *
+ * 60 minutes is WooCommerce's default "hold stock" for exactly this case, and
+ * it is well clear of any real payment — a UPI collect request or a card's
+ * bank check takes minutes, not an hour. The sweep runs on every automation
+ * pass (every 15 minutes at cron-job.org), so a hold actually lasts 60–75
+ * minutes.
+ *
+ * Only the **hold** expires. The order is not cancelled: an abandoned checkout
+ * has always been the owner's to cancel (Admin → Orders, "Cancel & restore
+ * stock"), and cancelling one automatically would also cancel the order of a
+ * shopper whose payment went through while their browser did not come back to
+ * verify it. If such an order is paid later, it ships from whatever is on the
+ * shelf — and `verifyRazorpayPayment` writes that into its history.
+ */
+export const PAYMENT_HOLD_MINUTES = 60;
+
+/**
+ * What to do with one order the ledger says is still holding stock.
+ *
+ * - `unsold`   — shipped or delivered, but its sale was never recorded: sell.
+ * - `closed`   — cancelled, or its payment failed: release.
+ * - `orphaned` — the order no longer exists: release.
+ * - `expired`  — an unpaid online checkout older than the hold: release.
+ * - `keep`     — an open order that still means to ship.
+ *
+ * Pure and exported so the rule can be read — and tested — without a database.
+ */
+export type StockHoldVerdict = "keep" | "unsold" | "closed" | "orphaned" | "expired";
+
+export function stockHoldVerdict(
+  order:
+    | { status: string; paymentMethod: string; paymentStatus: string; createdAt: Date }
+    | null
+    | undefined,
+  now: Date
+): StockHoldVerdict {
+  if (!order) return "orphaned";
+  const status = order.status.trim().toLowerCase();
+  const payment = order.paymentStatus.trim().toLowerCase();
+
+  if (SHIPPED_STATUSES.has(status)) return "unsold";
+  if (CANCELLED_STATUSES.has(status) || payment === "failed") return "closed";
+
+  const kind = paymentKindOf(order.paymentMethod);
+  const online = kind === "prepaid" || kind === "partial";
+  const age = now.getTime() - order.createdAt.getTime();
+  if (
+    status === "pending" &&
+    online &&
+    payment === "pending" &&
+    age >= PAYMENT_HOLD_MINUTES * 60_000
+  ) {
+    return "expired";
+  }
+  return "keep";
+}
+
+export type StockHoldReport = {
+  /** Orders the ledger says are holding stock right now. */
+  holding: number;
+  expired: number;
+  closed: number;
+  orphaned: number;
+  sold: number;
+  failed: number;
+};
+
+/**
+ * **Settle every stock hold that should not exist any more.**
+ *
+ * Starts from the ledger, not from the orders: the orders holding stock are
+ * exactly those whose `RESERVE` rows are not yet netted off by a `RELEASE` or
+ * a `SALE`. That is a small set (open orders), where "every pending online
+ * order" would include every abandoned checkout in the store's history — the
+ * three real ones on this store hold nothing and are never touched.
+ *
+ * Besides expiring unpaid checkouts ({@link PAYMENT_HOLD_MINUTES}) it is the
+ * net under every other status path: a cancel whose release failed, or a
+ * shipment whose sale failed, is settled here on the next pass. Every call is
+ * idempotent, so a pass that overlaps a webhook or a second pass changes
+ * nothing twice.
+ *
+ * `orderIds` narrows a pass to named orders — a targeted re-run, and what the
+ * tests use so they never act on anyone else's rows.
+ */
+export async function reconcileStockHolds(
+  opts: { now?: Date; orderIds?: string[]; limit?: number } = {}
+): Promise<StockHoldReport> {
+  const now = opts.now ?? new Date();
+  const limit = opts.limit ?? 50;
+  const report: StockHoldReport = {
+    holding: 0,
+    expired: 0,
+    closed: 0,
+    orphaned: 0,
+    sold: 0,
+    failed: 0,
+  };
+
+  const holds = await prisma.stockMovement.groupBy({
+    by: ["orderId"],
+    where: {
+      orderId: opts.orderIds ? { in: opts.orderIds } : { not: null },
+      type: { in: ["RESERVE", "RELEASE", "SALE"] },
+    },
+    _sum: { reservedDelta: true },
+    having: { reservedDelta: { _sum: { gt: 0 } } },
+  });
+  const ids = holds.flatMap((h) => (h.orderId ? [h.orderId] : []));
+  report.holding = ids.length;
+  if (ids.length === 0) return report;
+
+  const select = {
+    id: true,
+    status: true,
+    paymentMethod: true,
+    paymentStatus: true,
+    createdAt: true,
+  } as const;
+  const orders = await prisma.order.findMany({ where: { id: { in: ids } }, select });
+  const byId = new Map(orders.map((o) => [o.id, o]));
+
+  // The cap is on work done, not on orders looked at — a busy store with more
+  // open orders than the cap must still reach the one that expired.
+  let acted = 0;
+  for (const id of ids) {
+    const verdict = stockHoldVerdict(byId.get(id), now);
+    if (verdict === "keep") continue;
+    if (acted >= limit) break;
+    acted += 1;
+
+    try {
+      switch (verdict) {
+        case "unsold":
+          await sellForOrder(id, SYSTEM_ACTOR);
+          report.sold += 1;
+          break;
+        case "closed":
+          await releaseForOrder(id, SYSTEM_ACTOR);
+          report.closed += 1;
+          break;
+        case "orphaned":
+          await releaseForOrder(id, SYSTEM_ACTOR);
+          report.orphaned += 1;
+          break;
+        case "expired": {
+          // Read again, just before acting: a payment may have landed since
+          // the batch read above, and a paid order keeps its hold.
+          const fresh = await prisma.order.findUnique({ where: { id }, select });
+          if (stockHoldVerdict(fresh, now) !== "expired") break;
+          const { released } = await releaseForOrder(id, SYSTEM_ACTOR);
+          if (released > 0) {
+            await appendHistory(
+              id,
+              "pending",
+              `Stock hold released — no payment ${PAYMENT_HOLD_MINUTES} minutes after checkout, so ${released === 1 ? "its unit is" : `its ${released} units are`} back on sale. The order itself is untouched: cancel it if the customer has gone. If they pay later it ships from whatever is on the shelf.`
+            );
+          }
+          report.expired += 1;
+          break;
+        }
+      }
+    } catch (err) {
+      report.failed += 1;
+      console.error(`[stock-holds] ${verdict} ${id} failed:`, err);
+    }
+  }
+
+  return report;
 }

@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { ProductForm } from "@/components/admin/product-form";
+import type { VariantRowDTO } from "@/components/admin/variant-table";
 import { getSettings } from "@/lib/settings";
 import type { ProductDTO, ProductOption, VariantPrice, Variant } from "@/lib/types";
 
@@ -15,13 +16,18 @@ export default async function EditProductPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [product, categoriesList, subcategories, settings] = await Promise.all([
+  const [product, categoriesList, subcategories, settings, stockDefaults] = await Promise.all([
     // `productImages` is the persisted contract for galleries — slot +
     // variantValue + sortOrder, written by syncProductImages(). Without it the
     // editor rebuilt its Media tab from the `Product.variants` JSON mirror,
     // where every variant's `images` already has the common photos appended.
     // That round-trip put the common shots under each variant value, left
     // Common empty, and the next save then deleted the slot="common" rows.
+    //
+    // `variantRows` is the same idea for the variant grid: SKUs, barcodes,
+    // costs and per-size price overrides are the rows' to hold, and the
+    // `variants` JSON draft does not carry them. Retired rows come too — the
+    // grid names them so their SKUs are not offered to another size.
     prisma.product.findUnique({
       where: { id },
       include: {
@@ -31,6 +37,25 @@ export default async function EditProductPage({
             media: {
               select: { id: true, url: true, alt: true, width: true, height: true },
             },
+          },
+        },
+        variantRows: {
+          orderBy: [{ sortOrder: "asc" }, { comboKey: "asc" }],
+          select: {
+            id: true,
+            comboKey: true,
+            combo: true,
+            sku: true,
+            barcode: true,
+            price: true,
+            compareAtPrice: true,
+            costPrice: true,
+            lowStockAt: true,
+            isActive: true,
+            onHand: true,
+            reserved: true,
+            available: true,
+            _count: { select: { movements: true } },
           },
         },
       },
@@ -45,6 +70,11 @@ export default async function EditProductPage({
       },
     }),
     getSettings(),
+    // Not on the settings DTO yet; read directly rather than widen a type
+    // another screen owns. Missing row → the schema default.
+    prisma.siteSettings
+      .findFirst({ select: { lowStockThreshold: true } })
+      .catch(() => null),
   ]);
   if (!product) notFound();
 
@@ -55,8 +85,28 @@ export default async function EditProductPage({
     categoryName: s.category.name,
   }));
 
+  const variantRows: VariantRowDTO[] = product.variantRows.map((r) => ({
+    id: r.id,
+    key: r.comboKey,
+    combo: (r.combo as Record<string, string>) ?? {},
+    sku: r.sku,
+    barcode: r.barcode,
+    price: r.price,
+    compareAtPrice: r.compareAtPrice,
+    costPrice: r.costPrice,
+    lowStockAt: r.lowStockAt,
+    isActive: r.isActive,
+    onHand: r.onHand,
+    reserved: r.reserved,
+    available: r.available,
+    movements: r._count.movements,
+  }));
+
+  // The relation is handed over as `variantRows` above; keep it off the DTO.
+  const { variantRows: _rows, ...productRow } = product;
+
   const dto = {
-    ...product,
+    ...productRow,
     media: product.productImages.map((pi) => ({
       id: pi.media.id,
       url: pi.media.url,
@@ -105,6 +155,13 @@ export default async function EditProductPage({
           defaultReturnable: settings.defaultReturnable,
           returnWindowDays: settings.returnWindowDays,
         }}
+        variantRows={variantRows}
+        inventory={{
+          tracked: product.trackInventory,
+          lowStockThreshold: stockDefaults?.lowStockThreshold ?? 5,
+          href: `/admin/inventory?product=${product.id}`,
+        }}
+        brandName={settings.brandName}
       />
     </div>
   );

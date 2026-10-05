@@ -870,7 +870,15 @@ export type FinanceReport = {
   products: ProductDemand[];
   funnel: FunnelSummary;
   coupons: CouponUse[];
-  /** Live catalogue facts, not windowed — stock is a "right now" number. */
+  /**
+   * Live catalogue facts, not windowed — stock is a "right now" number.
+   *
+   * Both read `Product.stock`, which for a product tracked per size is the
+   * inventory engine's mirror: Σ of each size's positive `available`. So
+   * `outOfStock` counts products with **every** size sold out — the
+   * storefront's "Sold out" — and `unitsInStock` counts units that can still
+   * be sold, not units promised to open orders.
+   */
   catalogue: { total: number; active: number; outOfStock: number; unitsInStock: number };
   /** Comparison against the equally long preceding window. `null` on All time. */
   previous: {
@@ -2120,7 +2128,14 @@ export type AttentionQueue = {
   unreadInquiries: number;
   unapprovedReviews: number;
   interestedLeads: number;
+  /** Active products nobody can buy — every size sold out (`Product.stock ≤ 0`). */
   outOfStock: number;
+  /**
+   * Tracked **sizes** that have promised more than they hold (`available < 0`):
+   * open orders that cannot all be filled from the shelf. Counted per size,
+   * not per product, because each one is a customer to deal with.
+   */
+  oversold: number;
   degraded: boolean;
 };
 
@@ -2133,7 +2148,7 @@ export type AttentionQueue = {
  * days" would hide exactly the rows that matter. Every other figure in the
  * workspace is windowed; this one says so on screen.
  *
- * Nine `count`s, which is nine index scans and no rows on the wire. They run
+ * Ten `count`s, which is ten index scans and no rows on the wire. They run
  * in one `Promise.all` alongside the main report.
  */
 export async function getAttentionQueue(): Promise<AttentionQueue> {
@@ -2154,6 +2169,7 @@ export async function getAttentionQueue(): Promise<AttentionQueue> {
     unapprovedReviews,
     interestedLeads,
     outOfStock,
+    oversold,
   ] = await Promise.all([
     prisma.order.count({ where: { status: "pending" } }).catch(soft),
     prisma.order.count({ where: { status: "confirmed", trackingNumber: null } }).catch(soft),
@@ -2169,7 +2185,16 @@ export async function getAttentionQueue(): Promise<AttentionQueue> {
     prisma.message.count({ where: { isRead: false } }).catch(soft),
     prisma.review.count({ where: { approved: false } }).catch(soft),
     prisma.lead.count({ where: { status: "interested" } }).catch(soft),
+    // `Product.stock` is the engine's mirror for a tracked product (Σ of its
+    // sizes' positive available), so `≤ 0` means every size is sold out —
+    // exactly when the storefront shows the product as sold out.
     prisma.product.count({ where: { isActive: true, stock: { lte: 0 } } }).catch(soft),
+    // Hidden products included: an oversold size owes units to orders already
+    // placed, whether or not the product is still on sale. Only while tracked —
+    // an untracked product's rows are not the stock record.
+    prisma.productVariant
+      .count({ where: { available: { lt: 0 }, product: { trackInventory: true } } })
+      .catch(soft),
   ]);
 
   return {
@@ -2182,6 +2207,7 @@ export async function getAttentionQueue(): Promise<AttentionQueue> {
     unapprovedReviews,
     interestedLeads,
     outOfStock,
+    oversold,
     degraded,
   };
 }
@@ -2234,7 +2260,7 @@ export const METRIC = {
   refundPending:
     "Return requests approved, picked up or received but not yet paid out, whenever they were raised. Money the store still owes; it is not in any period's refund total until it is actually sent.",
   daysOfCover:
-    "Current stock ÷ (units sold in this period ÷ days in the period). How many more days the shelf lasts at the rate just measured. Withheld on All time, where the rate is a lifetime average and would be meaningless.",
+    "Current stock ÷ (units sold in this period ÷ days in the period). How many more days the shelf lasts at the rate just measured. Withheld on All time, where the rate is a lifetime average and would be meaningless. For a product counted per size, current stock is what its sizes can still sell, summed — one size can run out well before the product's cover does.",
   productRevenue:
     "Σ (line price × quantity) less that line's exact pro-rata share of the order's coupon discount. The shares are allocated against a running total so they sum back to the order discount to the rupee, which is why these rows add up to the headline.",
   cartAdds:

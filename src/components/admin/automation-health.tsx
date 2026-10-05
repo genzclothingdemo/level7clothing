@@ -1,49 +1,38 @@
 /**
- * "Can this store actually send email?" — answered on the screen where the
- * answer matters.
+ * "Can this store actually send email?" — one line on Admin → Automation,
+ * with the evidence one tap away.
  *
- * **No `"use client"` on purpose**, the same as `automation-summary.tsx`: this
- * is rendered by a server component and takes plain data, so it must not become
- * a client reference. CLAUDE.md records what happens otherwise — "Attempted to
- * call isTabKey() from the server" took out `/admin/settings` in production.
+ * **No `"use client"` on purpose**: it is rendered by a server component and
+ * takes plain data. `Disclosure` inside it is a client component, which a
+ * server component may render — its children are serialised, never called.
  *
- * ## Why this exists at all
+ * ## Why it is a line and not a card any more
  *
- * `EMAIL_FROM` was a gmail.com address for weeks. Resend can only send from a
- * domain you have verified and nobody can verify gmail.com, so **every** send
- * returned 403 — order confirmations, password resets, contact replies. The
- * code caught it, logged a `console.error` and returned normally, so the app
- * looked like it had worked. Nothing on any screen said otherwise, which is the
- * only reason it survived weeks.
+ * The sending identity — who mail is from, whether a key is set, where your
+ * own copy lands — has one home now: **Settings → Alerts**, the card "How mail
+ * leaves this store". This page used to print the same facts in a card of its
+ * own, which is the two-homes shape the owner reads as duplication. What stays
+ * here is only the part that belongs to *delivery*: did the last message
+ * actually leave, and has anything failed. That is the question somebody
+ * brings to this screen ("why didn't they get the email?"), and the answer is
+ * a verdict, not a form.
  *
- * So the three facts that decide deliverability get a permanent home:
+ * ## The two "last send" readings
  *
- * 1. is there an API key,
- * 2. what address is mail sent *from*, and can that domain plausibly be
- *    verified,
- * 3. what happened to the last message.
+ * - **This server** is `lib/email.ts`'s in-memory record of the last message
+ *   handed to Resend by *anything* — including the one-time code, the password
+ *   reset and the contact form, which are not rules. Per-instance and
+ *   short-lived on Vercel, and labelled as such.
+ * - **The queue** is `AutomationJob`: durable, survives deploys, rule-driven
+ *   mail only.
  *
- * ## The API key is never rendered
- *
- * Only whether one is set. A screen that prints a send key is a screen that
- * leaks it into the first screenshot anybody takes of it — and this screen is
- * one an owner will screenshot to ask for help.
- *
- * ## Why there are two "last send" readings
- *
- * They answer different questions and neither alone is enough.
- *
- * - **This server** is `lib/email.ts`'s in-memory record of the last message it
- *   handed to Resend, whatever sent it — including the password reset and the
- *   contact form, which are not rules. It is the only place a *direct* send's
- *   outcome is visible. On Vercel it is per-instance and short-lived, so it is
- *   labelled as such rather than dressed up as history.
- * - **The queue** is `AutomationJob`, which is durable and survives deploys,
- *   but only covers rule-driven mail.
+ * The API key is never rendered — only whether one is set.
  */
 
-import { AlertTriangle, CheckCircle2, Mail, XCircle } from "lucide-react";
+import Link from "next/link";
+import { AlertTriangle, ArrowUpRight, CheckCircle2, XCircle } from "lucide-react";
 import type { EmailHealth } from "@/lib/email";
+import { Disclosure } from "@/components/store/disclosure";
 import { relativeTime } from "@/components/admin/automation-summary";
 
 /** The durable half, read from `AutomationJob` by the page. */
@@ -71,34 +60,21 @@ const TONE_TEXT: Record<Tone, string> = {
 };
 
 function ToneIcon({ tone }: { tone: Tone }) {
-  const cls = `h-5 w-5 shrink-0 ${TONE_TEXT[tone]}`;
-  if (tone === "good") return <CheckCircle2 className={cls} />;
-  if (tone === "warn") return <AlertTriangle className={cls} />;
-  return <XCircle className={cls} />;
+  const cls = `h-4 w-4 shrink-0 ${TONE_TEXT[tone]}`;
+  if (tone === "good") return <CheckCircle2 className={cls} aria-hidden />;
+  if (tone === "warn") return <AlertTriangle className={cls} aria-hidden />;
+  return <XCircle className={cls} aria-hidden />;
 }
 
 /**
- * The headline, in the owner's terms.
- *
- * Three judgements worth stating, because each one was a real failure:
- *
- * - A **missing key** is named before a bad sender. With no key nothing is even
- *   attempted, so it is the first thing to fix and the first thing to say.
- * - A `resend.dev` sender is a **warning, not a pass**. It delivers only to the
- *   Resend account owner, which looks exactly like success while it reaches no
- *   customer at all.
- * - A domain of your own is **not called "Sending" until something has actually
- *   sent.** Nothing here can check whether a domain is verified in Resend — the
- *   send-only API key this store uses returns `401 restricted_api_key` for
- *   `GET /domains`, so asking is not an option. A green "Sending" on an
- *   unverified domain would be precisely the false reassurance that let every
- *   message 403 for weeks. One successful send settles it; until then this says
- *   so.
+ * The verdict, in the owner's terms. Three judgements, each a real failure
+ * once: a missing key is named first (nothing is even attempted); a
+ * `resend.dev` sender is a warning, not a pass (it reaches only the Resend
+ * account owner); and an own domain is not called "Sending" until something
+ * has actually sent — this key cannot ask Resend whether a domain is verified.
  */
-function headline(health: EmailHealth, queue: QueueOutcome): { tone: Tone; line: string } {
-  if (!health.hasApiKey) {
-    return { tone: "bad", line: "Nothing is being sent" };
-  }
+function verdict(health: EmailHealth, queue: QueueOutcome): { tone: Tone; line: string } {
+  if (!health.hasApiKey) return { tone: "bad", line: "Nothing is being sent — no API key" };
   if (health.verdict === "unverifiable") {
     return { tone: "bad", line: "Every message is being rejected" };
   }
@@ -108,20 +84,16 @@ function headline(health: EmailHealth, queue: QueueOutcome): { tone: Tone; line:
   if (queue.failedCount > 0) {
     return {
       tone: "warn",
-      line: `${queue.failedCount} message${queue.failedCount === 1 ? "" : "s"} failed and ${queue.failedCount === 1 ? "is" : "are"} waiting in the queue below`,
+      line: `${queue.failedCount} message${queue.failedCount === 1 ? "" : "s"} failed`,
     };
   }
   if (health.verdict === "resend-test" || health.verdict === "fallback") {
     return { tone: "warn", line: "Sending, but only to you" };
   }
-
   const proven = health.lastSend?.outcome === "sent" || Boolean(queue.lastSentAt);
   return proven
     ? { tone: "good", line: "Sending" }
-    : {
-        tone: "warn",
-        line: "Set up — but nothing has gone out yet to prove the domain is verified",
-      };
+    : { tone: "warn", line: "Set up — nothing has gone out yet" };
 }
 
 const OUTCOME_WORD: Record<string, string> = {
@@ -131,169 +103,99 @@ const OUTCOME_WORD: Record<string, string> = {
   "no-api-key": "Skipped — no API key",
 };
 
-export function EmailHealthCard({
+export function DeliveryHealth({
   health,
   queue,
 }: {
   health: EmailHealth;
   queue: QueueOutcome;
 }) {
-  const { tone, line } = headline(health, queue);
+  const { tone, line } = verdict(health, queue);
   const last = health.lastSend;
+  const lastSent = queue.lastSentAt ? relativeTime(queue.lastSentAt) : null;
 
   return (
-    <section className={`min-w-0 rounded-2xl border p-4 sm:p-5 ${TONE_BOX[tone]}`}>
-      <div className="flex items-start gap-3">
-        <ToneIcon tone={tone} />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-x-2">
-            <h2 className="font-serif text-lg">Email</h2>
-            <span className={`text-sm font-medium ${TONE_TEXT[tone]}`}>{line}</span>
-          </div>
-          <p className="mt-1 max-w-2xl break-words text-sm text-muted-foreground">
-            {health.advice}
-          </p>
-        </div>
+    <section className={`min-w-0 rounded-2xl border px-4 py-3 sm:px-5 ${TONE_BOX[tone]}`}>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+        <p className="flex min-w-0 items-center gap-2 text-sm">
+          <ToneIcon tone={tone} />
+          <span className="font-medium">Email</span>
+          <span className={`font-medium ${TONE_TEXT[tone]}`}>{line}</span>
+        </p>
+        <p className="min-w-0 text-xs text-muted-foreground">
+          {lastSent ? `Last sent ${lastSent}` : "No alert has sent yet"}
+          {queue.failedCount === 0 ? " · nothing failed" : ""}
+        </p>
+        <Link
+          href="/admin/settings?tab=alerts"
+          className="ml-auto inline-flex min-h-11 items-center gap-1 text-[11px] font-medium uppercase tracking-widest text-accent transition-opacity hover:opacity-80 sm:min-h-9"
+        >
+          Sender settings <ArrowUpRight className="h-3.5 w-3.5" aria-hidden />
+        </Link>
       </div>
 
-      <dl className="mt-4 grid gap-4 border-t border-border/60 pt-4 sm:grid-cols-2">
-        <div className="min-w-0">
-          <dt className="eyebrow text-muted-foreground">Sends from</dt>
-          <dd className="mt-1 break-all font-mono text-xs">{health.from}</dd>
-          <dd className="mt-1 text-xs text-muted-foreground">
-            Set by the <code className="font-mono">EMAIL_FROM</code> environment
-            variable. Changing it is a deploy, not a setting.
-          </dd>
-        </div>
-        <div className="min-w-0">
-          <dt className="eyebrow text-muted-foreground">Resend API key</dt>
-          <dd className="mt-1 text-sm font-medium">
-            {health.hasApiKey ? "Set" : "Not set"}
-          </dd>
-          <dd className="mt-1 text-xs text-muted-foreground">
-            {health.hasApiKey
-              ? "The key itself is never shown here, on purpose."
-              : "Without it every message is skipped with a line in the log and nothing reaches anyone."}
-          </dd>
-        </div>
-
-        <div className="min-w-0">
-          <dt className="eyebrow text-muted-foreground">
-            Last send · this server
-          </dt>
-          {last ? (
-            <>
-              <dd className="mt-1 text-sm">
-                <span
-                  className={
-                    last.outcome === "sent" ? "font-medium" : `font-medium ${TONE_TEXT["bad"]}`
-                  }
-                >
-                  {OUTCOME_WORD[last.outcome] ?? last.outcome}
-                </span>
-                <span className="text-muted-foreground"> · {relativeTime(last.at)}</span>
-              </dd>
-              <dd className="mt-1 break-words text-xs text-muted-foreground">
-                “{last.subject}” → {last.to}
-              </dd>
-              {last.error && (
-                <dd className="mt-1 break-words font-mono text-xs text-danger">
-                  {last.error}
-                </dd>
-              )}
-            </>
-          ) : (
-            <dd className="mt-1 text-sm text-muted-foreground">
-              Nothing yet since this server started.
-            </dd>
-          )}
-          <dd className="mt-1 text-xs text-muted-foreground">
-            Covers every message, including the password reset and the contact
-            form. Held in memory, so it resets on each deploy.
-          </dd>
-        </div>
-
-        <div className="min-w-0">
-          <dt className="eyebrow text-muted-foreground">Last send · the queue</dt>
-          <dd className="mt-1 text-sm">
-            {queue.lastSentAt ? (
+      <Disclosure label="Details" summary={health.advice ? "What decides this" : undefined}>
+        <p className="mb-3 max-w-2xl break-words text-xs leading-relaxed text-muted-foreground">
+          {health.advice}
+        </p>
+        <dl className="grid gap-3 text-xs sm:grid-cols-2">
+          <div className="min-w-0">
+            <dt className="eyebrow text-muted-foreground">Last send · this server</dt>
+            {last ? (
               <>
-                <span className="font-medium">Sent</span>
-                <span className="text-muted-foreground">
-                  {" "}
-                  · {relativeTime(queue.lastSentAt)}
-                </span>
+                <dd className="mt-1">
+                  <span className={last.outcome === "sent" ? "font-medium" : "font-medium text-danger"}>
+                    {OUTCOME_WORD[last.outcome] ?? last.outcome}
+                  </span>
+                  <span className="text-muted-foreground"> · {relativeTime(last.at)}</span>
+                </dd>
+                <dd className="mt-0.5 break-words text-muted-foreground">
+                  “{last.subject}” → {last.to}
+                </dd>
+                {last.error && (
+                  <dd className="mt-0.5 break-words font-mono text-danger">{last.error}</dd>
+                )}
               </>
             ) : (
-              <span className="text-muted-foreground">No rule has sent yet.</span>
+              <dd className="mt-1 text-muted-foreground">Nothing since this server started.</dd>
             )}
-          </dd>
-          {queue.lastSentRule && (
-            <dd className="mt-1 break-words text-xs text-muted-foreground">
-              {queue.lastSentRule}
+            <dd className="mt-1 text-muted-foreground">
+              Every message, including the one-time code and password reset. Held
+              in memory, so it resets on each deploy.
             </dd>
-          )}
-          {queue.lastFailedAt && (
-            <dd className="mt-2 break-words text-xs">
-              <span className="font-medium text-danger">
-                Last failure {relativeTime(queue.lastFailedAt)}
-              </span>
-              {queue.lastFailedRule ? ` · ${queue.lastFailedRule}` : ""}
-              {queue.lastFailedError ? (
-                <span className="mt-0.5 block font-mono text-danger">
-                  {queue.lastFailedError}
+          </div>
+          <div className="min-w-0">
+            <dt className="eyebrow text-muted-foreground">Last send · the queue</dt>
+            <dd className="mt-1">
+              {queue.lastSentAt ? (
+                <>
+                  <span className="font-medium">Sent</span>
+                  <span className="text-muted-foreground"> · {relativeTime(queue.lastSentAt)}</span>
+                </>
+              ) : (
+                <span className="text-muted-foreground">No alert has sent yet.</span>
+              )}
+            </dd>
+            {queue.lastSentRule && (
+              <dd className="mt-0.5 break-words text-muted-foreground">{queue.lastSentRule}</dd>
+            )}
+            {queue.lastFailedAt && (
+              <dd className="mt-1 break-words">
+                <span className="font-medium text-danger">
+                  Last failure {relativeTime(queue.lastFailedAt)}
                 </span>
-              ) : null}
+                {queue.lastFailedRule ? ` · ${queue.lastFailedRule}` : ""}
+                {queue.lastFailedError ? (
+                  <span className="mt-0.5 block font-mono text-danger">{queue.lastFailedError}</span>
+                ) : null}
+              </dd>
+            )}
+            <dd className="mt-1 text-muted-foreground">
+              Durable — survives a deploy, and covers every alert.
             </dd>
-          )}
-          <dd className="mt-1 text-xs text-muted-foreground">
-            Durable — this is the record that survives a deploy, and it covers
-            the rules below.
-          </dd>
-        </div>
-      </dl>
+          </div>
+        </dl>
+      </Disclosure>
     </section>
-  );
-}
-
-/**
- * The mail that is **not** a rule, listed so this screen is the whole picture.
- *
- * Read-only with a reason each, the same treatment the order pipeline gets: the
- * page's job is to answer "what does my store send?", and an answer that
- * quietly omits two messages is not an answer. `DIRECT_MAIL` in
- * `lib/automation.ts` is the list — add to it when a direct sender is added, or
- * this stops being true.
- */
-export function DirectMailCard({
-  items,
-}: {
-  items: { name: string; to: string; why: string }[];
-}) {
-  return (
-    <div className="mt-3 min-w-0 rounded-2xl border border-border bg-card p-4 sm:p-5">
-      <div className="flex items-center gap-2">
-        <Mail className="h-4 w-4 text-muted-foreground" />
-        <h3 className="font-serif text-lg">Mail that isn&rsquo;t a rule</h3>
-      </div>
-      <p className="mt-1 text-sm text-muted-foreground">
-        Everything else your store emails is a rule above, and pausing it stops
-        the message. These two are not, because switching them off would break
-        something rather than quieten it.
-      </p>
-      <ul className="mt-4 divide-y divide-border text-sm">
-        {items.map((item) => (
-          <li key={item.name} className="py-3 first:pt-0 last:pb-0">
-            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-              <p className="min-w-0 font-medium">{item.name}</p>
-              <span className="shrink-0 text-xs text-muted-foreground">
-                → {item.to}
-              </span>
-            </div>
-            <p className="mt-0.5 text-xs text-muted-foreground">{item.why}</p>
-          </li>
-        ))}
-      </ul>
-    </div>
   );
 }

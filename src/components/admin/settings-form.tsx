@@ -49,6 +49,7 @@ import {
 import {
   DEFAULT_TAB,
   FIELD_META,
+  ReadOnlyNotice,
   SETTINGS_PANEL_ID,
   SaveBar,
   SettingsTabs,
@@ -414,6 +415,7 @@ export function SettingsForm({
 
   const Section = SECTIONS[tab];
   const meta = tabMeta(tab);
+  const readOnly = facts.viewerMode !== "full";
 
   return (
     <div className="max-w-3xl">
@@ -438,6 +440,14 @@ export function SettingsForm({
           <InfoTip term={meta.heading}>{meta.guide}</InfoTip>
         </div>
 
+        {/* Above every tab, not only Access: a view-only holder used to be able
+            to fill in six tabs and find out at Save. */}
+        {readOnly && (
+          <div className="mb-4">
+            <ReadOnlyNotice />
+          </div>
+        )}
+
         {/* `goTab` is `selectTab`, not a `<Link>`: a section that mirrors a
             setting owned by another tab has to be able to send the owner
             there, and a real navigation would remount this form and drop an
@@ -451,7 +461,13 @@ export function SettingsForm({
         />
       </div>
 
-      <SaveBar keys={dirty} saving={saving} onSave={save} onDiscard={discard} />
+      <SaveBar
+        keys={dirty}
+        saving={saving}
+        onSave={save}
+        onDiscard={discard}
+        readOnly={readOnly}
+      />
     </div>
   );
 }

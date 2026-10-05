@@ -7,6 +7,13 @@ import { prisma } from "@/lib/prisma";
 import { requireAdminSession, requireAdminWrite } from "@/lib/auth";
 import { DEFAULT_SETTINGS } from "@/lib/settings";
 import { draftReturnPickup } from "@/lib/fulfilment";
+import { actorFromAdminSession, restockReturn } from "@/lib/inventory";
+import type { StockActor } from "@/lib/inventory-types";
+import {
+  KEPT_OUT_MARKER,
+  receivedAtOf,
+  returnStockDecision,
+} from "@/components/admin/return-stock";
 import {
   bookReturnPickup,
   listRtoOrders,
@@ -211,10 +218,111 @@ async function notifyReturnMoved(id: string, previousStatus: string) {
   }).catch((err) => console.error("[returns] automation trigger failed:", err));
 }
 
-type HistoryEntry = { status: string; note?: string; at: string; by?: string };
+type HistoryEntry = {
+  status: string;
+  note?: string;
+  at: string;
+  by?: string;
+  /** Set only by a decision to keep a returned piece out of stock. */
+  stock?: string;
+};
 
 function readHistory(value: unknown): HistoryEntry[] {
   return Array.isArray(value) ? (value as HistoryEntry[]) : [];
+}
+
+/* ------------------------------------------------------ returned stock */
+
+/**
+ * What one stock decision on a received return came to. Declared here, not
+ * exported as a type alias — a `"use server"` module's exports become a
+ * runtime table, and a re-exported type breaks every action in the file
+ * (CLAUDE.md). The panel reads it off the action's return type.
+ */
+type ReturnStockOutcome =
+  /** The product's stock is not tracked — nothing to decide, nothing done. */
+  | { kind: "untracked" }
+  | { kind: "restocked"; units: number }
+  | { kind: "kept_out" }
+  /** Decided before: already back in stock, or already in the opening count. */
+  | { kind: "already"; decision: "restocked" | "counted" }
+  /** A restock was asked for and the engine could not place it. */
+  | { kind: "not_restocked"; reason: string };
+
+/**
+ * **Put a received return back in stock, or record that it stays out.**
+ *
+ * The choice is the admin's, because a returned garment is sometimes worn,
+ * stained or damaged: restocking it blindly puts it on sale to the next
+ * shopper. So nothing restocks a return without a person saying so — not even
+ * the courier's "delivered" scan on the reverse leg, which only proves the box
+ * arrived, not what is in it.
+ *
+ * "Keep it out" makes no ledger entry, because nothing moved: the unit left
+ * with its sale and was never added back. That is also why it is **not**
+ * followed by a Damaged entry — a write-off takes a unit off the count, and
+ * doing that to a unit that was never put back removes a second, healthy one.
+ * To have the write-off on record, put it back and then record it as Damaged.
+ *
+ * A return received before its product's latest opening count is already in
+ * that count, so it is never restocked again (`counted`).
+ */
+async function settleReturnStock(
+  ret: { id: string; orderId: string; productId: string | null; statusHistory: unknown },
+  restock: boolean,
+  actor: StockActor
+): Promise<ReturnStockOutcome> {
+  if (!ret.productId) return { kind: "untracked" };
+  const product = await prisma.product.findUnique({
+    where: { id: ret.productId },
+    select: { trackInventory: true },
+  });
+  if (!product?.trackInventory) return { kind: "untracked" };
+
+  const [returnRow, count] = await Promise.all([
+    // By order and return: `orderId` is indexed, and a RETURN row carries both.
+    prisma.stockMovement.findFirst({
+      where: { orderId: ret.orderId, returnId: ret.id, type: "RETURN" },
+      select: { id: true },
+    }),
+    prisma.stockMovement.findFirst({
+      where: { type: "OPENING", variant: { productId: ret.productId } },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    }),
+  ]);
+  const decision = returnStockDecision({
+    restocked: Boolean(returnRow),
+    history: ret.statusHistory,
+    countedAt: count?.createdAt ?? null,
+  });
+  if (decision === "restocked" || decision === "counted") {
+    return { kind: "already", decision };
+  }
+
+  if (!restock) return { kind: "kept_out" };
+
+  const res = await restockReturn(ret.id, { restock: true, actor });
+  return res.restocked > 0
+    ? { kind: "restocked", units: res.restocked }
+    : {
+        kind: "not_restocked",
+        reason: res.reason ?? "The stock record did not change.",
+      };
+}
+
+/** The timeline line a stock decision leaves on the return, if any. */
+function stockHistoryNote(outcome: ReturnStockOutcome): string | null {
+  switch (outcome.kind) {
+    case "restocked":
+      return `Put back in stock (${outcome.units})`;
+    case "kept_out":
+      return "Not put back in stock";
+    case "not_restocked":
+      return `Could not put it back in stock: ${outcome.reason}`;
+    default:
+      return null;
+  }
 }
 
 /* ------------------------------------------------------------ customer side */
@@ -1142,9 +1250,19 @@ export async function setReturnRefundUpi(input: SetRefundUpiInput) {
  * "refunded" is deliberately NOT reachable from here. That status asserts the
  * money left the account, and it must carry a reference and a timestamp —
  * `markRefundPaid` is the only door to it.
+ *
+ * **Received asks whether the piece goes back in stock** (`opts.restock`,
+ * true unless the admin unticks it) — see {@link settleReturnStock}. The
+ * stock step runs before the status is written, so a failed write leaves a
+ * restock that a retry recognises rather than a "received" with nothing done.
  */
-export async function setReturnStatus(id: string, status: string, note?: string) {
-  await requireAdmin("setReturnStatus");
+export async function setReturnStatus(
+  id: string,
+  status: string,
+  note?: string,
+  opts?: { restock?: boolean }
+) {
+  const session = await requireAdmin("setReturnStatus");
   if (!isReturnStatus(status)) {
     return { ok: false as const, error: "Unknown status" };
   }
@@ -1160,12 +1278,23 @@ export async function setReturnStatus(id: string, status: string, note?: string)
   });
   if (!existing) return { ok: false as const, error: "Return request not found" };
 
+  const stock =
+    status === "received"
+      ? await settleReturnStock(
+          existing,
+          opts?.restock !== false,
+          actorFromAdminSession(session)
+        )
+      : null;
+  const stockNote = stock ? stockHistoryNote(stock) : null;
+
   const history = readHistory(existing.statusHistory);
   history.push({
     status,
-    note: note?.trim() || undefined,
+    note: [note?.trim(), stockNote].filter(Boolean).join(" · ") || undefined,
     at: new Date().toISOString(),
     by: "admin",
+    ...(stock?.kind === "kept_out" ? { stock: KEPT_OUT_MARKER } : {}),
   });
 
   await prisma.returnRequest.update({
@@ -1181,7 +1310,72 @@ export async function setReturnStatus(id: string, status: string, note?: string)
   });
   revalidateReturns(existing.order.orderNumber);
   await notifyReturnMoved(id, existing.status);
-  return { ok: true as const };
+  return { ok: true as const, stock };
+}
+
+/**
+ * **The stock question for a return that reached "received" without it** —
+ * the courier delivered it back, so nobody was asked. Also a change of mind:
+ * a piece first kept out (a loose seam, since mended) can still be put back.
+ *
+ * Refuses what cannot be true: a return that has not arrived has nothing to
+ * put back, one already back in stock cannot be un-restocked (the ledger only
+ * moves forward — record it as Damaged instead), and one that came back before
+ * tracking started is already in the opening count.
+ */
+export async function setReturnRestock(id: string, restock: boolean) {
+  const session = await requireAdmin("setReturnRestock");
+  const existing = await prisma.returnRequest.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      orderId: true,
+      productId: true,
+      status: true,
+      statusHistory: true,
+      order: { select: { orderNumber: true } },
+    },
+  });
+  if (!existing) return { ok: false as const, error: "Return request not found" };
+  if (!receivedAtOf(existing.statusHistory)) {
+    return {
+      ok: false as const,
+      error: "Mark it received first — stock only goes back once the parcel is here.",
+    };
+  }
+
+  const stock = await settleReturnStock(existing, restock, actorFromAdminSession(session));
+  if (stock.kind === "untracked") {
+    return {
+      ok: false as const,
+      error: "This product's stock isn't tracked, so there is nothing to put back.",
+    };
+  }
+  if (stock.kind === "already") {
+    return {
+      ok: false as const,
+      error:
+        stock.decision === "restocked"
+          ? "It is already back in stock. If it can't be sold, record it as Damaged in Inventory."
+          : "It came back before tracking started, so the opening count already includes it.",
+    };
+  }
+
+  const history = readHistory(existing.statusHistory);
+  history.push({
+    status: existing.status,
+    note: stockHistoryNote(stock) ?? undefined,
+    at: new Date().toISOString(),
+    by: "admin",
+    ...(stock.kind === "kept_out" ? { stock: KEPT_OUT_MARKER } : {}),
+  });
+  await prisma.returnRequest.update({
+    where: { id },
+    data: { statusHistory: history as unknown as object[] },
+  });
+
+  revalidateReturns(existing.order.orderNumber);
+  return { ok: true as const, stock };
 }
 
 /**

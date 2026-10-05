@@ -168,7 +168,7 @@ export function NotificationMatrixCard({
       }
       return {
         on: base?.on ?? false,
-        mixed: base?.mixed ?? false,
+        mixed: base?.doubleSend ?? false,
         count: base?.ruleIds.length ?? 0,
         broken: base?.broken ?? false,
       };

@@ -34,11 +34,11 @@ export const CURATED_POSTS: SocialPost[] = [
 
 /** Normalises whatever the admin saved into a usable @handle. */
 export function instagramHandle(instagramUrl?: string | null): string {
-  if (!instagramUrl) return "@level7clothing";
+  if (!instagramUrl) return "@halftone.store";
   const cleaned = instagramUrl
     .replace(/^https?:\/\/(www\.)?instagram\.com\//i, "")
     .replace(/\/+$/, "")
     .trim();
-  if (!cleaned || cleaned.includes("/")) return "@level7clothing";
+  if (!cleaned || cleaned.includes("/")) return "@halftone.store";
   return cleaned.startsWith("@") ? cleaned : `@${cleaned}`;
 }

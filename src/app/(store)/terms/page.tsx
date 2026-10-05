@@ -3,7 +3,7 @@ import { PolicyLayout, PolicySection } from "@/components/store/policy-layout";
 export const metadata = {
   title: "Terms & Conditions",
   description:
-    "The terms that apply when you order from Level7 Clothing.",
+    "The terms that apply when you order from HALFTONE.",
   alternates: { canonical: "/terms" },
 };
 
@@ -41,7 +41,7 @@ export default function TermsPage() {
       <PolicySection title="Intellectual property">
         <p>
           All designs, graphics and content on this site are the property of
-          Level7 Clothing and may not be reproduced without permission.
+          HALFTONE and may not be reproduced without permission.
         </p>
       </PolicySection>
 

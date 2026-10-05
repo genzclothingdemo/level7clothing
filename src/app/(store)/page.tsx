@@ -440,7 +440,7 @@ function HeroTile({
     >
       <Image
         src={src}
-        alt="Level7 Clothing"
+        alt="HALFTONE"
         fill
         priority={priority}
         sizes="(max-width:768px) 50vw, 30vw"

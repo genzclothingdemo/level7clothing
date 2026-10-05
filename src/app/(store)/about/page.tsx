@@ -7,17 +7,17 @@ export const dynamic = "force-dynamic";
 export const metadata = {
   title: "About",
   description:
-    "Level7 Clothing is a contemporary apparel brand focused on quality and design — premium oversized tees and hoodies.",
+    "HALFTONE is an independent streetwear label — premium oversized tees and heavyweight hoodies, made to layer and last.",
   alternates: { canonical: "/about" },
 };
 
 const ABOUT_HERO_IMAGE =
-  "/products/level7/Level7_Core_Style.png";
+  "https://images.unsplash.com/photo-1483985988355-763728e1935b?w=1000&h=1250&q=80&fm=jpg&fit=crop";
 const ABOUT_GRID_IMAGES = [
-  "/products/level7/05.10.2024-182.jpg",
-  "/products/level7/Level7_Planet_Front.png",
-  "/products/level7/05.10.2024-128.jpg",
-  "/products/level7/Level7_Wine_Basic_Front.png",
+  "https://images.unsplash.com/photo-1441984904996-e0b6ba687e04?w=1000&h=1250&q=80&fm=jpg&fit=crop",
+  "https://images.unsplash.com/photo-1489987707025-afc232f7ea0f?w=1000&h=1250&q=80&fm=jpg&fit=crop",
+  "https://images.unsplash.com/photo-1525507119028-ed4c629a60a3?w=1000&h=1250&q=80&fm=jpg&fit=crop",
+  "https://images.unsplash.com/photo-1490481651871-ab68de25d43d?w=1000&h=1250&q=80&fm=jpg&fit=crop",
 ];
 
 export default async function AboutPage() {

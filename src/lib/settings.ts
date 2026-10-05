@@ -9,21 +9,21 @@ import type { SettingsDTO } from "./types";
  * SiteSettings model in prisma/schema.prisma.
  */
 export const DEFAULT_SETTINGS: SettingsDTO = {
-  brandName: "Level7 Clothing",
-  tagline: "Premium GenZ Graphic Tees",
+  brandName: "HALFTONE",
+  tagline: "Premium Oversized Essentials",
   logoUrl: null,
-  heroHeadline: "Wear the statement.",
+  heroHeadline: "Built heavy. Worn easy.",
   heroSubtext:
-    "Premium oversized tees and drop-shoulder hoodies — quality and design that enhance your everyday.",
+    "Premium oversized tees and heavyweight hoodies — considered basics with an editorial finish.",
   aboutText:
-    "Level7 Clothing is a contemporary apparel brand focused on quality and design. We curate graphic tees and hoodies that enhance your everyday.",
-  contactEmail: "hello@level7clothing.example",
+    "HALFTONE is an independent streetwear label built on heavyweight fabrics and clean, considered design.",
+  contactEmail: "hello@halftone.store",
   contactPhone: "+91 90000 00000",
   whatsapp: "+919000000000",
-  address: "Level7 Clothing, India",
+  address: "HALFTONE Studio, Bengaluru, India",
   instagram: "https://instagram.com",
   facebook: "",
-  adminNotifyEmail: "admin@level7clothing.example",
+  adminNotifyEmail: "alerts@halftone.store",
   currency: "INR",
   freeShippingThreshold: null,
   codEnabled: true,

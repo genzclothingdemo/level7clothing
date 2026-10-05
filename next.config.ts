@@ -34,6 +34,9 @@ const nextConfig: NextConfig = {
       // a public thumbnail without an API key — Instagram/Facebook cards fall
       // back to a branded placeholder, so no other host is needed here.
       { protocol: "https", hostname: "i.ytimg.com", pathname: "/vi/**" },
+      // Demo product imagery is served from Unsplash's CDN by URL (no files in
+      // the repo). Safe, hotlink-friendly host.
+      { protocol: "https", hostname: "images.unsplash.com" },
     ],
   },
 };

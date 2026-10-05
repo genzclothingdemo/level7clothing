@@ -44,7 +44,7 @@ import { DEFAULT_SETTINGS } from "./settings";
 const apiKey = process.env.RESEND_API_KEY;
 // Resend rejects a sender on a domain you have not verified, so the fallback
 // stays on their shared testing domain rather than guessing a brand address.
-const FROM = process.env.EMAIL_FROM || "Level7 Clothing <onboarding@resend.dev>";
+const FROM = process.env.EMAIL_FROM || "HALFTONE <onboarding@resend.dev>";
 
 const resend = apiKey ? new Resend(apiKey) : null;
 

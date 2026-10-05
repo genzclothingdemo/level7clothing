@@ -892,8 +892,8 @@ export function tokensUsedIn(text: string): string[] {
  * will show, and that is most of what a preview is for.
  */
 export const SAMPLE_TOKENS: TokenBag = {
-  "store.name": "Level7 Clothing",
-  "store.email": "hello@level7clothing.com",
+  "store.name": "HALFTONE",
+  "store.email": "hello@halftone.store",
   "store.url": "https://clothingdemoshop.vercel.app",
   "customer.name": "Riya Sharma",
   "customer.firstName": "Riya",

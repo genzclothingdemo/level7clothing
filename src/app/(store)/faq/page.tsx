@@ -14,7 +14,7 @@ const FAQS = [
     a: "Most tees and hoodies come in S, M, L, XL and 2XL. Every product page has a size guide — check it before ordering since our fits run oversized.",
   },
   {
-    q: "Are Level7 tees and hoodies true to size?",
+    q: "Are the tees and hoodies true to size?",
     a: "Our pieces are designed with an intentional oversized, drop-shoulder fit. If you prefer a slimmer fit, we'd recommend sizing down by one size.",
   },
   {

@@ -537,6 +537,28 @@ use `dangerouslySetInnerHTML`.
 > address it knows will die, and harvested reels fall back to the linked
 > product's photo. Create a Vercel Blob store to get real posters.
 
+## Inventory — SKUs, per-size stock, an append-only ledger (2026-10-05)
+
+Every product ships **untracked** (`Product.trackInventory=false`), and an
+untracked product sells exactly as before — the legacy `Product.stock` counter.
+Nothing about the live store changed until the owner does a stocktake.
+
+- **`ProductVariant`** — one row per size, unique `sku` (`L7-PT-SAMURAI-M`,
+  generated once by `lib/sku.ts`, never regenerated), `onHand` / `reserved` /
+  `available` (stored, so the oversell guard is one compare-and-set). 110 rows.
+- **`StockMovement`** — the ledger, **`onDelete: Restrict`** so history cannot be
+  destroyed. Every change is a row; nothing edits or deletes one.
+- **`lib/inventory.ts` is the one writer.** reserve (placement) → sell (ship) →
+  release (cancel), plus RTO/return restock and four manual kinds (stock in /
+  damaged / personal use / recount). For a tracked product `Product.stock` is a
+  derived mirror it maintains. Pass **`INVENTORY_TX_OPTIONS`** to any multi-step
+  transaction — the 5 s Prisma default expired at 11.4 s to Mumbai.
+- Admin → **Inventory**: stock table, the stocktake, the four entries, the
+  ledger. `auditLedger()` proves the counters equal the sum of the ledger.
+
+Schema is already on the live DB (additive `db push`). The build stays
+`prisma generate && … && next build` — **never `db push`**.
+
 ## Chat (replaces the old one-way inbox)
 
 `ChatThread` / `ChatMessage`, polled — not WebSockets, this is serverless.
@@ -783,10 +805,14 @@ exists.
 Product images in mail must be **absolute**. `Order.items[].image` is stored as
 `/products/level7/…`, which is a broken image in every mail client.
 
-> **Most outbound mail ships `isActive: false` on purpose.** As of 2026-09-28,
-> 14 customer-facing email rules are off — including order placed, shipped and
-> delivered. That is a deliberate safe default, not a bug: turning them on sends
-> real mail to real customers. Settings → Alerts is the one screen that does it.
+> **Outbound mail is now live.** On 2026-10-05 the owner authorised it and 50 of
+> 54 rules are on — every customer order/return milestone by email, push for
+> shipped/confirmed/chat, admin alerts for new orders, failed payments, RTO and
+> chat. Only cart-abandoned and back-to-pending are off. Flipping a rule on
+> bumps its `updatedAt` (= `liveSince`), so the `occurredAt` guard stops it
+> firing retroactively for past orders. **Settings → Alerts is the only screen
+> that changes any of this** — rule creation was removed from Automation and
+> `/admin/automation/new` redirects there.
 
 ## Safe areas — go through a CSS variable, never `env()` directly
 
